@@ -1,1 +1,10 @@
 .amp/portals/*
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+staticfiles/
+*.sqlite3

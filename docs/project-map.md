@@ -1,6 +1,6 @@
 # FX Forecast Lab — Four-Quadrant Project Map
 
-**Status:** Planning complete; implementation has not started  
+**Status:** Planning complete; Foundation and Market Truth implemented
 **Prepared:** 2026-08-18  
 **Purpose:** Durable source of truth for the first implementation and future Amp threads
 
@@ -434,9 +434,9 @@ product design:
 
 These slices are dependency-aware, but each ends in something reviewable.
 
-1. **Foundation:** Django/PostgreSQL/worker skeleton, authentication, source
+1. **Foundation — complete:** Django/PostgreSQL/worker skeleton, authentication, source
    registry, canonical time/currency/instrument types, local Compose, tests.
-2. **Market truth:** OANDA daily/H4 bid/ask ingestion, manifests, quality gate,
+2. **Market truth — complete:** OANDA daily/H4 bid/ask ingestion, manifests, quality gate,
    New York alignment, deterministic technicals, basic charts.
 3. **Forecast contract:** target schemas, immutable event/evidence store,
    deterministic resolver, baseline forecasts, proper scoring fixtures.
@@ -556,7 +556,7 @@ must demonstrate:
 
 ---
 
-## 10. Copyable next implementation prompt
+## 10. Archived first-slice implementation prompt
 
 ```text
 Begin the first implementation slice described in docs/project-map.md.
@@ -585,6 +585,7 @@ explicit approval.
 
 ## 11. Definition of planning completion
 
-The quadrant walk is complete when this map is in the repository. Coding is a
-separate task. During implementation, discoveries update this map rather than
-being silently absorbed into code or lost in conversation history.
+The quadrant walk is complete and the first two implementation slices are now
+present in the repository. During implementation, discoveries update this map
+rather than being silently absorbed into code or lost in conversation history.
+The current next-agent prompt lives in `docs/handoff.md`.

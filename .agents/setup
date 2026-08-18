@@ -4,5 +4,26 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-printf '[setup] trade-recommender: no project dependencies are declared yet\n'
+if ! command -v psql >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-client
+fi
+
+sudo pg_ctlcluster "$(pg_lsclusters --no-header | awk 'NR == 1 { print $1 }')" main start 2>/dev/null || true
+
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='trade_recommender'" | grep -q 1; then
+  sudo -u postgres psql -c "CREATE ROLE trade_recommender LOGIN PASSWORD 'local-dev-only'"
+fi
+sudo -u postgres psql -c "ALTER ROLE trade_recommender CREATEDB" >/dev/null
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='trade_recommender'" | grep -q 1; then
+  sudo -u postgres createdb --owner=trade_recommender trade_recommender
+fi
+
+python3 -m venv .venv
+.venv/bin/python -m pip install --disable-pip-version-check --upgrade pip
+.venv/bin/python -m pip install --disable-pip-version-check --requirement requirements.txt
+.venv/bin/python -m pip install --disable-pip-version-check --requirement requirements-dev.txt
+.venv/bin/python manage.py migrate --noinput
+.venv/bin/python manage.py seed_demo
+
 printf '[setup] ready\n'

@@ -1,0 +1,8 @@
+services:
+  web:
+    command: >-
+      .venv/bin/python manage.py runserver 0.0.0.0:$PORT
+    health: /health/
+    portal:
+      title: FX Forecast Lab
+      description: Private first-slice dashboard using clearly labelled fixture data.

@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: trade_recommender
+      POSTGRES_USER: trade_recommender
+      POSTGRES_PASSWORD: local-dev-only
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trade_recommender"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build: .
+    command: sh -c "python manage.py migrate --noinput && python manage.py seed_demo && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2"
+    environment: &app-environment
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: local-compose-only-change-before-deployment
+      POSTGRES_HOST: db
+      POSTGRES_DB: trade_recommender
+      POSTGRES_USER: trade_recommender
+      POSTGRES_PASSWORD: local-dev-only
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: python manage.py run_worker
+    environment: *app-environment
+    depends_on:
+      db:
+        condition: service_healthy
+
+  scheduler:
+    build: .
+    command: python manage.py run_scheduler
+    environment: *app-environment
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

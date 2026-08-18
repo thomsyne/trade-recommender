@@ -4,4 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-printf '[resume] trade-recommender: no services require repair\n'
+if ! pg_isready --quiet; then
+  sudo pg_ctlcluster "$(pg_lsclusters --no-header | awk 'NR == 1 { print $1 }')" main start
+fi
+
+.venv/bin/python manage.py migrate --noinput
+.venv/bin/python manage.py seed_demo
+printf '[resume] trade-recommender ready\n'

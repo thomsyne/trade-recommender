@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ instrument }} · FX Forecast Lab{% endblock %}
+{% block content %}
+<header class="page-header market-header"><div><a class="back" href="{% url 'today' %}">← Today</a><p class="eyebrow">MARKET WORKSPACE</p><h1>{{ instrument }}</h1><p class="lede">{{ instrument.base_currency }} against {{ instrument.quote_currency }} · broker-standard orientation</p></div><div class="segmented"><a class="{% if granularity == 'H4' %}active{% endif %}" href="?granularity=H4">H4</a><a class="{% if granularity == 'D' %}active{% endif %}" href="?granularity=D">Daily</a></div></header>
+<nav class="workspace-tabs"><span class="active">Decision</span><span>Research <em>next slice</em></span><span>Timeline <em>next slice</em></span></nav>
+{% if fixture_mode %}<div class="fixture-banner compact"><strong>Development fixture</strong><span>The chart below is invented, deterministic test data.</span></div>{% endif %}
+<section class="decision-empty"><div><span class="lock-large">◇</span><p class="eyebrow">DECISION ENGINE LOCKED</p><h2>No recommendation has been issued.</h2><p>That is correct for this build. Market evidence must be stable before probabilistic claims are introduced.</p></div></section>
+<div class="workspace-grid">
+  <section class="chart-panel"><div class="panel-head"><div><p class="eyebrow">PRICE STRUCTURE</p><h2>{{ granularity }} midpoint candles</h2></div><span>{{ candles|length }} completed intervals</span></div><canvas id="market-chart" height="390" aria-label="{{ instrument }} fixture candlestick chart"></canvas></section>
+  <aside class="metrics-panel">
+    <p class="eyebrow">DETERMINISTIC LEVELS</p>
+    {% if snapshot %}
+    <dl class="metrics"><div><dt>As of</dt><dd>{{ snapshot.as_of|date:"M j, Y H:i" }} UTC</dd></div><div><dt>ATR · 14</dt><dd>{{ snapshot.atr_14|floatformat:6 }}</dd></div><div><dt>EWMA · 20</dt><dd>{{ snapshot.ewma_20|floatformat:6 }}</dd></div><div><dt>Prior high</dt><dd>{{ snapshot.prior_high|floatformat:6 }}</dd></div><div><dt>Prior low</dt><dd>{{ snapshot.prior_low|floatformat:6 }}</dd></div><div><dt>Pivot support</dt><dd>{{ snapshot.support|default:"—" }}</dd></div><div><dt>Pivot resistance</dt><dd>{{ snapshot.resistance|default:"—" }}</dd></div></dl>
+    <div class="method-note"><strong>Frozen method</strong><p>Midpoint-derived ATR and EWMA; five-candle local pivots. Bid/ask remains authoritative for future execution.</p></div>
+    {% else %}<p>No technical snapshot is available.</p>{% endif %}
+  </aside>
+</div>
+{{ chart|json_script:"chart-data" }}
+{% endblock %}
+{% block scripts %}<script>window.renderMarketChart?.("market-chart", JSON.parse(document.getElementById("chart-data").textContent));</script>{% endblock %}
