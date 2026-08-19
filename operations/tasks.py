@@ -6,12 +6,20 @@ from forecasts.services import resolve_due_forecasts
 from market.models import IngestionRun, Instrument, SourceRegistry
 from market.oanda import OandaClient
 from market.services import store_ingestion
+from research.models import MacroSeries, SourcePolicy
+from research.services import ingest_feed, ingest_macro
 
 
 def execute_task(task_name, parameters):
-    if task_name != "market.ingest_oanda":
-        raise ValueError(f"Unknown task: {task_name}")
-    return ingest_oanda(parameters)
+    if task_name == "market.ingest_oanda":
+        return ingest_oanda(parameters)
+    if task_name == "research.ingest_feed":
+        policy = SourcePolicy.objects.get(slug=parameters["source"])
+        return ingest_feed(policy, parameters["url"])
+    if task_name == "research.ingest_macro":
+        series = MacroSeries.objects.get(code=parameters["series"], enabled=True)
+        return ingest_macro(series)
+    raise ValueError(f"Unknown task: {task_name}")
 
 
 def ingest_oanda(parameters):

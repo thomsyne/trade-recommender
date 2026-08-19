@@ -4,6 +4,7 @@ from dashboard import views
 
 urlpatterns = [
     path("", views.today, name="today"),
+    path("research/", views.research, name="research"),
     path("markets/<str:code>/", views.market_detail, name="market-detail"),
     path("operations/", views.operations, name="operations"),
 ]

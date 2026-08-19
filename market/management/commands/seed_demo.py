@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
@@ -89,6 +90,7 @@ class Command(BaseCommand):
                 user.set_password(password)
                 user.save()
                 self.stdout.write("created development owner account")
+        call_command("seed_research", verbosity=options.get("verbosity", 1))
         self.stdout.write(self.style.SUCCESS("canonical market data ready"))
 
     def _seed_candles(self, source, instrument, granularity, end, initial, count):

@@ -2,7 +2,8 @@
 
 A private, single-user FX forecasting research instrument. Trustworthy market
 data now feeds immutable, prospectively scored forecast contracts before any
-LLM forecasting is permitted.
+LLM forecasting is permitted. Official macro research is preserved in a
+separate point-in-time evidence ledger.
 
 > Development fixtures are invented and visibly labelled. Nothing in this
 > repository is trading advice or a live-order system.
@@ -21,11 +22,15 @@ LLM forecasting is permitted.
 - locked mechanical EWMA baselines, explicit abstention, deterministic
   resolution, and multiclass Brier scoring;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
-- Today, Decision, Timeline, market workspace, and Operations interfaces;
+- bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
+  response-size protections;
+- immutable official release snapshots, policy-rate vintages, provenance,
+  deduplication, discrepancy tracking, and rights metadata;
+- Today, Decision, Timeline, market workspace, Research, and Operations interfaces;
 - deterministic fixture data so every screen works before credentials exist.
 
-News research, Anthropic forecasts, paper positions, paid providers, and AWS
-deployment are deliberately not implemented yet.
+Anthropic forecasts, article/full-text research, paper positions, paid
+providers, and AWS deployment are deliberately not implemented yet.
 See the [project map](docs/project-map.md) for those boundaries.
 
 ## Fresh orb setup
@@ -87,3 +92,4 @@ development topology, not the hardened AWS deployment.
 - [Current handoff](docs/handoff.md)
 - [OANDA provider contract](docs/providers/oanda.md)
 - [Forecast contract](docs/forecast-contract.md)
+- [Research ingestion contract](docs/research-ingestion.md)

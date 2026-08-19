@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Research · FX Forecast Lab{% endblock %}
+{% block content %}
+<header class="page-header research-header">
+  <div>
+    <p class="eyebrow">POINT-IN-TIME NOTEBOOK</p>
+    <h1>Research ledger</h1>
+    <p class="lede">Official releases and macro observations, preserved as they arrived. This evidence surface is read-only and cannot issue or alter a forecast.</p>
+  </div>
+  <div class="research-lock"><span>BOUNDARY</span><strong>Evidence only</strong><small>No forecast writes</small></div>
+</header>
+
+<div class="research-stats">
+  <div><span>Official sources</span><strong>{{ policies|length }}</strong></div>
+  <div><span>Raw snapshots</span><strong>{{ retrieval_count }}</strong></div>
+  <div><span>Conflicts</span><strong>{{ conflict_count }}</strong></div>
+  <div><span>Quarantined</span><strong>{{ quarantine_count }}</strong></div>
+</div>
+
+<section class="research-section">
+  <div class="section-heading research-heading"><div><p class="eyebrow">MACRO DESK</p><h2>Policy-rate record</h2></div><span class="quiet">Availability starts at first retrieval where release time is unavailable</span></div>
+  <div class="macro-strip">
+    {% for item in macro %}
+    <article>
+      <div class="macro-country">{{ item.series.source_policy.jurisdiction }} · {{ item.series.source_policy.currency }}</div>
+      <h3>{{ item.series.label }}</h3>
+      {% if item.observation %}
+      <strong class="macro-value">{{ item.observation.value|floatformat:2 }}<small>%</small></strong>
+      <p>Observed {{ item.observation.observation_period|date:"M j, Y" }}</p>
+      <span class="provenance">Known from {{ item.observation.available_at|date:"M j, H:i" }} UTC</span>
+      {% else %}
+      <strong class="macro-value empty-value">—</strong>
+      <p>Awaiting first collection</p>
+      <span class="provenance">Configured · not fabricated</span>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </div>
+  <div class="coverage-note"><strong>Deliberate gap</strong><span>CPI and employment series remain unconfigured until their current official identifiers, revisions, and publication-time semantics are verified. No stale or guessed series enter the ledger.</span></div>
+</section>
+
+<div class="research-layout">
+  <section class="research-section notebook">
+    <div class="section-heading research-heading"><div><p class="eyebrow">RELEASE WIRE</p><h2>Chronological notebook</h2></div><span class="quiet">Newest verified publication first</span></div>
+    <div class="notebook-list">
+      {% for entry in entries %}
+      <article class="notebook-entry">
+        <div class="entry-rail"><span></span></div>
+        <div class="entry-body">
+          <div class="entry-meta">
+            <span>{{ entry.representation.retrieval.source_policy.source.name }}</span>
+            {% if entry.document.published_at %}<time>{{ entry.document.published_at|date:"M j, Y · H:i" }} UTC</time>{% else %}<time>Publication time unavailable</time>{% endif %}
+          </div>
+          <h3><a href="{{ entry.document.canonical_url }}" rel="noopener noreferrer" target="_blank">{{ entry.document.title }}</a></h3>
+          {% if entry.representation.summary %}<p>{{ entry.representation.summary|truncatewords:52 }}</p>{% endif %}
+          <div class="entry-foot">
+            <span class="state {% if entry.document.quality == 'verified' %}healthy{% else %}warning{% endif %}">{{ entry.document.get_quality_display|upper }}</span>
+            <span>Fetched {{ entry.representation.retrieval.fetched_at|date:"M j, H:i" }} UTC</span>
+            <span>{{ entry.representation.retrieval.body_sha256|slice:":12" }}</span>
+          </div>
+        </div>
+      </article>
+      {% empty %}
+      <div class="research-empty"><strong>The notebook is ready.</strong><p>No invented sample stories are shown. The first scheduled official-feed retrieval will appear here.</p></div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <aside class="source-ledger">
+    <div class="section-heading research-heading"><div><p class="eyebrow">PROVENANCE</p><h2>Source ledger</h2></div></div>
+    {% for policy in policies %}
+    <article>
+      <div class="source-title"><strong>{{ policy.source.name }}</strong><span class="state {% if policy.fresh %}healthy{% else %}warning{% endif %}">{% if policy.fresh %}FRESH{% elif policy.latest_retrieval %}STALE{% else %}AWAITING DATA{% endif %}</span></div>
+      <p>{{ policy.jurisdiction }} · {{ policy.currency }} · {{ policy.retention_class }}</p>
+      <dl><div><dt>Latest snapshot</dt><dd>{% if policy.latest_retrieval %}{{ policy.latest_retrieval.fetched_at|date:"M j, H:i" }} UTC{% else %}Not collected{% endif %}</dd></div><div><dt>Full text</dt><dd>{% if policy.full_text_allowed %}Permitted{% else %}Not collected{% endif %}</dd></div><div><dt>Model input</dt><dd>{% if policy.source.llm_processing_allowed %}Approved{% else %}Not approved{% endif %}</dd></div></dl>
+      <a href="{{ policy.rights_url }}" rel="noopener noreferrer" target="_blank">Rights policy ↗</a>
+    </article>
+    {% endfor %}
+  </aside>
+</div>
+
+<section class="research-section provider-lab">
+  <div class="section-heading research-heading"><div><p class="eyebrow">PROVIDER LAB</p><h2>Economic-calendar comparison</h2></div><span class="quiet">A candidate is not an approved dependency</span></div>
+  <div class="table-scroll"><table><thead><tr><th>Provider</th><th>Status</th><th>Pricing</th><th>Release timestamps</th><th>Revisions</th><th>Retention rights</th><th>Reliability</th></tr></thead><tbody>{% for evaluation in provider_evaluations %}<tr><td data-label="Provider"><strong><a href="{{ evaluation.evidence_url }}" rel="noopener noreferrer" target="_blank">{{ evaluation.provider }} ↗</a></strong><small>{{ evaluation.next_check }}</small></td><td data-label="Status"><span class="state warning">{{ evaluation.get_status_display|upper }}</span></td><td data-label="Pricing">{{ evaluation.pricing_status }}</td><td data-label="Release timestamps">{{ evaluation.timestamp_semantics }}</td><td data-label="Revisions">{{ evaluation.revision_support }}</td><td data-label="Retention rights">{{ evaluation.retention_rights }}</td><td data-label="Reliability">{{ evaluation.reliability_result }}</td></tr>{% empty %}<tr><td colspan="7">No provider is under evaluation.</td></tr>{% endfor %}</tbody></table></div>
+</section>
+{% endblock %}

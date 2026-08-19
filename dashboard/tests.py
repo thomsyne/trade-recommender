@@ -1,5 +1,5 @@
 import re
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -9,6 +9,12 @@ from django.utils import timezone
 
 from forecasts.services import issue_all_baselines
 from operations.models import ScheduledJob
+from research.models import (
+    DocumentRepresentation,
+    RawRetrieval,
+    ResearchDocument,
+    SourcePolicy,
+)
 
 
 @override_settings(DEBUG=True, OANDA_TOKEN="")
@@ -57,7 +63,53 @@ class DashboardTests(TestCase):
         self.assertContains(pair, "IMMUTABLE TIMELINE", html=False)
         self.assertContains(pair, "chart-data")
         self.assertContains(operations, "Rights-aware registry")
-        self.assertContains(operations, "WAITING FOR TOKEN")
+        self.assertContains(operations, "WAITING FOR CREDENTIAL")
+
+    def test_research_surface_is_private_read_only_and_escapes_source_text(self):
+        self.assertRedirects(
+            self.client.get(reverse("research")), f"{reverse('login')}?next=/research/"
+        )
+        policy = SourcePolicy.objects.get(slug="bank-of-canada")
+        retrieval = RawRetrieval.objects.create(
+            source_policy=policy,
+            url="https://www.bankofcanada.ca/content_type/press-releases/feed/",
+            request_fingerprint="a" * 64,
+            fetched_at=datetime(2026, 8, 19, tzinfo=UTC),
+            http_status=200,
+            content_type="application/rss+xml",
+            byte_count=4,
+            body_sha256="b" * 64,
+            body=b"test",
+            retention_decision="official-public-record",
+        )
+        document = ResearchDocument.objects.create(
+            canonical_url="https://www.bankofcanada.ca/2026/08/test/",
+            canonical_hash="c" * 64,
+            title="<script>alert('source')</script>",
+            published_at=datetime(2026, 8, 18, tzinfo=UTC),
+            first_observed_at=datetime(2026, 8, 19, tzinfo=UTC),
+            quality=ResearchDocument.Quality.VERIFIED,
+        )
+        DocumentRepresentation.objects.create(
+            document=document,
+            retrieval=retrieval,
+            source_item_id="test",
+            dedup_key="d" * 64,
+            source_title=document.title,
+            source_published_at=document.published_at,
+            summary="<img src=x onerror=alert(1)>",
+        )
+
+        self.client.force_login(self.user)
+        response = self.client.get(reverse("research"))
+        content = response.content.decode()
+        self.assertContains(response, "Evidence only")
+        self.assertContains(response, "Deliberate gap")
+        self.assertContains(response, "Trading Economics")
+        self.assertContains(response, "A candidate is not an approved dependency")
+        self.assertNotIn("<script>alert", content)
+        self.assertNotIn("<img src=x", content)
+        self.assertIn("&lt;script&gt;", content)
 
     def test_health_checks_real_database_connection_without_authentication(self):
         response = self.client.get(reverse("health"))

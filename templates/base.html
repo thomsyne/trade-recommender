@@ -19,7 +19,9 @@
         {% empty %}
         <a class="nav-link subdued" href="{% url 'today' %}"><span>—</span>Markets load after setup</a>
         {% endfor %}
-        <a class="nav-link {% if request.resolver_match.url_name == 'operations' %}active{% endif %}" href="{% url 'operations' %}"><span>02</span>Operations</a>
+        <p class="nav-label">Laboratory</p>
+        <a class="nav-link {% if request.resolver_match.url_name == 'research' %}active{% endif %}" href="{% url 'research' %}"><span>02</span>Research</a>
+        <a class="nav-link {% if request.resolver_match.url_name == 'operations' %}active{% endif %}" href="{% url 'operations' %}"><span>03</span>Operations</a>
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot"></span> Local research environment

@@ -7,4 +7,4 @@ select = ["E", "F", "I", "UP"]
 ignore = ["E501"]
 
 [tool.coverage.run]
-source = ["market", "operations", "dashboard"]
+source = ["market", "forecasts", "research", "operations", "dashboard"]

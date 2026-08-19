@@ -11,7 +11,7 @@ check:
 	.venv/bin/ruff format --check .
 	.venv/bin/python manage.py check
 	.venv/bin/python manage.py makemigrations --check --dry-run
-	.venv/bin/python -m compileall -q config dashboard forecasts market operations
+	.venv/bin/python -m compileall -q config dashboard forecasts market operations research
 
 test:
 	.venv/bin/python manage.py test

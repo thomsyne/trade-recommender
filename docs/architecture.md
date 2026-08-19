@@ -1,10 +1,10 @@
-# First-slice architecture
+# System architecture
 
 ```diagram
-┌──────────────┐      ┌────────────────────┐
-│ Private user │─────▶│ Django dashboard   │
-└──────────────┘      │ Today/Pair/Ops     │
-                      └─────────┬──────────┘
+┌──────────────┐      ┌────────────────────────┐
+│ Private user │─────▶│ Django dashboard       │
+└──────────────┘      │ Today/Pair/Research/Ops│
+                      └───────────┬────────────┘
                                 │
                     ┌───────────▼───────────┐
                     │ PostgreSQL            │
@@ -16,10 +16,10 @@
                   │ occurrences│ │ task claim │
                   └────────────┘ └─────┬──────┘
                                       │
-                                ┌─────▼──────┐
-                                │ OANDA v20 │
-                                │ bid + ask │
-                                └────────────┘
+                         ┌────────────▼────────────┐
+                         │ bounded provider edges │
+                         │ OANDA + official macro │
+                         └─────────────────────────┘
 ```
 
 ## Ownership boundaries
@@ -33,6 +33,11 @@
 - `market.technicals` is pure deterministic calculation code.
 - `operations` owns durable occurrence generation, claims, retries, and task
   dispatch. Task implementations call the owning domain service.
+- `research.fetch` owns the HTTPS allowlist, DNS/redirect/size/content-type
+  safety boundary. It is not exposed as a generic fetch endpoint.
+- `research.services` owns immutable raw research, normalization, vintages,
+  deduplication, discrepancies, and audit lineage. It has no forecast write
+  authority.
 - `dashboard` reads domain state. It cannot create evidence or forecasts.
 
 ## Invariants
@@ -46,6 +51,11 @@
 6. Midpoints are display/feature values, never future execution prices.
 7. Fixture sources are quarantined, visibly labelled, and never forecasts.
 8. A scheduled occurrence has one durable idempotency key and one atomic claim.
+9. Research payloads normalize only after a fail-closed parse; rejected payloads
+   remain quarantined raw evidence.
+10. A changed macro value appends a vintage and discrepancy; it never rewrites
+    an earlier observation.
+11. Research cannot issue, mutate, resolve, or score a forecast.
 
 ## Deliberate first-slice choices
 
@@ -56,10 +66,9 @@
   orbs; Compose still records the web/worker/scheduler/database topology.
 - The development owner and fixtures only seed when `DEBUG` is true.
 
-## Forecast seam — implemented
+## Forecast and research seams — implemented
 
 Versioned immutable forecast/evidence contracts, mechanical baselines, and
-proper scoring fixtures now sit above market truth. See
-`docs/forecast-contract.md`. The next seam is rights-aware point-in-time
-research ingestion; it may create evidence records but cannot issue forecasts
-or alter contracts and scoring.
+proper scoring fixtures now sit above market truth. Rights-aware, point-in-time
+official research sits beside it as a separate evidence ledger. See
+`docs/forecast-contract.md` and `docs/research-ingestion.md`.

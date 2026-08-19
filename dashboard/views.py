@@ -1,7 +1,11 @@
+from datetime import timedelta
+
 from django.contrib.auth.decorators import login_required
 from django.db import connection
+from django.db.models import F
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
+from django.utils import timezone
 
 from forecasts.models import Forecast
 from market.models import (
@@ -13,6 +17,14 @@ from market.models import (
     TechnicalSnapshot,
 )
 from operations.models import JobOccurrence, ScheduledJob
+from research.models import (
+    MacroSeries,
+    ProviderEvaluation,
+    RawRetrieval,
+    ResearchDiscrepancy,
+    ResearchDocument,
+    SourcePolicy,
+)
 
 
 def health(request):
@@ -118,6 +130,41 @@ def market_detail(request, code):
 
 
 @login_required
+def research(request):
+    documents = ResearchDocument.objects.order_by(
+        F("published_at").desc(nulls_last=True), "-first_observed_at"
+    ).prefetch_related("representations__retrieval__source_policy__source")[:30]
+    entries = []
+    for document in documents:
+        representation = document.representations.first()
+        if representation:
+            entries.append({"document": document, "representation": representation})
+    macro = []
+    for series in MacroSeries.objects.filter(enabled=True).select_related("source_policy__source"):
+        macro.append({"series": series, "observation": series.observations.first()})
+    policies = list(SourcePolicy.objects.select_related("source"))
+    for policy in policies:
+        policy.latest_retrieval = RawRetrieval.objects.filter(source_policy=policy).first()
+        policy.fresh = bool(
+            policy.latest_retrieval
+            and timezone.now() - policy.latest_retrieval.fetched_at <= timedelta(hours=36)
+        )
+    return render(
+        request,
+        "dashboard/research.html",
+        {
+            "entries": entries,
+            "macro": macro,
+            "policies": policies,
+            "retrieval_count": RawRetrieval.objects.count(),
+            "conflict_count": ResearchDiscrepancy.objects.filter(kind="conflict").count(),
+            "quarantine_count": ResearchDocument.objects.filter(quality="quarantined").count(),
+            "provider_evaluations": ProviderEvaluation.objects.all(),
+        },
+    )
+
+
+@login_required
 def operations(request):
     return render(
         request,
@@ -128,5 +175,8 @@ def operations(request):
             "runs": IngestionRun.objects.select_related("instrument", "source")[:20],
             "events": AuditEvent.objects.all()[:20],
             "sources": SourceRegistry.objects.all(),
+            "research_retrievals": RawRetrieval.objects.select_related("source_policy__source")[
+                :20
+            ],
         },
     )
