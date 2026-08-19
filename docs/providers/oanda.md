@@ -17,10 +17,16 @@ series remain separate; one is never reconstructed from the other.
 
 ## Credentials
 
-Use an OANDA practice token through the environment or future AWS SSM
-integration. The token is intentionally absent from fixtures, manifests,
-database rows, logs, and exceptions. A missing token disables schedules and
-causes direct ingestion to fail explicitly.
+Use `OANDA_API_KEY_TEST` for an OANDA practice token through the environment or
+future AWS SSM integration; `OANDA_TOKEN` is also accepted. The token is
+intentionally absent from fixtures, manifests, database rows, logs, and
+exceptions. A missing token disables schedules and causes direct ingestion to
+fail explicitly.
+
+Set `OANDA_ENVIRONMENT` to the environment that issued the token (`practice` by
+default, or `live`). Prefer a practice token: although this application only
+calls the read-only candle endpoint, a live personal access token may grant
+broader account permissions outside this application.
 
 ## Stored provenance
 

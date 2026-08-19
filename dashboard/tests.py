@@ -9,7 +9,7 @@ from django.utils import timezone
 from operations.models import ScheduledJob
 
 
-@override_settings(DEBUG=True)
+@override_settings(DEBUG=True, OANDA_TOKEN="")
 class DashboardTests(TestCase):
     @classmethod
     def setUpTestData(cls):

@@ -87,4 +87,4 @@ LOGOUT_REDIRECT_URL = "login"
 
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "")
-OANDA_TOKEN = os.getenv("OANDA_TOKEN", "")
+OANDA_TOKEN = os.getenv("OANDA_TOKEN") or os.getenv("OANDA_API_KEY_TEST", "")

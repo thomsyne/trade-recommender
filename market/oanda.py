@@ -30,9 +30,14 @@ class OandaClient:
     def __init__(self, token, environment="practice", transport=None):
         if not token:
             raise ValueError("OANDA_TOKEN is required")
-        host = "api-fxpractice.oanda.com" if environment == "practice" else "api-fxtrade.oanda.com"
+        hosts = {
+            "practice": "api-fxpractice.oanda.com",
+            "live": "api-fxtrade.oanda.com",
+        }
+        if environment not in hosts:
+            raise ValueError("OANDA_ENVIRONMENT must be 'practice' or 'live'")
         self.client = httpx.Client(
-            base_url=f"https://{host}/v3",
+            base_url=f"https://{hosts[environment]}/v3",
             headers={"Authorization": f"Bearer {token}"},
             timeout=httpx.Timeout(30),
             transport=transport,
@@ -71,7 +76,12 @@ class OandaClient:
             response = self.client.get(f"/instruments/{instrument}/candles", params=params)
             requests.append({"url": str(response.request.url), "status": response.status_code})
             if response.status_code != 200:
-                raise OandaError(f"OANDA returned HTTP {response.status_code}")
+                try:
+                    message = response.json().get("errorMessage")
+                except (json.JSONDecodeError, TypeError):
+                    message = None
+                detail = f": {message}" if message else ""
+                raise OandaError(f"OANDA returned HTTP {response.status_code}{detail}")
             candles.extend(
                 parsed
                 for parsed in (_parse_candle(item) for item in response.json().get("candles", []))

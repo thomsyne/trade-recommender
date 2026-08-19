@@ -3,10 +3,33 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from django.test import SimpleTestCase
 
-from market.oanda import OandaClient
+from market.oanda import OandaClient, OandaError
 
 
 class OandaClientTests(SimpleTestCase):
+    def test_rejects_unknown_environment_instead_of_falling_through_to_live(self):
+        with self.assertRaisesMessage(ValueError, "OANDA_ENVIRONMENT must be 'practice' or 'live'"):
+            OandaClient("test-token", environment="practise")
+
+    def test_api_error_includes_safe_oanda_message(self):
+        def handler(request):
+            return httpx.Response(
+                401,
+                json={"errorMessage": "Insufficient authorization to perform request."},
+            )
+
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        with self.assertRaisesMessage(
+            OandaError,
+            "OANDA returned HTTP 401: Insufficient authorization to perform request.",
+        ):
+            client.fetch_candles(
+                "USD_CAD",
+                "H4",
+                datetime(2026, 1, 5, tzinfo=UTC),
+                datetime(2026, 1, 6, tzinfo=UTC),
+            )
+
     def test_requests_unsmoothed_bid_ask_complete_candles_with_new_york_alignment(self):
         def handler(request):
             self.assertEqual(request.url.params["price"], "BA")

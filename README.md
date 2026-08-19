@@ -48,16 +48,17 @@ Create a free OANDA practice account and expose these secrets to the process;
 never commit or paste them into chat:
 
 ```bash
-export OANDA_TOKEN='...'
+export OANDA_API_KEY_TEST='...'
 export OANDA_ACCOUNT_ID='...'
 export OANDA_ENVIRONMENT='practice'
 ./.agents/resume
 .venv/bin/python manage.py ingest_oanda USD_CAD H4 --days 14
 ```
 
-The candle endpoint does not need the account ID today, but retaining the
-separate setting avoids conflating credentials when account reconciliation is
-added. Review [OANDA provider constraints](docs/providers/oanda.md) first.
+`OANDA_TOKEN` remains a supported alias. The candle endpoint does not need the
+account ID today, but retaining the separate setting avoids conflating
+credentials when account reconciliation is added. Review
+[OANDA provider constraints](docs/providers/oanda.md) first.
 
 ## Commands
 
