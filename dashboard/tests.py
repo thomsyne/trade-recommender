@@ -59,6 +59,7 @@ class DashboardTests(TestCase):
         self.assertEqual(job.next_run_at, expected)
 
     @override_settings(
+        PUBLIC_URL="https://portal.example",
         CSRF_TRUSTED_ORIGINS=["https://portal.example"],
         SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
     )
@@ -75,3 +76,45 @@ class DashboardTests(TestCase):
         )
 
         self.assertRedirects(response, reverse("today"))
+
+    @override_settings(
+        PUBLIC_URL="https://portal.example",
+        CSRF_TRUSTED_ORIGINS=["https://portal.example"],
+        SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+    )
+    def test_owner_can_log_in_from_matching_opaque_portal_context(self):
+        csrf_client = self.client_class(enforce_csrf_checks=True)
+        login = csrf_client.get(reverse("login"), secure=True, HTTP_HOST="portal.example")
+        token = login.cookies["csrftoken"].value
+
+        response = csrf_client.post(
+            reverse("login"),
+            {"username": "owner", "password": "orb-demo-only", "csrfmiddlewaretoken": token},
+            HTTP_HOST="portal.example",
+            HTTP_ORIGIN="null",
+            HTTP_REFERER="https://portal.example/login/?next=/",
+            HTTP_X_FORWARDED_PROTO="https",
+        )
+
+        self.assertRedirects(response, reverse("today"))
+
+    @override_settings(
+        PUBLIC_URL="https://portal.example",
+        CSRF_TRUSTED_ORIGINS=["https://portal.example"],
+        SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+    )
+    def test_opaque_origin_with_mismatched_referrer_remains_forbidden(self):
+        csrf_client = self.client_class(enforce_csrf_checks=True)
+        login = csrf_client.get(reverse("login"), secure=True, HTTP_HOST="portal.example")
+        token = login.cookies["csrftoken"].value
+
+        response = csrf_client.post(
+            reverse("login"),
+            {"username": "owner", "password": "orb-demo-only", "csrfmiddlewaretoken": token},
+            HTTP_HOST="portal.example",
+            HTTP_ORIGIN="null",
+            HTTP_REFERER="https://attacker.example/",
+            HTTP_X_FORWARDED_PROTO="https",
+        )
+
+        self.assertEqual(response.status_code, 403)
