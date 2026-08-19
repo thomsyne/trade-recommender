@@ -50,6 +50,7 @@ TEMPLATES = [
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
                 "dashboard.context_processors.market_navigation",
+                "dashboard.context_processors.static_asset_version",
             ],
         },
     }

@@ -1,3 +1,4 @@
+import re
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
@@ -34,6 +35,17 @@ class DashboardTests(TestCase):
         self.assertContains(response, "Mechanical EWMA control", count=4)
         for pair in ("USD/CAD", "GBP/USD", "EUR/GBP", "EUR/USD"):
             self.assertContains(response, pair)
+
+    def test_static_assets_have_content_based_cache_versions(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse("today"))
+        content = response.content.decode()
+
+        css_version = re.search(r"app\.css\?v=([a-f0-9]{12})", content)
+        js_version = re.search(r"app\.js\?v=([a-f0-9]{12})", content)
+        self.assertIsNotNone(css_version)
+        self.assertIsNotNone(js_version)
+        self.assertEqual(css_version.group(1), js_version.group(1))
 
     def test_pair_workspace_and_operations_are_rendered(self):
         self.client.force_login(self.user)
