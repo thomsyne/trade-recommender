@@ -108,20 +108,49 @@ class DocumentRepresentation(ImmutableRecord):
 
 
 class MacroSeries(models.Model):
+    class Indicator(models.TextChoices):
+        POLICY_RATE = "policy_rate", "Policy rate"
+        CPI = "cpi", "Inflation"
+        UNEMPLOYMENT = "unemployment", "Unemployment"
+        GDP = "gdp", "GDP growth"
+        HOUSING = "housing", "Housing"
+
     class Parser(models.TextChoices):
         BOC_VALET = "boc_valet", "Bank of Canada Valet JSON"
         FRED_CSV = "fred_csv", "FRED CSV"
         ECB_CSV = "ecb_csv", "ECB Data API CSV"
         BOE_CSV = "boe_csv", "Bank of England IADB CSV"
+        STATCAN_WDS = "statcan_wds", "Statistics Canada WDS JSON"
+        BLS_JSON = "bls_json", "US BLS JSON"
+        ONS_CSV = "ons_csv", "UK ONS generator CSV"
+        EUROSTAT_JSON = "eurostat_json", "Eurostat JSON-stat"
+        LAND_REGISTRY_CSV = "land_registry_csv", "UK HPI linked-data CSV"
+        STATCAN_ZIP = "statcan_zip", "Statistics Canada bounded table ZIP"
+
+    class RequestMethod(models.TextChoices):
+        GET = "GET", "GET"
+        POST = "POST", "POST"
+
+    class Transformation(models.TextChoices):
+        NONE = "none", "None"
+        YEAR_OVER_YEAR = "year_over_year", "Year-over-year percent change"
 
     source_policy = models.ForeignKey(SourcePolicy, on_delete=models.PROTECT)
     code = models.CharField(max_length=80, unique=True)
     provider_series_id = models.CharField(max_length=160)
     label = models.CharField(max_length=240)
+    indicator = models.CharField(max_length=20, choices=Indicator, default=Indicator.POLICY_RATE)
     unit = models.CharField(max_length=40)
     frequency = models.CharField(max_length=40)
     parser = models.CharField(max_length=20, choices=Parser)
     url = models.URLField(max_length=1000)
+    request_method = models.CharField(
+        max_length=4, choices=RequestMethod, default=RequestMethod.GET
+    )
+    request_payload = models.JSONField(default=dict, blank=True)
+    transformation = models.CharField(
+        max_length=20, choices=Transformation, default=Transformation.NONE
+    )
     enabled = models.BooleanField(default=True)
     point_in_time_note = models.TextField()
 
@@ -145,6 +174,7 @@ class MacroObservation(ImmutableRecord):
     availability_precision = models.CharField(
         max_length=12, choices=AvailabilityPrecision, default=AvailabilityPrecision.RETRIEVAL
     )
+    provider_status = models.CharField(max_length=80, blank=True)
 
     class Meta:
         ordering = ("-observation_period", "-revision_sequence")
@@ -203,3 +233,27 @@ class ProviderEvaluation(models.Model):
             )
         ]
         ordering = ("category", "provider")
+
+
+class EconomicEvent(ImmutableRecord):
+    retrieval = models.ForeignKey(RawRetrieval, on_delete=models.PROTECT)
+    provider_event_key = models.CharField(max_length=64)
+    event_at = models.DateTimeField()
+    country = models.CharField(max_length=2)
+    event_type = models.CharField(max_length=240)
+    comparison = models.CharField(max_length=12, blank=True)
+    period = models.CharField(max_length=40, blank=True)
+    actual = models.DecimalField(max_digits=24, decimal_places=8, null=True)
+    estimate = models.DecimalField(max_digits=24, decimal_places=8, null=True)
+    previous = models.DecimalField(max_digits=24, decimal_places=8, null=True)
+    payload_fingerprint = models.CharField(max_length=64)
+    first_observed_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ("-event_at", "country", "event_type")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("provider_event_key", "payload_fingerprint"),
+                name="unique_economic_event_vintage",
+            )
+        ]

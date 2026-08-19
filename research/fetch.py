@@ -3,7 +3,7 @@ import ipaddress
 import socket
 import zlib
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 from django.utils import timezone
@@ -25,6 +25,7 @@ class FetchResult:
     body: bytes
     etag: str
     last_modified: str
+    request_fingerprint: str
 
     @property
     def body_sha256(self):
@@ -58,9 +59,22 @@ def validate_url(url, policy, resolver=resolve_host):
     return parsed
 
 
-def fetch(policy, url, *, transport=None, resolver=resolve_host, now=None):
+def fetch(
+    policy,
+    url,
+    *,
+    method="GET",
+    json_body=None,
+    sensitive_query_keys=(),
+    transport=None,
+    resolver=resolve_host,
+    now=None,
+):
     if policy.state != policy.State.ENABLED:
         raise FetchRejected(f"source policy is {policy.state}")
+    method = method.upper()
+    if method not in {"GET", "POST"}:
+        raise FetchRejected("only GET and fixed-provider POST requests are allowed")
     current = url
     with httpx.Client(
         transport=transport,
@@ -71,7 +85,7 @@ def fetch(policy, url, *, transport=None, resolver=resolve_host, now=None):
     ) as client:
         for redirect_count in range(4):
             validate_url(current, policy, resolver)
-            with client.stream("GET", current) as response:
+            with client.stream(method, current, json=json_body) as response:
                 _validate_connected_peer(response)
                 if response.status_code in REDIRECT_STATUSES:
                     if redirect_count == 3:
@@ -108,15 +122,39 @@ def fetch(policy, url, *, transport=None, resolver=resolve_host, now=None):
                     policy.max_response_bytes,
                 )
                 return FetchResult(
-                    url=str(response.url),
+                    url=_redact_url(str(response.url), sensitive_query_keys),
                     fetched_at=now or timezone.now(),
                     status_code=response.status_code,
                     content_type=content_type,
                     body=body,
                     etag=response.headers.get("etag", "")[:500],
                     last_modified=response.headers.get("last-modified", "")[:200],
+                    request_fingerprint=_request_fingerprint(
+                        method, _redact_url(str(response.url), sensitive_query_keys), json_body
+                    ),
                 )
     raise FetchRejected("source could not be retrieved")
+
+
+def _redact_url(url, sensitive_query_keys):
+    sensitive = {value.lower() for value in sensitive_query_keys}
+    if not sensitive:
+        return url
+    parsed = urlsplit(url)
+    query = [
+        (key, "[REDACTED]" if key.lower() in sensitive else value)
+        for key, value in parse_qsl(parsed.query)
+    ]
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
+
+
+def _request_fingerprint(method, url, json_body):
+    import json
+
+    payload = json.dumps(json_body, sort_keys=True, separators=(",", ":")) if json_body else ""
+    return hashlib.sha256(f"{method.upper()}\n{url}\n{payload}".encode()).hexdigest()
 
 
 def _decode_bounded(chunks, encoding, limit):

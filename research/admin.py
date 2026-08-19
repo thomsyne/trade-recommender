@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from research.models import (
     DocumentRepresentation,
+    EconomicEvent,
     MacroObservation,
     MacroSeries,
     ProviderEvaluation,
@@ -19,3 +20,4 @@ admin.site.register(MacroSeries)
 admin.site.register(MacroObservation)
 admin.site.register(ResearchDiscrepancy)
 admin.site.register(ProviderEvaluation)
+admin.site.register(EconomicEvent)

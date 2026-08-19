@@ -810,6 +810,75 @@ td small {
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
+.macro-coverage {
+  display: grid;
+  gap: 12px;
+}
+.coverage-region {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.coverage-region > header {
+  padding: 20px;
+  background: #edf1eb;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.coverage-region > header span {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+}
+.coverage-region > header strong {
+  margin-top: 5px;
+  font-family: "Manrope", sans-serif;
+}
+.coverage-indicators {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.coverage-indicators > div {
+  min-width: 0;
+  padding: 17px;
+  border-left: 1px solid var(--line);
+}
+.coverage-indicators span,
+.coverage-indicators time {
+  display: block;
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.coverage-indicators strong {
+  display: block;
+  margin-top: 8px;
+  font-family: "Manrope", sans-serif;
+  font-size: 22px;
+}
+.coverage-indicators strong small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.coverage-indicators p {
+  min-height: 34px;
+  margin: 5px 0;
+  color: #59665f;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.coverage-indicators time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
+}
 .research-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.65fr) minmax(310px, 0.75fr);
@@ -946,6 +1015,51 @@ td small {
 .provider-lab {
   margin-top: 15px;
 }
+.calendar-health {
+  padding: 8px 11px;
+  border: 1px solid #d7ad70;
+  background: var(--amber-bg);
+  color: #85500f;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.calendar-health.connected {
+  border-color: #8cbea0;
+  background: #dff0e5;
+  color: #17623d;
+}
+.calendar-disconnected {
+  padding: 22px;
+  border: 1px solid #dec69d;
+  background: #fff8ec;
+}
+.calendar-disconnected p {
+  margin: 6px 0 0;
+  color: #746650;
+  font-size: 13px;
+}
+.calendar-events {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+.calendar-events article {
+  display: grid;
+  gap: 5px;
+  padding: 16px;
+  background: var(--panel);
+  font-size: 11px;
+}
+.calendar-events time,
+.calendar-events span {
+  color: var(--muted);
+}
+.provider-comparison {
+  margin-top: 35px;
+}
 .provider-lab table {
   min-width: 980px;
   background: rgba(255, 254, 250, 0.6);
@@ -1014,6 +1128,15 @@ td small {
   }
   .macro-strip article:nth-child(-n + 2) {
     border-bottom: 1px solid var(--line);
+  }
+  .coverage-region {
+    grid-template-columns: 120px minmax(0, 1fr);
+  }
+  .coverage-indicators {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .coverage-indicators > div:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
   }
   .research-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -1088,6 +1211,21 @@ td small {
   .coverage-note {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+  .coverage-region {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .coverage-region > header {
+    padding: 14px 17px;
+  }
+  .coverage-indicators > div:nth-child(odd) {
+    border-left: 0;
+  }
+  .coverage-indicators p {
+    min-height: 44px;
+  }
+  .calendar-events {
+    grid-template-columns: minmax(0, 1fr);
   }
   .entry-meta {
     align-items: flex-start;

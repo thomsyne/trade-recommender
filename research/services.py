@@ -1,4 +1,7 @@
 import hashlib
+import json
+from datetime import UTC, datetime, timedelta
+from urllib.parse import urlencode
 
 from django.db import transaction
 
@@ -6,12 +9,13 @@ from market.models import AuditEvent
 from research.fetch import fetch
 from research.models import (
     DocumentRepresentation,
+    EconomicEvent,
     MacroObservation,
     RawRetrieval,
     ResearchDiscrepancy,
     ResearchDocument,
 )
-from research.parsers import ParseRejected, parse_feed, parse_macro
+from research.parsers import ParseRejected, parse_eodhd_events, parse_feed, parse_macro
 
 
 def ingest_feed(policy, url, *, transport=None, resolver=None, now=None):
@@ -103,7 +107,20 @@ def ingest_feed(policy, url, *, transport=None, resolver=None, now=None):
 
 
 def ingest_macro(series, *, transport=None, resolver=None, now=None):
-    options = {"transport": transport, "now": now}
+    payload = series.request_payload or None
+    if series.parser == series.Parser.BLS_JSON:
+        year = (now or datetime.now(UTC)).year
+        payload = {
+            "seriesid": [series.provider_series_id],
+            "startyear": str(year - 2),
+            "endyear": str(year),
+        }
+    options = {
+        "transport": transport,
+        "now": now,
+        "method": series.request_method,
+        "json_body": payload,
+    }
     if resolver is not None:
         options["resolver"] = resolver
     result = fetch(series.source_policy, series.url, **options)
@@ -136,10 +153,15 @@ def ingest_macro(series, *, transport=None, resolver=None, now=None):
                 observation_period=item.period,
                 value=item.value,
                 normalized_value=item.normalized_value,
-                available_at=result.fetched_at,
+                available_at=item.available_at or result.fetched_at,
                 vintage_at=result.fetched_at,
                 revision_sequence=(previous.revision_sequence + 1) if previous else 0,
-                availability_precision=MacroObservation.AvailabilityPrecision.RETRIEVAL,
+                availability_precision=(
+                    MacroObservation.AvailabilityPrecision.PROVIDER
+                    if item.available_at
+                    else MacroObservation.AvailabilityPrecision.RETRIEVAL
+                ),
+                provider_status=item.provider_status,
             )
             created += 1
             if previous:
@@ -157,11 +179,81 @@ def ingest_macro(series, *, transport=None, resolver=None, now=None):
     return retrieval
 
 
+def ingest_eodhd_calendar(policy, api_token, *, transport=None, resolver=None, now=None):
+    observed_at = now or datetime.now(UTC)
+    query = urlencode(
+        {
+            "api_token": api_token,
+            "fmt": "json",
+            "from": (observed_at.date() - timedelta(days=2)).isoformat(),
+            "to": (observed_at.date() + timedelta(days=7)).isoformat(),
+            "limit": 1000,
+            "offset": 0,
+        }
+    )
+    options = {
+        "transport": transport,
+        "now": now,
+        "sensitive_query_keys": ("api_token",),
+    }
+    if resolver is not None:
+        options["resolver"] = resolver
+    result = fetch(policy, f"https://eodhd.com/api/economic-events?{query}", **options)
+    try:
+        parsed_values = parse_eodhd_events(result.body)
+        if len(parsed_values) >= 1000:
+            raise ParseRejected("Economic calendar reached its pagination boundary")
+        values = [item for item in parsed_values if item.country in {"CA", "US", "GB", "EU"}]
+    except (ParseRejected, ValueError, KeyError, TypeError):
+        with transaction.atomic():
+            retrieval = _store_raw(
+                policy,
+                result,
+                quality=RawRetrieval.Quality.QUARANTINED,
+                quality_reason="Economic calendar parsing failed closed",
+            )
+            _audit("research.calendar_quarantined", retrieval, {})
+        raise
+    with transaction.atomic():
+        retrieval = _store_raw(policy, result)
+        created = 0
+        for item in values:
+            identity = _digest(
+                f"{item.country}|{item.event_type}|{item.event_at.isoformat()}|{item.period}"
+            )
+            payload = {
+                "actual": _decimal_text(item.actual),
+                "estimate": _decimal_text(item.estimate),
+                "previous": _decimal_text(item.previous),
+                "comparison": item.comparison,
+            }
+            fingerprint = _digest(json.dumps(payload, sort_keys=True))
+            _, was_created = EconomicEvent.objects.get_or_create(
+                provider_event_key=identity,
+                payload_fingerprint=fingerprint,
+                defaults={
+                    "retrieval": retrieval,
+                    "event_at": item.event_at,
+                    "country": item.country,
+                    "event_type": item.event_type,
+                    "comparison": item.comparison,
+                    "period": item.period,
+                    "actual": item.actual,
+                    "estimate": item.estimate,
+                    "previous": item.previous,
+                    "first_observed_at": result.fetched_at,
+                },
+            )
+            created += int(was_created)
+        _audit("research.calendar_ingested", retrieval, {"events": len(values), "created": created})
+    return retrieval
+
+
 def _store_raw(policy, result, *, quality=RawRetrieval.Quality.ACCEPTED, quality_reason=""):
     return RawRetrieval.objects.create(
         source_policy=policy,
         url=result.url,
-        request_fingerprint=_digest(result.url),
+        request_fingerprint=result.request_fingerprint,
         fetched_at=result.fetched_at,
         http_status=result.status_code,
         content_type=result.content_type,
@@ -205,3 +297,7 @@ def _digest(value):
 
 def _iso(value):
     return value.isoformat() if value else None
+
+
+def _decimal_text(value):
+    return format(value.normalize(), "f") if value is not None else None

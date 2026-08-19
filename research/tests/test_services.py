@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import httpx
 from django.core.exceptions import ValidationError
@@ -7,6 +8,7 @@ from django.test import TestCase
 from forecasts.models import Forecast
 from research.models import (
     DocumentRepresentation,
+    EconomicEvent,
     MacroObservation,
     MacroSeries,
     RawRetrieval,
@@ -14,7 +16,7 @@ from research.models import (
     ResearchDocument,
 )
 from research.parsers import ParseRejected, parse_feed
-from research.services import ingest_feed, ingest_macro
+from research.services import ingest_eodhd_calendar, ingest_feed, ingest_macro
 from research.tests.factories import source_policy
 
 PUBLIC_RESOLVER = lambda _host: {"93.184.216.34"}  # noqa: E731
@@ -168,3 +170,20 @@ class ResearchServiceTests(TestCase):
         retrieval = RawRetrieval.objects.get()
         self.assertEqual(retrieval.quality, RawRetrieval.Quality.QUARANTINED)
         self.assertEqual(ResearchDocument.objects.count(), 0)
+
+    def test_calendar_ingestion_redacts_token_and_does_not_issue_forecasts(self):
+        policy = source_policy(name="EODHD", slug="eodhd-calendar")
+        policy.allowed_hosts = ["eodhd.com"]
+        policy.save()
+        body = b"""[{"type":"GDP Growth Rate","comparison":"qoq","period":"Q2","country":"CA","date":"2026-08-20 12:30:00","actual":1.2,"previous":0.8,"estimate":1.0}]"""
+        before = Forecast.objects.count()
+        retrieval = ingest_eodhd_calendar(
+            policy,
+            "private-token",
+            transport=response_transport(body, "application/rss+xml"),
+            resolver=PUBLIC_RESOLVER,
+            now=self.now,
+        )
+        self.assertNotIn("private-token", retrieval.url)
+        self.assertEqual(EconomicEvent.objects.get().actual, Decimal("1.2"))
+        self.assertEqual(Forecast.objects.count(), before)

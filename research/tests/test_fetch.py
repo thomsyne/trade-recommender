@@ -96,6 +96,30 @@ class SafeFetchTests(TestCase):
         self.assertEqual(result.body, b"<rss />")
         self.assertEqual(result.content_type, "application/rss+xml")
 
+    def test_post_body_is_sent_and_sensitive_query_is_not_persisted(self):
+        seen = {}
+
+        def handler(request):
+            seen["method"] = request.method
+            seen["body"] = request.content
+            return httpx.Response(
+                200, headers={"content-type": "application/rss+xml"}, content=b"[]"
+            )
+
+        result = fetch(
+            self.policy,
+            "https://official.example/feed?api_token=secret",
+            method="POST",
+            json_body={"vectorId": 123},
+            sensitive_query_keys=("api_token",),
+            transport=httpx.MockTransport(handler),
+            resolver=PUBLIC_RESOLVER,
+        )
+        self.assertEqual(seen["method"], "POST")
+        self.assertIn(b'"vectorId":123', seen["body"])
+        self.assertNotIn("secret", result.url)
+        self.assertNotIn("secret", result.request_fingerprint)
+
     def test_rejects_small_compressed_payload_that_expands_over_limit(self):
         compressed = gzip.compress(b"x" * 10_001)
         transport = httpx.MockTransport(

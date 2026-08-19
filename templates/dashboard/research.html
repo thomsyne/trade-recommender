@@ -18,9 +18,9 @@
 </div>
 
 <section class="research-section">
-  <div class="section-heading research-heading"><div><p class="eyebrow">MACRO DESK</p><h2>Policy-rate record</h2></div><span class="quiet">Availability starts at first retrieval where release time is unavailable</span></div>
+  <div class="section-heading research-heading"><div><p class="eyebrow">MACRO DESK</p><h2>Policy-rate record</h2></div><span class="quiet">Official timestamps where supplied; otherwise first-known retrieval time</span></div>
   <div class="macro-strip">
-    {% for item in macro %}
+    {% for item in policy_rates %}
     <article>
       <div class="macro-country">{{ item.series.source_policy.jurisdiction }} · {{ item.series.source_policy.currency }}</div>
       <h3>{{ item.series.label }}</h3>
@@ -36,7 +36,34 @@
     </article>
     {% endfor %}
   </div>
-  <div class="coverage-note"><strong>Deliberate gap</strong><span>CPI and employment series remain unconfigured until their current official identifiers, revisions, and publication-time semantics are verified. No stale or guessed series enter the ledger.</span></div>
+</section>
+
+<section class="research-section">
+  <div class="section-heading research-heading"><div><p class="eyebrow">MACRO BREADTH</p><h2>Four-economy coverage</h2></div><span class="quiet">Current official series · revisions retained prospectively</span></div>
+  <div class="macro-coverage">
+    {% for region in macro_regions %}
+    <article class="coverage-region">
+      <header><span>{{ region.jurisdiction }}</span><strong>{{ region.label }}</strong></header>
+      <div class="coverage-indicators">
+        {% for item in region.indicators %}
+        <div>
+          <span>{{ item.label }}</span>
+          {% if item.observation %}
+          <strong>{{ item.observation.value|floatformat:2 }}{% if item.series.unit == 'percent' %}<small>%</small>{% endif %}</strong>
+          <p>{{ item.series.label }} · {{ item.observation.observation_period|date:"M Y" }}</p>
+          <time>Known {{ item.observation.available_at|date:"M j, H:i" }} UTC</time>
+          {% elif item.series %}
+          <strong>—</strong><p>{{ item.series.label }}</p><time>Awaiting first collection</time>
+          {% else %}
+          <strong>—</strong><p>Not configured</p><time>Coverage gap</time>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  <div class="coverage-note"><strong>Point in time</strong><span>Exact release timestamps from Statistics Canada and Eurostat are retained. BLS, ONS, FRED, and Land Registry observations are conservatively considered available only when this system first retrieved them.</span></div>
 </section>
 
 <div class="research-layout">
@@ -80,7 +107,13 @@
 </div>
 
 <section class="research-section provider-lab">
-  <div class="section-heading research-heading"><div><p class="eyebrow">PROVIDER LAB</p><h2>Economic-calendar comparison</h2></div><span class="quiet">A candidate is not an approved dependency</span></div>
+  <div class="section-heading research-heading"><div><p class="eyebrow">ECONOMIC CALENDAR</p><h2>Provider connection</h2></div><span class="calendar-health {% if calendar_connected %}connected{% endif %}">{% if calendar_connected %}CONNECTED{% else %}NOT CONNECTED{% endif %}</span></div>
+  {% if calendar_connected %}
+  <div class="calendar-events">{% for event in calendar_events %}<article><time>{{ event.event_at|date:"M j · H:i" }} UTC</time><strong>{{ event.country }} · {{ event.event_type }}</strong><span>Actual {{ event.actual|default:"—" }} · Estimate {{ event.estimate|default:"—" }} · Previous {{ event.previous|default:"—" }}</span></article>{% endfor %}</div>
+  {% else %}
+  <div class="calendar-disconnected"><strong>No live calendar events are entering the system.</strong><p>The EODHD adapter is ready for a bounded trial, but it remains disabled until <code>EODHD_API_TOKEN</code> is configured and a retrieval succeeds. Trading Economics is not selected.</p></div>
+  {% endif %}
+  <div class="section-heading research-heading provider-comparison"><div><p class="eyebrow">PROVIDER LAB</p><h2>Purchase path</h2></div><span class="quiet">Evaluation evidence, not production health</span></div>
   <div class="table-scroll"><table><thead><tr><th>Provider</th><th>Status</th><th>Pricing</th><th>Release timestamps</th><th>Revisions</th><th>Retention rights</th><th>Reliability</th></tr></thead><tbody>{% for evaluation in provider_evaluations %}<tr><td data-label="Provider"><strong><a href="{{ evaluation.evidence_url }}" rel="noopener noreferrer" target="_blank">{{ evaluation.provider }} ↗</a></strong><small>{{ evaluation.next_check }}</small></td><td data-label="Status"><span class="state warning">{{ evaluation.get_status_display|upper }}</span></td><td data-label="Pricing">{{ evaluation.pricing_status }}</td><td data-label="Release timestamps">{{ evaluation.timestamp_semantics }}</td><td data-label="Revisions">{{ evaluation.revision_support }}</td><td data-label="Retention rights">{{ evaluation.retention_rights }}</td><td data-label="Reliability">{{ evaluation.reliability_result }}</td></tr>{% empty %}<tr><td colspan="7">No provider is under evaluation.</td></tr>{% endfor %}</tbody></table></div>
 </section>
 {% endblock %}

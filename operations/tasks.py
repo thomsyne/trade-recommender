@@ -7,7 +7,7 @@ from market.models import IngestionRun, Instrument, SourceRegistry
 from market.oanda import OandaClient
 from market.services import store_ingestion
 from research.models import MacroSeries, SourcePolicy
-from research.services import ingest_feed, ingest_macro
+from research.services import ingest_eodhd_calendar, ingest_feed, ingest_macro
 
 
 def execute_task(task_name, parameters):
@@ -19,6 +19,11 @@ def execute_task(task_name, parameters):
     if task_name == "research.ingest_macro":
         series = MacroSeries.objects.get(code=parameters["series"], enabled=True)
         return ingest_macro(series)
+    if task_name == "research.ingest_eodhd_calendar":
+        if not settings.EODHD_API_TOKEN:
+            raise ValueError("EODHD_API_TOKEN is not configured")
+        policy = SourcePolicy.objects.get(slug="eodhd-calendar", state=SourcePolicy.State.ENABLED)
+        return ingest_eodhd_calendar(policy, settings.EODHD_API_TOKEN)
     raise ValueError(f"Unknown task: {task_name}")
 
 

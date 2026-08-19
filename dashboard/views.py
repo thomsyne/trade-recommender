@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.db import connection
 from django.db.models import F
@@ -18,6 +19,7 @@ from market.models import (
 )
 from operations.models import JobOccurrence, ScheduledJob
 from research.models import (
+    EconomicEvent,
     MacroSeries,
     ProviderEvaluation,
     RawRetrieval,
@@ -139,9 +141,47 @@ def research(request):
         representation = document.representations.first()
         if representation:
             entries.append({"document": document, "representation": representation})
-    macro = []
-    for series in MacroSeries.objects.filter(enabled=True).select_related("source_policy__source"):
-        macro.append({"series": series, "observation": series.observations.first()})
+    series_rows = list(
+        MacroSeries.objects.filter(enabled=True).select_related("source_policy__source")
+    )
+    policy_rates = [
+        {"series": series, "observation": series.observations.first()}
+        for series in series_rows
+        if series.indicator == MacroSeries.Indicator.POLICY_RATE
+    ]
+    macro_regions = []
+    for jurisdiction, label in (
+        ("CA", "Canada"),
+        ("US", "United States"),
+        ("GB", "United Kingdom"),
+        ("EU", "Euro area"),
+    ):
+        indicators = []
+        for indicator, indicator_label in (
+            (MacroSeries.Indicator.CPI, "Inflation"),
+            (MacroSeries.Indicator.UNEMPLOYMENT, "Unemployment"),
+            (MacroSeries.Indicator.GDP, "GDP"),
+            (MacroSeries.Indicator.HOUSING, "Housing"),
+        ):
+            series = next(
+                (
+                    item
+                    for item in series_rows
+                    if item.source_policy.jurisdiction == jurisdiction
+                    and item.indicator == indicator
+                ),
+                None,
+            )
+            indicators.append(
+                {
+                    "label": indicator_label,
+                    "series": series,
+                    "observation": series.observations.first() if series else None,
+                }
+            )
+        macro_regions.append(
+            {"jurisdiction": jurisdiction, "label": label, "indicators": indicators}
+        )
     policies = list(SourcePolicy.objects.select_related("source"))
     for policy in policies:
         policy.latest_retrieval = RawRetrieval.objects.filter(source_policy=policy).first()
@@ -149,17 +189,28 @@ def research(request):
             policy.latest_retrieval
             and timezone.now() - policy.latest_retrieval.fetched_at <= timedelta(hours=36)
         )
+    calendar_retrieval = RawRetrieval.objects.filter(
+        source_policy__slug="eodhd-calendar", quality=RawRetrieval.Quality.ACCEPTED
+    ).first()
+    calendar_connected = bool(
+        settings.EODHD_API_TOKEN
+        and calendar_retrieval
+        and timezone.now() - calendar_retrieval.fetched_at <= timedelta(hours=2)
+    )
     return render(
         request,
         "dashboard/research.html",
         {
             "entries": entries,
-            "macro": macro,
+            "policy_rates": policy_rates,
+            "macro_regions": macro_regions,
             "policies": policies,
             "retrieval_count": RawRetrieval.objects.count(),
             "conflict_count": ResearchDiscrepancy.objects.filter(kind="conflict").count(),
             "quarantine_count": ResearchDocument.objects.filter(quality="quarantined").count(),
             "provider_evaluations": ProviderEvaluation.objects.all(),
+            "calendar_events": EconomicEvent.objects.all()[:20],
+            "calendar_connected": calendar_connected,
         },
     )
 
