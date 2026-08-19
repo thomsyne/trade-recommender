@@ -1,11 +1,12 @@
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from operations.models import ScheduledJob
 from research.models import MacroSeries, ProviderEvaluation, SourcePolicy
 
 
 class ResearchSeedTests(TestCase):
+    @override_settings(EODHD_API_TOKEN="")
     def test_seed_is_idempotent_and_leaves_calendar_provider_unselected(self):
         call_command("seed_research", verbosity=0)
         call_command("seed_research", verbosity=0)

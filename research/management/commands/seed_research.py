@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from market.models import SourceRegistry
 from operations.models import ScheduledJob
-from research.models import MacroSeries, ProviderEvaluation, SourcePolicy
+from research.models import MacroSeries, ProviderEvaluation, RawRetrieval, SourcePolicy
 
 SOURCES = (
     {
@@ -345,6 +345,10 @@ class Command(BaseCommand):
     help = "Seed verified official research sources and durable collection schedules"
 
     def handle(self, *args, **options):
+        calendar_connected = RawRetrieval.objects.filter(
+            source_policy__slug="eodhd-calendar",
+            quality=RawRetrieval.Quality.ACCEPTED,
+        ).exists()
         policies = {}
         for item in SOURCES:
             source, _ = SourceRegistry.objects.update_or_create(
@@ -434,12 +438,28 @@ class Command(BaseCommand):
             defaults={
                 "status": ProviderEvaluation.Status.TESTING,
                 "evidence_url": "https://eodhd.com/financial-apis/economic-events-data-api",
-                "pricing_status": "USD $59.99 monthly or $599.90 annually ($49.99/month equivalent); key not configured",
+                "pricing_status": (
+                    "USD $59.99 monthly or $599.90 annually ($49.99/month equivalent); key configured"
+                    if settings.EODHD_API_TOKEN
+                    else "USD $59.99 monthly or $599.90 annually ($49.99/month equivalent); key not configured"
+                ),
                 "timestamp_semantics": "Event date/time plus actual, estimate, and previous; timezone semantics require trial verification",
                 "revision_support": "Distinct changed payloads are retained prospectively; provider vintage guarantees not documented",
                 "retention_rights": "Private-use terms reviewed at a high level; confirm model-input and long-term retention rights before purchase",
-                "reliability_result": "NOT CONNECTED — API KEY REQUIRED",
-                "next_check": "Add EODHD_API_TOKEN, run a bounded trial, then measure coverage, timestamps, revisions, and latency against official releases.",
+                "reliability_result": (
+                    "CONNECTED — BOUNDED RETRIEVAL SUCCEEDED"
+                    if calendar_connected
+                    else (
+                        "NOT CONNECTED — KEY CONFIGURED; PAID API ENTITLEMENT REQUIRED"
+                        if settings.EODHD_API_TOKEN
+                        else "NOT CONNECTED — API KEY REQUIRED"
+                    )
+                ),
+                "next_check": (
+                    "Measure coverage, timestamps, revisions, and latency against official releases."
+                    if calendar_connected
+                    else "Activate the Fundamentals Data Feed entitlement, then run a bounded trial."
+                ),
             },
         )
         ProviderEvaluation.objects.update_or_create(
@@ -461,7 +481,7 @@ class Command(BaseCommand):
             "research.ingest_eodhd_calendar",
             {},
             3_600,
-            enabled=bool(settings.EODHD_API_TOKEN),
+            enabled=calendar_connected,
         )
         self.stdout.write(self.style.SUCCESS("official research registry ready"))
 

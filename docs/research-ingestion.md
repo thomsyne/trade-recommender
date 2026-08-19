@@ -81,9 +81,12 @@ and a disabled hourly calendar schedule:
   --url https://www.bankofcanada.ca/content_type/press-releases/feed/
 ```
 
-The EODHD economic-events adapter remains disabled until `EODHD_API_TOKEN` is
-set. Its Fundamentals Data Feed is advertised at USD $59.99 monthly or $599.90
-annually and includes this API. The dashboard displays `CONNECTED` only after a
-successful accepted retrieval—not merely because a key exists. Confirm
-long-term retention and model-input rights with EODHD before purchase. Trading
-Economics remains an unselected fallback pending a quote and written rights.
+The EODHD economic-events adapter accepts `EODHD_API_KEY` (or the legacy alias
+`EODHD_API_TOKEN`). A free API key does not include this endpoint: the
+Fundamentals Data Feed entitlement is required and is advertised at USD $59.99
+monthly or $599.90 annually. The hourly schedule remains disabled until a
+manual bounded retrieval succeeds; a key alone cannot create a failing retry
+loop. The dashboard likewise displays `CONNECTED` only after a recent accepted
+retrieval. Confirm long-term retention and model-input rights with EODHD before
+purchase. Trading Economics remains an unselected fallback pending a quote and
+written rights.
