@@ -1,8 +1,8 @@
 # FX Forecast Lab
 
-A private, single-user FX forecasting research instrument. The first slice
-establishes trustworthy market data and deterministic analytics before any LLM
-forecasting is permitted.
+A private, single-user FX forecasting research instrument. Trustworthy market
+data now feeds immutable, prospectively scored forecast contracts before any
+LLM forecasting is permitted.
 
 > Development fixtures are invented and visibly labelled. Nothing in this
 > repository is trading advice or a live-order system.
@@ -17,12 +17,15 @@ forecasting is permitted.
   crossed bid/ask, completeness, and volume;
 - immutable retrieval manifests and database-enforced append-only audit events;
 - deterministic ATR, EWMA, prior levels, and local pivot support/resistance;
+- immutable versioned 20-session macro and five-session tactical targets;
+- locked mechanical EWMA baselines, explicit abstention, deterministic
+  resolution, and multiclass Brier scoring;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
-- Today, market workspace, and Operations interfaces;
+- Today, Decision, Timeline, market workspace, and Operations interfaces;
 - deterministic fixture data so every screen works before credentials exist.
 
-News research, Anthropic forecasts, recommendation scoring, paper positions,
-paid providers, and AWS deployment are deliberately not part of this slice.
+News research, Anthropic forecasts, paper positions, paid providers, and AWS
+deployment are deliberately not implemented yet.
 See the [project map](docs/project-map.md) for those boundaries.
 
 ## Fresh orb setup
@@ -70,6 +73,8 @@ credentials when account reconciliation is added. Review
 | `make worker` | Run the durable worker loop |
 | `make scheduler` | Run the durable scheduler loop |
 | `make ingest` | Show required arguments for direct OANDA ingestion |
+| `make baseline` | Lock one macro and tactical mechanical baseline per pair |
+| `make resolve` | Resolve every forecast whose later sessions are available |
 
 Docker Compose describes the eventual single-host process topology and can be
 used on a machine with Docker via `docker compose up --build`. It is a local
@@ -81,3 +86,4 @@ development topology, not the hardened AWS deployment.
 - [Project map and roadmap](docs/project-map.md)
 - [Current handoff](docs/handoff.md)
 - [OANDA provider contract](docs/providers/oanda.md)
+- [Forecast contract](docs/forecast-contract.md)

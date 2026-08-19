@@ -6,6 +6,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from forecasts.services import issue_all_baselines
 from operations.models import ScheduledJob
 
 
@@ -14,6 +15,7 @@ class DashboardTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         call_command("seed_demo", verbosity=0)
+        issue_all_baselines(allow_fixture=True)
         cls.user = get_user_model().objects.get(username="owner")
         cls.user.set_password("orb-demo-only")
         cls.user.save(update_fields=("password",))
@@ -22,13 +24,14 @@ class DashboardTests(TestCase):
         response = self.client.get(reverse("today"))
         self.assertRedirects(response, f"{reverse('login')}?next=/")
 
-    def test_today_shows_four_pairs_and_fixture_warning_without_fake_forecasts(self):
+    def test_today_shows_four_pairs_and_locked_fixture_baselines(self):
         self.client.force_login(self.user)
         response = self.client.get(reverse("today"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Fixture mode")
-        self.assertContains(response, "No forecast issued", count=4)
+        self.assertContains(response, "No trade", count=4)
+        self.assertContains(response, "Mechanical EWMA control", count=4)
         for pair in ("USD/CAD", "GBP/USD", "EUR/GBP", "EUR/USD"):
             self.assertContains(response, pair)
 
@@ -38,7 +41,8 @@ class DashboardTests(TestCase):
         pair = self.client.get(reverse("market-detail", args=("USD_CAD",)))
         operations = self.client.get(reverse("operations"))
 
-        self.assertContains(pair, "DECISION ENGINE LOCKED", html=False)
+        self.assertContains(pair, "LOCKED MECHANICAL CONTROL", html=False)
+        self.assertContains(pair, "IMMUTABLE TIMELINE", html=False)
         self.assertContains(pair, "chart-data")
         self.assertContains(operations, "Rights-aware registry")
         self.assertContains(operations, "WAITING FOR TOKEN")

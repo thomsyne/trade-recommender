@@ -2,7 +2,7 @@
 {% block title %}Today · FX Forecast Lab{% endblock %}
 {% block content %}
 <header class="page-header">
-  <div><p class="eyebrow">MARKET TRUTH · FIRST SLICE</p><h1>Today’s decisions</h1><p class="lede">The evidence foundation is running. Forecasts remain intentionally locked until the next slice.</p></div>
+  <div><p class="eyebrow">PROSPECTIVE FORECAST LAB</p><h1>Today’s decisions</h1><p class="lede">Locked mechanical controls establish what was knowable, forecast, and scored before model research begins.</p></div>
   <div class="as-of"><span>System state</span><strong>{% if latest_run %}Data loaded{% else %}Awaiting data{% endif %}</strong></div>
 </header>
 {% if fixture_mode %}<div class="fixture-banner"><strong>Fixture mode</strong><span>Every displayed price is deterministic invented data—not current market information and not trading advice.</span></div>{% endif %}
@@ -10,13 +10,15 @@
 <div class="market-grid">
   {% for card in cards %}
   <a class="market-card" href="{% url 'market-detail' card.instrument.code %}">
-    <div class="card-top"><span class="pair">{{ card.instrument }}</span><span class="state foundation">FOUNDATION</span></div>
+    <div class="card-top"><span class="pair">{{ card.instrument }}</span><span class="state {% if card.forecast.resolution %}healthy{% else %}foundation{% endif %}">{% if card.forecast.resolution %}RESOLVED{% else %}LOCKED{% endif %}</span></div>
     {% if card.candle %}<div class="price">{{ card.candle.midpoint_close|floatformat:5 }}</div><div class="quote-label">Midpoint close · {{ card.candle.timestamp|date:"M j, H:i" }} UTC</div>{% else %}<div class="price muted-price">No data</div>{% endif %}
-    <div class="decision-lock"><span class="lock-icon">◇</span><div><strong>No forecast issued</strong><p>The recommendation contract is deliberately outside this slice.</p></div></div>
+    {% if card.forecast %}
+    <div class="decision-lock forecast-summary {{ card.forecast.direction }}"><span class="lock-icon">◇</span><div><strong>{{ card.forecast.get_direction_display }} outlook · No trade</strong><p>Mechanical EWMA control; {% widthratio card.forecast.probability_up 1 100 %}% up · {% widthratio card.forecast.probability_neutral 1 100 %}% neutral · {% widthratio card.forecast.probability_down 1 100 %}% down.</p></div></div>
+    {% else %}<div class="decision-lock"><span class="lock-icon">◇</span><div><strong>No forecast issued</strong><p>A validated daily evidence snapshot is required.</p></div></div>{% endif %}
     <div class="level-row"><span>Support<strong>{% if card.snapshot.support %}{{ card.snapshot.support|floatformat:5 }}{% else %}—{% endif %}</strong></span><span>Resistance<strong>{% if card.snapshot.resistance %}{{ card.snapshot.resistance|floatformat:5 }}{% else %}—{% endif %}</strong></span><span>ATR 14<strong>{% if card.snapshot.atr_14 %}{{ card.snapshot.atr_14|floatformat:5 }}{% else %}—{% endif %}</strong></span></div>
     <div class="card-foot"><span>Open market workspace</span><span>→</span></div>
   </a>
   {% endfor %}
 </div>
-<section class="principle-panel"><div><p class="eyebrow">SYSTEM PRINCIPLE</p><h2>Trust starts before intelligence.</h2></div><p>Bid and ask remain separate. Incomplete candles are rejected. Every retrieval has a manifest. Technical values are deterministic. The model will never be allowed to rewrite this market truth.</p></section>
+<section class="principle-panel"><div><p class="eyebrow">SYSTEM PRINCIPLE</p><h2>Score the ruler before the model.</h2></div><p>These controls are immutable, abstaining forecasts—not trading recommendations. Their exact evidence, cutoff, probabilities, target version, horizon, and eventual score are locked prospectively.</p></section>
 {% endblock %}

@@ -2,7 +2,8 @@ from datetime import UTC, datetime, timedelta
 
 from django.conf import settings
 
-from market.models import Instrument, SourceRegistry
+from forecasts.services import resolve_due_forecasts
+from market.models import IngestionRun, Instrument, SourceRegistry
 from market.oanda import OandaClient
 from market.services import store_ingestion
 
@@ -24,7 +25,10 @@ def ingest_oanda(parameters):
     source = SourceRegistry.objects.get(name="OANDA v20")
     with OandaClient(settings.OANDA_TOKEN, settings.OANDA_ENVIRONMENT) as client:
         candles, manifest = client.fetch_candles(instrument.code, granularity, start, end)
-    return store_ingestion(source, instrument, granularity, start, end, candles, manifest)
+    run = store_ingestion(source, instrument, granularity, start, end, candles, manifest)
+    if run.status == IngestionRun.Status.SUCCEEDED and granularity == "D":
+        resolve_due_forecasts(instrument)
+    return run
 
 
 def _datetime(value):

@@ -2,9 +2,16 @@
 {% block title %}{{ instrument }} · FX Forecast Lab{% endblock %}
 {% block content %}
 <header class="page-header market-header"><div><a class="back" href="{% url 'today' %}">← Today</a><p class="eyebrow">MARKET WORKSPACE</p><h1>{{ instrument }}</h1><p class="lede">{{ instrument.base_currency }} against {{ instrument.quote_currency }} · broker-standard orientation</p></div><div class="segmented"><a class="{% if granularity == 'H4' %}active{% endif %}" href="?granularity=H4">H4</a><a class="{% if granularity == 'D' %}active{% endif %}" href="?granularity=D">Daily</a></div></header>
-<nav class="workspace-tabs"><span class="active">Decision</span><span>Research <em>next slice</em></span><span>Timeline <em>next slice</em></span></nav>
+<nav class="workspace-tabs"><span class="active">Decision</span><span>Research <em>next slice</em></span><span>Timeline</span></nav>
 {% if fixture_mode %}<div class="fixture-banner compact"><strong>Development fixture</strong><span>The chart below is invented, deterministic test data.</span></div>{% endif %}
-<section class="decision-empty"><div><span class="lock-large">◇</span><p class="eyebrow">DECISION ENGINE LOCKED</p><h2>No recommendation has been issued.</h2><p>That is correct for this build. Market evidence must be stable before probabilistic claims are introduced.</p></div></section>
+{% if forecast %}
+<section class="forecast-decision">
+  <div class="forecast-lead"><div><p class="eyebrow">LOCKED MECHANICAL CONTROL · {{ forecast.target_contract }}</p><h2>{{ forecast.get_direction_display }} five-session outlook</h2><p>{{ forecast.rationale }}</p></div><span class="state warning">NO TRADE</span></div>
+  <div class="probability-grid"><div><span>Up</span><strong>{% widthratio forecast.probability_up 1 100 %}%</strong></div><div><span>Neutral</span><strong>{% widthratio forecast.probability_neutral 1 100 %}%</strong></div><div><span>Down</span><strong>{% widthratio forecast.probability_down 1 100 %}%</strong></div></div>
+  <div class="forecast-facts"><div><span>Issued</span><strong>{{ forecast.issued_at|date:"M j, Y H:i" }} UTC</strong></div><div><span>Evidence candle</span><strong>{{ forecast.evidence_snapshot.anchor_candle.timestamp|date:"M j, Y H:i" }} UTC</strong></div><div><span>Neutral band</span><strong>±{{ forecast.neutral_band|floatformat:6 }}</strong></div><div><span>Expiry rule</span><strong>{{ forecast.setup_expires_after_sessions }} completed sessions</strong></div></div>
+  <div class="abstention-note"><strong>Explicit abstention</strong><span>{{ forecast.abstention_reason }}</span></div>
+</section>
+{% else %}<section class="decision-empty"><div><span class="lock-large">◇</span><p class="eyebrow">AWAITING VALID EVIDENCE</p><h2>No forecast has been issued.</h2><p>A complete daily evidence snapshot is required before a prospective claim can be locked.</p></div></section>{% endif %}
 <div class="workspace-grid">
   <section class="chart-panel"><div class="panel-head"><div><p class="eyebrow">PRICE STRUCTURE</p><h2>{{ granularity }} midpoint candles</h2></div><span>{{ candles|length }} completed intervals</span></div><canvas id="market-chart" height="390" aria-label="{{ instrument }} fixture candlestick chart"></canvas></section>
   <aside class="metrics-panel">
@@ -15,6 +22,12 @@
     {% else %}<p>No technical snapshot is available.</p>{% endif %}
   </aside>
 </div>
+<section class="timeline-panel">
+  <div class="panel-head"><div><p class="eyebrow">IMMUTABLE TIMELINE</p><h2>Forecast history</h2></div><span>{{ forecasts|length }} locked record{{ forecasts|length|pluralize }}</span></div>
+  <div class="timeline-list">
+    {% for item in forecasts %}<article><span class="timeline-dot"></span><div><strong>{{ item.target_contract.get_product_display }} · {{ item.get_direction_display }}</strong><p>{{ item.issued_at|date:"M j, Y H:i" }} UTC · {{ item.method }} v{{ item.method_version }} · evidence {{ item.evidence_snapshot.sha256|slice:":10" }}</p>{% if item.resolution %}<p class="resolved-copy">Resolved {{ item.resolution.get_outcome_display }} · Brier {{ item.resolution.brier_score|floatformat:6 }}</p>{% else %}<p>Awaiting {{ item.target_contract.horizon_sessions }} later completed sessions</p>{% endif %}</div><span class="state {% if item.resolution %}healthy{% else %}foundation{% endif %}">{% if item.resolution %}SCORED{% else %}OPEN{% endif %}</span></article>{% empty %}<p class="quiet">No forecast records yet.</p>{% endfor %}
+  </div>
+</section>
 {{ chart|json_script:"chart-data" }}
 {% endblock %}
 {% block scripts %}<script>window.renderMarketChart?.("market-chart", JSON.parse(document.getElementById("chart-data").textContent));</script>{% endblock %}

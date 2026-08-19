@@ -1,0 +1,1 @@
+"""Forecast contract tests."""

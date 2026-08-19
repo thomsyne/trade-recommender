@@ -56,9 +56,10 @@
   orbs; Compose still records the web/worker/scheduler/database topology.
 - The development owner and fixtures only seed when `DEBUG` is true.
 
-## Next seam
+## Forecast seam — implemented
 
-The next slice must define a versioned forecast target and resolver before any
-Anthropic output appears. It should add immutable forecast/evidence contracts,
-mechanical baselines, and proper scoring fixtures without yet adding broad news
-or paper trading.
+Versioned immutable forecast/evidence contracts, mechanical baselines, and
+proper scoring fixtures now sit above market truth. See
+`docs/forecast-contract.md`. The next seam is rights-aware point-in-time
+research ingestion; it may create evidence records but cannot issue forecasts
+or alter contracts and scoring.

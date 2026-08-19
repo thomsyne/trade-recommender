@@ -1,4 +1,4 @@
-.PHONY: setup resume check test dev worker scheduler ingest seed
+.PHONY: setup resume check test dev worker scheduler ingest seed baseline resolve
 
 setup:
 	./.agents/setup
@@ -11,7 +11,7 @@ check:
 	.venv/bin/ruff format --check .
 	.venv/bin/python manage.py check
 	.venv/bin/python manage.py makemigrations --check --dry-run
-	.venv/bin/python -m compileall -q config dashboard market operations
+	.venv/bin/python -m compileall -q config dashboard forecasts market operations
 
 test:
 	.venv/bin/python manage.py test
@@ -30,3 +30,9 @@ ingest:
 
 seed:
 	.venv/bin/python manage.py seed_demo
+
+baseline:
+	.venv/bin/python manage.py issue_baselines
+
+resolve:
+	.venv/bin/python manage.py resolve_forecasts

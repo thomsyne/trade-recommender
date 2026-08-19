@@ -3,6 +3,7 @@ from django.db import connection
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 
+from forecasts.models import Forecast
 from market.models import (
     AuditEvent,
     Candle,
@@ -25,6 +26,14 @@ def health(request):
 def today(request):
     cards = []
     for instrument in Instrument.objects.filter(active=True):
+        forecast = (
+            Forecast.objects.filter(
+                instrument=instrument,
+                target_contract__product="tactical",
+            )
+            .select_related("target_contract", "resolution")
+            .first()
+        )
         snapshot = TechnicalSnapshot.objects.filter(instrument=instrument, granularity="H4").first()
         candle = (
             Candle.objects.filter(instrument=instrument, granularity="H4")
@@ -32,7 +41,14 @@ def today(request):
             .order_by("-timestamp")
             .first()
         )
-        cards.append({"instrument": instrument, "snapshot": snapshot, "candle": candle})
+        cards.append(
+            {
+                "instrument": instrument,
+                "snapshot": snapshot,
+                "candle": candle,
+                "forecast": forecast,
+            }
+        )
     return render(
         request,
         "dashboard/today.html",
@@ -62,6 +78,18 @@ def market_detail(request, code):
     snapshot = TechnicalSnapshot.objects.filter(
         instrument=instrument, granularity=granularity
     ).first()
+    forecasts = list(
+        Forecast.objects.filter(instrument=instrument).select_related(
+            "target_contract",
+            "evidence_snapshot__anchor_candle",
+            "parent",
+            "resolution__horizon_candle",
+        )[:20]
+    )
+    tactical_forecast = next(
+        (forecast for forecast in forecasts if forecast.target_contract.product == "tactical"),
+        None,
+    )
     chart = [
         {
             "time": candle.timestamp.isoformat(),
@@ -81,6 +109,8 @@ def market_detail(request, code):
             "candles": candles,
             "chart": chart,
             "granularity": granularity,
+            "forecast": tactical_forecast,
+            "forecasts": forecasts,
             "fixture_mode": bool(candles)
             and candles[-1].ingestion_run.source.name == "Development fixtures",
         },

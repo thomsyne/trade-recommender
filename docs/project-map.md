@@ -1,6 +1,6 @@
 # FX Forecast Lab — Four-Quadrant Project Map
 
-**Status:** Planning complete; Foundation and Market Truth implemented
+**Status:** Planning complete; Foundation, Market Truth, and Forecast Contract implemented
 **Prepared:** 2026-08-18  
 **Purpose:** Durable source of truth for the first implementation and future Amp threads
 
@@ -438,7 +438,7 @@ These slices are dependency-aware, but each ends in something reviewable.
    registry, canonical time/currency/instrument types, local Compose, tests.
 2. **Market truth — complete:** OANDA daily/H4 bid/ask ingestion, manifests, quality gate,
    New York alignment, deterministic technicals, basic charts.
-3. **Forecast contract:** target schemas, immutable event/evidence store,
+3. **Forecast contract — complete:** target schemas, immutable event/evidence store,
    deterministic resolver, baseline forecasts, proper scoring fixtures.
 4. **Research ingestion:** official macro vintages/releases, approved RSS/web
    fetch boundary, provenance/lineage, calendar-provider trial harness.
