@@ -368,21 +368,19 @@ p {
   border-bottom: 1px solid var(--line);
   margin-top: 25px;
 }
-.workspace-tabs span {
+.workspace-tabs span,
+.workspace-tabs a {
   padding: 14px 0;
   color: var(--muted);
   font-size: 13px;
 }
-.workspace-tabs span.active {
+.workspace-tabs span.active,
+.workspace-tabs a.active {
   color: var(--ink);
   border-bottom: 2px solid var(--green);
 }
-.workspace-tabs em {
-  font-size: 8px;
-  text-transform: uppercase;
-  background: #e5e7e2;
-  padding: 3px 5px;
-  font-style: normal;
+.workspace-tabs a:hover {
+  color: var(--ink);
 }
 .decision-empty {
   background: var(--panel);

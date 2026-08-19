@@ -62,6 +62,8 @@ class DashboardTests(TestCase):
         self.assertContains(pair, "LOCKED MECHANICAL CONTROL", html=False)
         self.assertContains(pair, "IMMUTABLE TIMELINE", html=False)
         self.assertContains(pair, "chart-data")
+        self.assertContains(pair, f'href="{reverse("research")}"')
+        self.assertNotContains(pair, "next slice")
         self.assertContains(operations, "Rights-aware registry")
         self.assertContains(operations, "WAITING FOR CREDENTIAL")
 

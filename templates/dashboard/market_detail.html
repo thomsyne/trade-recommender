@@ -2,7 +2,7 @@
 {% block title %}{{ instrument }} · FX Forecast Lab{% endblock %}
 {% block content %}
 <header class="page-header market-header"><div><a class="back" href="{% url 'today' %}">← Today</a><p class="eyebrow">MARKET WORKSPACE</p><h1>{{ instrument }}</h1><p class="lede">{{ instrument.base_currency }} against {{ instrument.quote_currency }} · broker-standard orientation</p></div><div class="segmented"><a class="{% if granularity == 'H4' %}active{% endif %}" href="?granularity=H4">H4</a><a class="{% if granularity == 'D' %}active{% endif %}" href="?granularity=D">Daily</a></div></header>
-<nav class="workspace-tabs"><span class="active">Decision</span><span>Research <em>next slice</em></span><span>Timeline</span></nav>
+<nav class="workspace-tabs" aria-label="Market workspace sections"><span class="active">Decision</span><a href="{% url 'research' %}">Research</a><a href="#forecast-history">Timeline</a></nav>
 {% if fixture_mode %}<div class="fixture-banner compact"><strong>Development fixture</strong><span>The chart below is invented, deterministic test data.</span></div>{% endif %}
 {% if forecast %}
 <section class="forecast-decision">
@@ -22,7 +22,7 @@
     {% else %}<p>No technical snapshot is available.</p>{% endif %}
   </aside>
 </div>
-<section class="timeline-panel">
+<section class="timeline-panel" id="forecast-history">
   <div class="panel-head"><div><p class="eyebrow">IMMUTABLE TIMELINE</p><h2>Forecast history</h2></div><span>{{ forecasts|length }} locked record{{ forecasts|length|pluralize }}</span></div>
   <div class="timeline-list">
     {% for item in forecasts %}<article><span class="timeline-dot"></span><div><strong>{{ item.target_contract.get_product_display }} · {{ item.get_direction_display }}</strong><p>{{ item.issued_at|date:"M j, Y H:i" }} UTC · {{ item.method }} v{{ item.method_version }} · evidence {{ item.evidence_snapshot.sha256|slice:":10" }}</p>{% if item.resolution %}<p class="resolved-copy">Resolved {{ item.resolution.get_outcome_display }} · Brier {{ item.resolution.brier_score|floatformat:6 }}</p>{% else %}<p>Awaiting {{ item.target_contract.horizon_sessions }} later completed sessions</p>{% endif %}</div><span class="state {% if item.resolution %}healthy{% else %}foundation{% endif %}">{% if item.resolution %}SCORED{% else %}OPEN{% endif %}</span></article>{% empty %}<p class="quiet">No forecast records yet.</p>{% endfor %}
