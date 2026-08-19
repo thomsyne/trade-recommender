@@ -40,15 +40,36 @@ def store_ingestion(source, instrument, granularity, start, end, candle_data, ma
         )
         return run
 
-    rows = [
-        Candle(instrument=instrument, ingestion_run=run, granularity=granularity, **item.__dict__)
-        for item in candle_data
-    ]
+    series = Candle.objects.filter(instrument=instrument, granularity=granularity)
+    fixture_rows = series.filter(ingestion_run__source__name="Development fixtures")
+    replaced_fixture_count = 0
+    discard_fixture_batch = (
+        source.name == "Development fixtures"
+        and series.exclude(ingestion_run__source=source).exists()
+    )
+    if source.name != "Development fixtures":
+        replaced_fixture_count = fixture_rows.count()
+        if replaced_fixture_count:
+            fixture_rows.delete()
+            TechnicalSnapshot.objects.filter(
+                instrument=instrument, granularity=granularity
+            ).delete()
+
+    rows = (
+        []
+        if discard_fixture_batch
+        else [
+            Candle(
+                instrument=instrument, ingestion_run=run, granularity=granularity, **item.__dict__
+            )
+            for item in candle_data
+        ]
+    )
     before = Candle.objects.filter(instrument=instrument, granularity=granularity).count()
     Candle.objects.bulk_create(rows, ignore_conflicts=True)
     after = Candle.objects.filter(instrument=instrument, granularity=granularity).count()
     run.status = IngestionRun.Status.SUCCEEDED
-    run.fetched_count = len(rows)
+    run.fetched_count = len(candle_data)
     run.stored_count = after - before
     run.finished_at = timezone.now()
     run.save()
@@ -57,7 +78,13 @@ def store_ingestion(source, instrument, granularity, start, end, candle_data, ma
         actor="market.services.store_ingestion",
         subject_type="IngestionRun",
         subject_id=str(run.pk),
-        payload={"fetched": run.fetched_count, "stored": run.stored_count, "manifest": digest},
+        payload={
+            "fetched": run.fetched_count,
+            "stored": run.stored_count,
+            "manifest": digest,
+            "replaced_fixture_candles": replaced_fixture_count,
+            "discarded_fixture_batch": discard_fixture_batch,
+        },
     )
     calculate_and_store_snapshot(instrument, granularity)
     return run

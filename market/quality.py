@@ -25,7 +25,7 @@ def validate_candles(candles, granularity):
         if previous and timestamp <= previous.timestamp:
             issues.append(ValidationIssue("non_monotonic_timestamp", index, str(timestamp)))
         if previous and timestamp - previous.timestamp > expected_step * 2:
-            if not _is_fx_weekend_gap(previous.timestamp, timestamp):
+            if not _is_fx_weekend_gap(previous.timestamp, timestamp, granularity):
                 issues.append(
                     ValidationIssue("unexpected_gap", index, f"{previous.timestamp} to {timestamp}")
                 )
@@ -47,5 +47,10 @@ def validate_candles(candles, granularity):
     return issues
 
 
-def _is_fx_weekend_gap(start, end):
-    return start.weekday() == 4 and end.weekday() in {6, 0} and end - start <= timedelta(days=4)
+def _is_fx_weekend_gap(start, end, granularity):
+    start_weekday = 3 if granularity == "D" else 4
+    return (
+        start.weekday() == start_weekday
+        and end.weekday() in {6, 0}
+        and end - start <= timedelta(days=4)
+    )

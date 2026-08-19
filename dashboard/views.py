@@ -28,6 +28,7 @@ def today(request):
         snapshot = TechnicalSnapshot.objects.filter(instrument=instrument, granularity="H4").first()
         candle = (
             Candle.objects.filter(instrument=instrument, granularity="H4")
+            .select_related("ingestion_run__source")
             .order_by("-timestamp")
             .first()
         )
@@ -38,9 +39,11 @@ def today(request):
         {
             "cards": cards,
             "latest_run": IngestionRun.objects.first(),
-            "fixture_mode": SourceRegistry.objects.filter(
-                name="Development fixtures", enabled=True
-            ).exists(),
+            "fixture_mode": any(
+                card["candle"]
+                and card["candle"].ingestion_run.source.name == "Development fixtures"
+                for card in cards
+            ),
         },
     )
 

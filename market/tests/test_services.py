@@ -63,6 +63,89 @@ class IngestionServiceTests(TestCase):
         self.assertEqual(Candle.objects.count(), 0)
         self.assertIn("incomplete_candle", run.failure_reason)
 
+    def test_real_ingestion_replaces_development_fixtures(self):
+        self.source.name = "Development fixtures"
+        self.source.save(update_fields=("name",))
+        oanda = SourceRegistry.objects.create(
+            name="OANDA v20",
+            tier="established",
+            base_url="https://developer.oanda.com",
+            acquisition_method="v20 REST API",
+            retention_policy="test only",
+        )
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        end = start + timedelta(hours=24)
+        candles = [candle(start + timedelta(hours=4 * index)) for index in range(6)]
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start,
+            end,
+            candles,
+            {"source": "fixture", "requests": []},
+        )
+
+        run = store_ingestion(
+            oanda,
+            self.instrument,
+            "H4",
+            start,
+            end,
+            candles,
+            {"source": "oanda", "requests": []},
+        )
+
+        self.assertEqual(run.stored_count, 6)
+        self.assertEqual(
+            set(Candle.objects.values_list("ingestion_run__source__name", flat=True)),
+            {"OANDA v20"},
+        )
+        self.assertEqual(TechnicalSnapshot.objects.get().candle_count, 6)
+        self.assertEqual(
+            AuditEvent.objects.get(subject_id=str(run.pk)).payload["replaced_fixture_candles"],
+            6,
+        )
+
+    def test_fixture_ingestion_is_discarded_after_real_data_exists(self):
+        self.source.name = "Development fixtures"
+        self.source.save(update_fields=("name",))
+        oanda = SourceRegistry.objects.create(
+            name="OANDA v20",
+            tier="established",
+            base_url="https://developer.oanda.com",
+            acquisition_method="v20 REST API",
+            retention_policy="test only",
+        )
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        candles = [candle(start)]
+        store_ingestion(
+            oanda,
+            self.instrument,
+            "H4",
+            start,
+            start + timedelta(hours=4),
+            candles,
+            {"source": "oanda", "requests": []},
+        )
+
+        run = store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start + timedelta(hours=4),
+            start + timedelta(hours=8),
+            [candle(start + timedelta(hours=4))],
+            {"source": "fixture", "requests": []},
+        )
+
+        self.assertEqual(run.fetched_count, 1)
+        self.assertEqual(run.stored_count, 0)
+        self.assertEqual(Candle.objects.count(), 1)
+        self.assertTrue(
+            AuditEvent.objects.get(subject_id=str(run.pk)).payload["discarded_fixture_batch"]
+        )
+
     def test_audit_events_reject_mutation_and_deletion(self):
         event = AuditEvent.objects.create(
             event_type="test", actor="test", subject_type="test", subject_id="1"

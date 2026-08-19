@@ -47,3 +47,12 @@ class CandleQualityTests(SimpleTestCase):
         sunday = datetime(2026, 1, 11, 22, tzinfo=UTC)
         weekend = validate_candles([candle(friday), candle(sunday)], "H4")
         self.assertNotIn("unexpected_gap", {issue.code for issue in weekend})
+
+        thursday = datetime(2026, 1, 8, 22, tzinfo=UTC)
+        daily_weekend = validate_candles([candle(thursday), candle(sunday)], "D")
+        self.assertNotIn("unexpected_gap", {issue.code for issue in daily_weekend})
+
+        daily_non_weekend = validate_candles(
+            [candle(thursday - timedelta(days=1)), candle(sunday)], "D"
+        )
+        self.assertIn("unexpected_gap", {issue.code for issue in daily_non_weekend})
