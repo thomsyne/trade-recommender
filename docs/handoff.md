@@ -67,6 +67,15 @@ days, margin, pip location, response hash, environment, and a one-way account
 fingerprint. The practice response omits commission, which remains visibly
 unknown rather than assumed zero.
 
+Position Sizing and Batch Reliability are implemented: each unresolved
+directional setup receives immutable advisory units under a fixed C$25,000 CAD
+model portfolio, 0.5% setup risk, 2% aggregate risk, and 1% same-direction
+currency-factor caps. Conversion paths use only hourly candles available at the
+sizing timestamp. The practice NAV is not used and no broker order can be
+created. Recommendation batches attempt every pair, retain idempotent successes,
+fail visibly when any pair remains incomplete, and expose the latest state on
+Operations.
+
 ## Verification gate
 
 Run:
@@ -85,10 +94,10 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Define a versioned position-sizing contract that converts advisory setup
-equivalents to actual risk budgets and enables cash/CAD reporting. After the new
-account-term snapshots cover resolved holdings, introduce a prospective cost
-policy version that consumes them without rewriting v1 assessments.
+After account-term snapshots bracket enough newly resolved holdings, introduce
+a prospective cost-policy version that consumes observed financing without
+rewriting v1 assessments. Keep commission as a declared sensitivity until OANDA
+or another authoritative account source supplies it.
 
 ## Still OPEN
 

@@ -2,6 +2,7 @@ from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 
 from forecasts.recommendations import generate_recommendation
+from forecasts.sizing import size_recommendation
 from market.models import Instrument
 
 
@@ -23,6 +24,7 @@ class Command(BaseCommand):
                 recommendation = generate_recommendation(
                     instrument, allow_fixture=options["allow_fixture"]
                 )
+                size_recommendation(recommendation)
             except (RuntimeError, ValueError, ValidationError) as error:
                 raise CommandError(str(error)) from error
             self.stdout.write(

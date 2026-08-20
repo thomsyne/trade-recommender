@@ -6,6 +6,7 @@ from forecasts.models import (
     ForecastResolution,
     PaperTradeEntry,
     PaperTradeResult,
+    PositionSizeAdvice,
     Recommendation,
     RecommendationResolution,
     TargetContract,
@@ -17,5 +18,6 @@ admin.site.register(Forecast)
 admin.site.register(ForecastResolution)
 admin.site.register(PaperTradeEntry)
 admin.site.register(PaperTradeResult)
+admin.site.register(PositionSizeAdvice)
 admin.site.register(Recommendation)
 admin.site.register(RecommendationResolution)

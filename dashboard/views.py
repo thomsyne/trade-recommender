@@ -535,6 +535,14 @@ def exposure(request):
 
 @login_required
 def operations(request):
+    recommendation_run = JobOccurrence.objects.filter(
+        task_name="forecast.generate_recommendations"
+    ).first()
+    failed_recommendation_runs = JobOccurrence.objects.filter(
+        task_name="forecast.generate_recommendations",
+        status=JobOccurrence.Status.FAILED,
+        created_at__gte=timezone.now() - timedelta(hours=24),
+    ).count()
     return render(
         request,
         "dashboard/operations.html",
@@ -548,5 +556,8 @@ def operations(request):
             "research_retrievals": RawRetrieval.objects.select_related("source_policy__source")[
                 :20
             ],
+            "recommendation_run": recommendation_run,
+            "failed_recommendation_runs": failed_recommendation_runs,
+            "active_pair_count": Instrument.objects.filter(active=True).count(),
         },
     )

@@ -1,3 +1,5 @@
+from decimal import ROUND_HALF_UP, Decimal
+
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
@@ -363,6 +365,91 @@ class Recommendation(ImmutableModel):
             self.target_level < self.entry_level < self.invalidation_level
         ):
             raise ValidationError("Sell levels must order target < entry < invalidation")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class PositionSizeAdvice(ImmutableModel):
+    recommendation = models.OneToOneField(
+        Recommendation, on_delete=models.PROTECT, related_name="position_size"
+    )
+    policy_key = models.CharField(max_length=80)
+    policy_version = models.PositiveSmallIntegerField()
+    account_currency = models.CharField(max_length=3, default="CAD")
+    model_equity_cad = models.DecimalField(max_digits=14, decimal_places=2)
+    risk_fraction = models.DecimalField(max_digits=7, decimal_places=6)
+    setup_risk_cap_cad = models.DecimalField(max_digits=12, decimal_places=2)
+    aggregate_risk_cap_cad = models.DecimalField(max_digits=12, decimal_places=2)
+    currency_direction_risk_cap_cad = models.DecimalField(max_digits=12, decimal_places=2)
+    stop_distance_quote = models.DecimalField(max_digits=12, decimal_places=6)
+    quote_to_cad_rate = models.DecimalField(max_digits=18, decimal_places=8)
+    recommended_units = models.PositiveBigIntegerField()
+    projected_risk_cad = models.DecimalField(max_digits=12, decimal_places=2)
+    conversion_path = models.JSONField()
+    sized_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-sized_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(model_equity_cad__gt=0),
+                name="position_size_model_equity_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(risk_fraction__gt=0, risk_fraction__lte=1),
+                name="position_size_risk_fraction_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    setup_risk_cap_cad__gt=0,
+                    aggregate_risk_cap_cad__gte=models.F("setup_risk_cap_cad"),
+                    currency_direction_risk_cap_cad__gte=models.F("setup_risk_cap_cad"),
+                ),
+                name="position_size_caps_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(stop_distance_quote__gt=0, quote_to_cad_rate__gt=0),
+                name="position_size_conversion_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(recommended_units__gt=0),
+                name="position_size_units_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    projected_risk_cad__gt=0,
+                    projected_risk_cad__lte=models.F("setup_risk_cap_cad"),
+                ),
+                name="position_size_projected_risk_within_cap",
+            ),
+        ]
+
+    def clean(self):
+        recommendation = self.recommendation
+        if recommendation.contract_version < 2 or recommendation.action not in {
+            Recommendation.Action.BUY,
+            Recommendation.Action.SELL,
+        }:
+            raise ValidationError("Only a directional v2 recommendation can be sized")
+        if self.account_currency != "CAD":
+            raise ValidationError("Position sizing policy v1 requires CAD account currency")
+        if self.sized_at < recommendation.generated_at:
+            raise ValidationError("Position sizing cannot predate its recommendation")
+        expected_stop = abs(recommendation.entry_level - recommendation.invalidation_level)
+        if self.stop_distance_quote != expected_stop:
+            raise ValidationError("Position sizing stop distance must match the recommendation")
+        expected_cap = (self.model_equity_cad * self.risk_fraction).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        if self.setup_risk_cap_cad != expected_cap:
+            raise ValidationError("Position sizing risk cap must match equity times risk fraction")
+        expected_risk = (
+            Decimal(self.recommended_units) * self.stop_distance_quote * self.quote_to_cad_rate
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if self.projected_risk_cad != expected_risk:
+            raise ValidationError("Projected CAD risk must match units, stop, and conversion rate")
 
     def save(self, *args, **kwargs):
         self.full_clean()

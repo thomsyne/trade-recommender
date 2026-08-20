@@ -647,6 +647,47 @@ p {
 .exposure-grid .table-panel {
   min-width: 0;
 }
+.sizing-ledger table {
+  min-width: 980px;
+}
+.factor-ledger table {
+  min-width: 560px;
+}
+.mobile-scroll-hint {
+  color: var(--muted);
+  display: none;
+  font-size: 10px;
+  margin-top: 12px;
+}
+.health-facts {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 18px;
+}
+.health-facts div {
+  border-right: 1px solid var(--line);
+  min-width: 0;
+  padding: 14px 16px;
+}
+.health-facts div:last-child {
+  border-right: 0;
+}
+.health-facts span {
+  color: var(--muted);
+  display: block;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.health-facts strong {
+  display: block;
+  margin-top: 5px;
+}
+.recommendation-health .sample-warning p {
+  overflow-wrap: anywhere;
+}
 .setup-leg-list {
   margin-top: 16px;
 }
@@ -1579,6 +1620,15 @@ td small {
   .ops-summary {
     grid-template-columns: repeat(2, 1fr);
   }
+  .health-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .health-facts div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+  .health-facts div:nth-child(2n) {
+    border-right: 0;
+  }
   .forecast-facts {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -1660,6 +1710,17 @@ td small {
   .ops-summary {
     grid-template-columns: 1fr;
   }
+  .health-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .health-facts div,
+  .health-facts div:nth-child(2n) {
+    border-bottom: 1px solid var(--line);
+    border-right: 0;
+  }
+  .health-facts div:last-child {
+    border-bottom: 0;
+  }
   .forecast-lead {
     display: grid;
   }
@@ -1707,6 +1768,45 @@ td small {
   .setup-leg-list article {
     align-items: flex-start;
     display: grid;
+  }
+  .mobile-scroll-hint {
+    display: block;
+  }
+  .factor-ledger .table-scroll {
+    overflow: visible;
+  }
+  .factor-ledger table,
+  .factor-ledger tbody,
+  .factor-ledger tr,
+  .factor-ledger td {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+  .factor-ledger thead {
+    display: none;
+  }
+  .factor-ledger tr {
+    border: 1px solid var(--line);
+    margin-top: 14px;
+  }
+  .factor-ledger td {
+    align-items: center;
+    display: flex;
+    justify-content: space-between;
+    max-width: none;
+    padding: 11px 13px;
+  }
+  .factor-ledger td::before {
+    color: var(--muted);
+    content: attr(data-label);
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .factor-ledger td:first-child {
+    align-items: flex-start;
   }
   .leg-pills {
     justify-content: flex-start;

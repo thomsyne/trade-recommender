@@ -1,6 +1,16 @@
 from collections import defaultdict
+from decimal import Decimal
 
 from forecasts.models import Recommendation
+from forecasts.sizing import (
+    AGGREGATE_RISK_CAP_CAD,
+    CURRENCY_DIRECTION_RISK_CAP_CAD,
+    MODEL_EQUITY_CAD,
+    POLICY_KEY,
+    POLICY_VERSION,
+    RISK_FRACTION,
+    SETUP_RISK_CAP_CAD,
+)
 
 CURRENCY_SETUP_BUDGET = 2
 
@@ -10,7 +20,7 @@ def active_directional_recommendations():
         contract_version__gte=2,
         action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
         paper_result__isnull=True,
-    ).select_related("instrument", "paper_entry", "paper_result")
+    ).select_related("instrument", "paper_entry", "paper_result", "position_size")
 
 
 def decompose_pair(base_currency, quote_currency, action):
@@ -22,8 +32,17 @@ def decompose_pair(base_currency, quote_currency, action):
 
 
 def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
-    currency_legs = defaultdict(lambda: {"long": [], "short": []})
+    currency_legs = defaultdict(
+        lambda: {
+            "long": [],
+            "short": [],
+            "long_risk_cad": Decimal("0"),
+            "short_risk_cad": Decimal("0"),
+        }
+    )
     setups = []
+    total_risk_cad = Decimal("0")
+    sizing_missing_count = 0
     for recommendation in recommendations:
         if recommendation.contract_version < 2 or recommendation.action not in {
             Recommendation.Action.BUY,
@@ -34,6 +53,11 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
             continue
 
         entry = getattr(recommendation, "paper_entry", None)
+        size = getattr(recommendation, "position_size", None)
+        if size:
+            total_risk_cad += size.projected_risk_cad
+        else:
+            sizing_missing_count += 1
         legs = decompose_pair(
             recommendation.instrument.base_currency,
             recommendation.instrument.quote_currency,
@@ -43,6 +67,7 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
             "recommendation": recommendation,
             "state": "entered" if entry else "waiting",
             "state_label": "Entered paper position" if entry else "Waiting for entry",
+            "size": size,
             "legs": [
                 {"currency": currency, "direction": "long" if direction > 0 else "short"}
                 for currency, direction in legs
@@ -50,14 +75,22 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
         }
         setups.append(setup)
         for currency, direction in legs:
-            currency_legs[currency]["long" if direction > 0 else "short"].append(setup)
+            side = "long" if direction > 0 else "short"
+            currency_legs[currency][side].append(setup)
+            if size:
+                currency_legs[currency][f"{side}_risk_cad"] += size.projected_risk_cad
 
     currencies = []
     for currency in sorted(currency_legs):
         long_setups = currency_legs[currency]["long"]
         short_setups = currency_legs[currency]["short"]
+        long_risk_cad = currency_legs[currency]["long_risk_cad"]
+        short_risk_cad = currency_legs[currency]["short_risk_cad"]
         largest_side = max(len(long_setups), len(short_setups))
-        over_budget = largest_side > budget
+        largest_side_risk_cad = max(long_risk_cad, short_risk_cad)
+        over_budget = (
+            largest_side > budget or largest_side_risk_cad > CURRENCY_DIRECTION_RISK_CAP_CAD
+        )
         has_conflict = bool(long_setups and short_setups)
         has_duplicate = largest_side > 1
         if over_budget:
@@ -79,8 +112,14 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
                 "short_count": len(short_setups),
                 "gross_count": len(long_setups) + len(short_setups),
                 "net_count": len(long_setups) - len(short_setups),
+                "long_risk_cad": long_risk_cad,
+                "short_risk_cad": short_risk_cad,
+                "net_risk_cad": long_risk_cad - short_risk_cad,
+                "net_risk_abs_cad": abs(long_risk_cad - short_risk_cad),
+                "largest_side_risk_cad": largest_side_risk_cad,
                 "largest_side": largest_side,
                 "budget": budget,
+                "risk_budget_cad": CURRENCY_DIRECTION_RISK_CAP_CAD,
                 "over_budget": over_budget,
                 "has_conflict": has_conflict,
                 "has_duplicate": has_duplicate,
@@ -92,12 +131,15 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
     over_budget = sum(row["over_budget"] for row in currencies)
     conflicts = sum(row["has_conflict"] for row in currencies)
     duplicates = sum(row["has_duplicate"] for row in currencies)
-    if over_budget:
+    aggregate_over_budget = total_risk_cad > AGGREGATE_RISK_CAP_CAD
+    if over_budget or aggregate_over_budget:
         status, status_label = "over_budget", "Review required"
     elif conflicts:
         status, status_label = "conflict", "Conflicts detected"
     elif duplicates:
         status, status_label = "duplicate", "Overlap detected"
+    elif sizing_missing_count:
+        status, status_label = "missing", "Sizing unavailable"
     else:
         status, status_label = "clear", "Within guardrails"
     return {
@@ -107,6 +149,15 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
         "over_budget_count": over_budget,
         "conflict_count": conflicts,
         "duplicate_count": duplicates,
+        "total_risk_cad": total_risk_cad,
+        "aggregate_risk_cap_cad": AGGREGATE_RISK_CAP_CAD,
+        "aggregate_over_budget": aggregate_over_budget,
+        "currency_risk_cap_cad": CURRENCY_DIRECTION_RISK_CAP_CAD,
+        "setup_risk_cap_cad": SETUP_RISK_CAP_CAD,
+        "model_equity_cad": MODEL_EQUITY_CAD,
+        "risk_fraction_percent": RISK_FRACTION * 100,
+        "sizing_missing_count": sizing_missing_count,
+        "policy_label": f"{POLICY_KEY}-v{POLICY_VERSION}",
         "status": status,
         "status_label": status_label,
     }

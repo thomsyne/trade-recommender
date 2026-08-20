@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from forecasts.models import Forecast, Recommendation, RecommendationResolution
 from forecasts.services import classify_change
+from forecasts.sizing import size_recommendation
 from market.models import AuditEvent, Candle, Instrument, TechnicalSnapshot
 from research.models import PairEvidenceSnapshot
 
@@ -258,15 +259,24 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
 
 def generate_all_recommendations(*, provider=None, generated_at=None, allow_fixture=False):
     generated_at = generated_at or timezone.now()
-    return [
-        generate_recommendation(
-            instrument,
-            provider=provider,
-            generated_at=generated_at,
-            allow_fixture=allow_fixture,
-        )
-        for instrument in Instrument.objects.filter(active=True)
-    ]
+    recommendations = []
+    failures = []
+    for instrument in Instrument.objects.filter(active=True):
+        try:
+            recommendation = generate_recommendation(
+                instrument,
+                provider=provider,
+                generated_at=generated_at,
+                allow_fixture=allow_fixture,
+            )
+            size_recommendation(recommendation, sized_at=generated_at)
+        except Exception as error:
+            failures.append(f"{instrument.code}: {error}")
+        else:
+            recommendations.append(recommendation)
+    if failures:
+        raise RuntimeError("Recommendation batch incomplete — " + "; ".join(failures))
+    return recommendations
 
 
 def configured_provider():

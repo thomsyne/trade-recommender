@@ -92,11 +92,30 @@ while abstentions, legacy recommendations, and completed paper setups are
 excluded. Entered and waiting states remain visibly distinct.
 
 The Exposure page reports gross and net setup equivalents, repeated
-same-direction currency factors, and opposing factors. More than two unresolved
-setup equivalents in one currency direction breaches the declared advisory
-cap. This is direct factor accounting, not an estimated pair-correlation model.
-Until sizing exists, one setup equivalent is not a risk or cash amount and the
-guardrail cannot place, resize, or block an order.
+same-direction currency factors, and opposing factors. Position sizing policy
+`fixed-cad-risk-v1` uses a declared C$25,000 model portfolio and risks at most
+0.5% (C$125) from conditional entry to invalidation. Whole units are floored
+after converting quote-currency risk into CAD through hourly candles that were
+available when the immutable sizing record was created. The aggregate
+unresolved cap is C$500 and the same-direction currency-factor cap is C$250.
+Waiting setups count against both because they may activate.
+
+This is direct factor accounting, not an estimated pair-correlation model. It
+does not use OANDA practice NAV, place orders, reserve margin, or include gap,
+financing, commission, tax, or unobserved slippage in the displayed cash risk.
+If no point-in-time CAD conversion path exists, sizing is withheld rather than
+invented.
+
+## Batch reliability
+
+Every scheduled model batch attempts all active pairs even when one provider
+request or semantic validation fails. Successful pair records remain immutable
+and idempotent; queue retries therefore revisit only work that has not already
+completed against the same evidence and reference candle. A batch is marked
+failed until every pair completes, and Operations shows the latest batch state,
+attempt count, and per-pair error. The default structured-output allowance is
+6,000 tokens while the existing per-request and aggregate spend caps remain in
+force.
 
 ## Financing and commission sensitivity
 
@@ -114,9 +133,10 @@ Wednesday three-day charge. The model stores both minimum and maximum possible
 financing days because intrabar entry and exit times are unknown. OANDA's
 published formula is applied in pips using entry price, but the rates and
 commission amounts above are stress assumptions—not observed account charges.
-Exact rates can vary daily by pair, side, holiday, and account terms. Cash cost,
-CAD conversion, and tax treatment remain blocked until position sizing and
-point-in-time account-specific data exist.
+Exact rates can vary daily by pair, side, holiday, and account terms. Exact cash
+cost and tax treatment remain blocked. Position sizing now has a point-in-time
+CAD conversion, but financing and commission must not be applied to it until a
+prospective cost-policy version consumes account-term snapshots.
 
 Forward account-specific OANDA financing capture now runs hourly. These
 immutable snapshots do not rewrite existing cost assessments; a later cost

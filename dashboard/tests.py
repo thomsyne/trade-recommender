@@ -73,6 +73,7 @@ class DashboardTests(TestCase):
         self.assertContains(operations, "WAITING FOR CREDENTIAL")
         self.assertContains(operations, "Prospective OANDA cost snapshots")
         self.assertContains(operations, "No account-specific terms captured yet")
+        self.assertContains(operations, "Latest recommendation batch")
         self.assertContains(calibration, "Insufficient sample—do not infer skill")
         self.assertContains(calibration, "No v2 recommendation has reached five later")
         self.assertContains(paper, "Insufficient sample—do not infer profitability")
@@ -80,9 +81,9 @@ class DashboardTests(TestCase):
         self.assertContains(paper, "Stress uncertainty instead of fabricating precision")
         self.assertContains(paper, "3% adverse annual financing")
         self.assertContains(paper, "Costs are pip sensitivities, not exact charges")
-        self.assertContains(exposure, "Currency exposure")
+        self.assertContains(exposure, "CAD risk &amp; currency exposure")
         self.assertContains(exposure, "No unresolved directional v2 setup exists")
-        self.assertContains(exposure, "No position size")
+        self.assertContains(exposure, "Fixed—not OANDA NAV")
 
     def test_research_surface_is_private_read_only_and_escapes_source_text(self):
         self.assertRedirects(

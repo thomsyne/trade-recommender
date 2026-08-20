@@ -1,3 +1,4 @@
+from decimal import Decimal
 from types import SimpleNamespace
 
 from django.test import SimpleTestCase
@@ -6,7 +7,7 @@ from forecasts.exposure import build_exposure_report, decompose_pair
 from forecasts.models import Recommendation
 
 
-def setup(pair, action, *, contract_version=2, entered=False, resolved=False):
+def setup(pair, action, *, contract_version=2, entered=False, resolved=False, risk=None):
     base, quote = pair.split("_")
     return SimpleNamespace(
         contract_version=contract_version,
@@ -14,6 +15,11 @@ def setup(pair, action, *, contract_version=2, entered=False, resolved=False):
         instrument=SimpleNamespace(base_currency=base, quote_currency=quote),
         paper_entry=object() if entered else None,
         paper_result=object() if resolved else None,
+        position_size=(
+            SimpleNamespace(projected_risk_cad=Decimal(str(risk)), recommended_units=10000)
+            if risk is not None
+            else None
+        ),
     )
 
 
@@ -92,3 +98,17 @@ class ExposureTests(SimpleTestCase):
         )
 
         self.assertEqual([item["state"] for item in report["setups"]], ["waiting", "entered"])
+
+    def test_cash_risk_is_aggregated_by_setup_and_currency_direction(self):
+        report = build_exposure_report(
+            [
+                setup("USD_CAD", Recommendation.Action.SELL, risk="125.00"),
+                setup("EUR_USD", Recommendation.Action.BUY, risk="124.99"),
+            ]
+        )
+        usd = next(row for row in report["currencies"] if row["currency"] == "USD")
+
+        self.assertEqual(report["total_risk_cad"], Decimal("249.99"))
+        self.assertEqual(usd["short_risk_cad"], Decimal("249.99"))
+        self.assertFalse(usd["over_budget"])
+        self.assertEqual(report["sizing_missing_count"], 0)
