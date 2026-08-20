@@ -158,6 +158,39 @@ class TechnicalSnapshot(models.Model):
         ordering = ("-as_of",)
 
 
+class OandaInstrumentTermsSnapshot(models.Model):
+    instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
+    environment = models.CharField(max_length=12)
+    account_fingerprint = models.CharField(max_length=64)
+    account_currency = models.CharField(max_length=3)
+    long_financing_rate = models.DecimalField(max_digits=15, decimal_places=10)
+    short_financing_rate = models.DecimalField(max_digits=15, decimal_places=10)
+    financing_days = models.JSONField()
+    commission = models.JSONField(default=dict)
+    commission_supplied = models.BooleanField(default=False)
+    margin_rate = models.DecimalField(max_digits=10, decimal_places=6)
+    pip_location = models.SmallIntegerField()
+    response_sha256 = models.CharField(max_length=64)
+    captured_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ("-captured_at", "instrument__display_order")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("instrument", "environment", "account_fingerprint", "captured_at"),
+                name="unique_oanda_terms_snapshot",
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("OANDA instrument terms snapshots are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("OANDA instrument terms snapshots are immutable")
+
+
 class AuditEvent(models.Model):
     occurred_at = models.DateTimeField(auto_now_add=True)
     event_type = models.CharField(max_length=80)

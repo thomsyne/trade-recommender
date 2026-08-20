@@ -533,8 +533,9 @@ These are map entries, not permission for a builder to guess:
 - Exact EC2 region, domain/DNS ownership, permitted source CIDRs, and SNS email.
 - Exact economic-calendar trial candidates and their current terms.
 - Source-by-source retention and external-model permissions.
-- Exact point-in-time account financing availability; v1 sensitivity ranges
-  are locked at 0%/3%/6% adverse annual cost and 0.0/0.5/1.0 commission pips.
+- Exact financing before the first prospective OANDA account snapshot and
+  missing practice-account commission terms; v1 sensitivity ranges remain
+  locked at 0%/3%/6% adverse annual cost and 0.0/0.5/1.0 commission pips.
 - Stabilization delay and material probability-change threshold.
 - FX holiday/session calendar library and OANDA candle alignment fixtures.
 - RPO/RTO restore-drill acceptance environment.

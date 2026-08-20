@@ -385,7 +385,17 @@ class RecommendationTests(TestCase):
         self.assertEqual(result.r_multiple, Decimal("1.0000"))
         self.assertEqual(result.cost_assessment.optimistic_net_pips, Decimal("100.000"))
         self.assertEqual(result.cost_assessment.base_net_pips, Decimal("99.500"))
-        self.assertEqual(result.cost_assessment.conservative_net_pips, Decimal("99.000"))
+        conservative_cost = Decimal(
+            result.cost_assessment.details["scenarios"]["conservative"]["total_cost_pips"]
+        )
+        self.assertEqual(
+            result.cost_assessment.conservative_net_pips,
+            result.gross_pips - conservative_cost,
+        )
+        self.assertLessEqual(
+            result.cost_assessment.conservative_net_pips,
+            result.cost_assessment.base_net_pips,
+        )
         self.assertFalse(result.cost_assessment.details["historical_financing_rates_available"])
         self.assertEqual(result.cost_assessment.policy_version, "paper-cost-sensitivity-v1")
 

@@ -71,6 +71,8 @@ class DashboardTests(TestCase):
         self.assertNotContains(pair, "next slice")
         self.assertContains(operations, "Rights-aware registry")
         self.assertContains(operations, "WAITING FOR CREDENTIAL")
+        self.assertContains(operations, "Prospective OANDA cost snapshots")
+        self.assertContains(operations, "No account-specific terms captured yet")
         self.assertContains(calibration, "Insufficient sample—do not infer skill")
         self.assertContains(calibration, "No v2 recommendation has reached five later")
         self.assertContains(paper, "Insufficient sample—do not infer profitability")

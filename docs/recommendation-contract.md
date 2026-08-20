@@ -118,6 +118,12 @@ Exact rates can vary daily by pair, side, holiday, and account terms. Cash cost,
 CAD conversion, and tax treatment remain blocked until position sizing and
 point-in-time account-specific data exist.
 
+Forward account-specific OANDA financing capture now runs hourly. These
+immutable snapshots do not rewrite existing cost assessments; a later cost
+policy version may consume only snapshots captured before each outcome. OANDA
+currently omits commission terms for the configured practice account, so v1
+commission sensitivities remain necessary.
+
 ## Spend limits
 
 Defaults use Claude Sonnet 5 list rates and enforce:

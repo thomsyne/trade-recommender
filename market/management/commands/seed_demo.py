@@ -82,6 +82,23 @@ class Command(BaseCommand):
                 job.enabled = bool(settings.OANDA_TOKEN)
                 job.save(update_fields=("task_name", "parameters", "interval_seconds", "enabled"))
 
+        terms_enabled = bool(settings.OANDA_TOKEN and settings.OANDA_ACCOUNT_ID)
+        terms_job, _ = ScheduledJob.objects.get_or_create(
+            name="OANDA account terms",
+            defaults={
+                "task_name": "market.capture_oanda_terms",
+                "parameters": {},
+                "interval_seconds": 3_600,
+                "next_run_at": timezone.now() + timedelta(hours=1),
+                "enabled": terms_enabled,
+            },
+        )
+        terms_job.task_name = "market.capture_oanda_terms"
+        terms_job.parameters = {}
+        terms_job.interval_seconds = 3_600
+        terms_job.enabled = terms_enabled
+        terms_job.save(update_fields=("task_name", "parameters", "interval_seconds", "enabled"))
+
         password = os.getenv("DEMO_OWNER_PASSWORD", "orb-demo-only")
         if settings.DEBUG:
             user, created = get_user_model().objects.get_or_create(

@@ -1,7 +1,17 @@
+import hashlib
+import json
+
 from django.db import transaction
 from django.utils import timezone
 
-from market.models import AuditEvent, Candle, IngestionRun, TechnicalSnapshot
+from market.models import (
+    AuditEvent,
+    Candle,
+    IngestionRun,
+    Instrument,
+    OandaInstrumentTermsSnapshot,
+    TechnicalSnapshot,
+)
 from market.oanda import manifest_hash
 from market.quality import validate_candles
 from market.technicals import calculate_technicals
@@ -104,3 +114,58 @@ def calculate_and_store_snapshot(instrument, granularity):
         defaults={"candle_count": len(candles), **values.__dict__},
     )
     return snapshot
+
+
+@transaction.atomic
+def store_oanda_terms(payload, account_id, captured_at=None):
+    captured_at = (captured_at or timezone.now()).replace(minute=0, second=0, microsecond=0)
+    account_fingerprint = hashlib.sha256(account_id.encode()).hexdigest()
+    snapshots = []
+    created_count = 0
+    for item in payload["instruments"]:
+        instrument = Instrument.objects.get(code=item["name"])
+        financing = item["financing"]
+        normalized = {
+            "instrument": item["name"],
+            "account_currency": payload["account_currency"],
+            "financing": financing,
+            "commission": item.get("commission"),
+            "marginRate": item["marginRate"],
+            "pipLocation": item["pipLocation"],
+            "manifest": payload["manifest"],
+        }
+        response_sha256 = hashlib.sha256(
+            json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        snapshot, created = OandaInstrumentTermsSnapshot.objects.get_or_create(
+            instrument=instrument,
+            environment=payload["manifest"]["environment"],
+            account_fingerprint=account_fingerprint,
+            captured_at=captured_at,
+            defaults={
+                "account_currency": payload["account_currency"],
+                "long_financing_rate": financing["longRate"],
+                "short_financing_rate": financing["shortRate"],
+                "financing_days": financing["financingDaysOfWeek"],
+                "commission": item.get("commission") or {},
+                "commission_supplied": item.get("commission") is not None,
+                "margin_rate": item["marginRate"],
+                "pip_location": item["pipLocation"],
+                "response_sha256": response_sha256,
+            },
+        )
+        created_count += created
+        snapshots.append(snapshot)
+    if created_count:
+        AuditEvent.objects.create(
+            event_type="market.oanda_terms_captured",
+            actor="market.services.store_oanda_terms",
+            subject_type="OandaInstrumentTermsSnapshot",
+            subject_id=captured_at.isoformat(),
+            payload={
+                "instrument_count": len(snapshots),
+                "environment": payload["manifest"]["environment"],
+                "commission_supplied_count": sum(item.commission_supplied for item in snapshots),
+            },
+        )
+    return snapshots

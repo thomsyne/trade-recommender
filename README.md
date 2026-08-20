@@ -29,6 +29,8 @@ separate point-in-time evidence ledger.
   handling, spread-aware exits, expiry, gross pips, and R-multiples;
 - immutable optimistic/base/conservative financing and commission sensitivity
   with bounded New York rollover counts and separate net-pip/net-R views;
+- hourly private OANDA account-term snapshots with prospective long/short
+  financing schedules and explicit missing-commission state;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
 - bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
   response-size protections;
@@ -72,8 +74,8 @@ export OANDA_ENVIRONMENT='practice'
 ```
 
 `OANDA_TOKEN` remains a supported alias. The candle endpoint does not need the
-account ID today, but retaining the separate setting avoids conflating
-credentials when account reconciliation is added. Review
+account ID; prospective financing capture does. The ID is stored only as a
+SHA-256 fingerprint and is never rendered or logged. Review
 [OANDA provider constraints](docs/providers/oanda.md) first.
 
 ## Commands

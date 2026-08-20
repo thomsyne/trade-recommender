@@ -21,14 +21,20 @@ another. Hourly bid/ask candles support prospective paper execution only.
 OANDA documents annual long/short financing rates, account-specific commission
 fields, financing weekdays, and `daysCharged` through the account instrument
 endpoint. Those values can vary by instrument, side, date, holiday, division,
-and account terms. The application does not yet capture point-in-time account
-instrument snapshots because `OANDA_ACCOUNT_ID` is not configured.
+and account terms. When `OANDA_ACCOUNT_ID` is configured, the application
+captures immutable hourly snapshots for the four canonical pairs. It stores the
+account currency and a one-way account fingerprint, never the account ID.
 
 Paper cost reporting therefore remains sensitivity-only under
 `paper-cost-sensitivity-v1`: it uses OANDA's published position-value formula
 and standard 5 p.m. New York/Wednesday rollover semantics, but labels its 0%,
 3%, and 6% adverse annual rates plus 0.0, 0.5, and 1.0 pip commissions as stress
 assumptions rather than observed charges.
+
+Run `python manage.py capture_oanda_terms` for a manual capture. The durable
+`OANDA account terms` job repeats hourly so a snapshot brackets the 5 p.m. New
+York rollover despite DST. The practice endpoint currently supplies financing
+but no commission object; absence remains explicit and does not mean zero.
 
 ## Credentials
 

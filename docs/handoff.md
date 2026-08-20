@@ -60,6 +60,13 @@ three-day semantics, and keeps observed gross execution separate from declared
 financing/commission stress assumptions. It does not claim exact broker charges,
 cash returns, or CAD accounting.
 
+Prospective OANDA Account Terms capture is implemented: the configured v20
+account successfully returns CAD account context and financing schedules for
+all four pairs. Immutable hourly records preserve long/short rates, rollover
+days, margin, pip location, response hash, environment, and a one-way account
+fingerprint. The practice response omits commission, which remains visibly
+unknown rather than assumed zero.
+
 ## Verification gate
 
 Run:
@@ -79,13 +86,14 @@ Research, and Operations at desktop and narrow viewport widths.
 ## Next pickup
 
 Define a versioned position-sizing contract that converts advisory setup
-equivalents to actual risk budgets and enables cash/CAD reporting. Keep exact
-account-specific financing capture as a separate prospective enhancement once
-`OANDA_ACCOUNT_ID` and the retention contract are settled.
+equivalents to actual risk budgets and enables cash/CAD reporting. After the new
+account-term snapshots cover resolved holdings, introduce a prospective cost
+policy version that consumes them without rewriting v1 assessments.
 
 ## Still OPEN
 
 - provider permission for restricted/full-text external-model processing;
 - paid economic-calendar/PIT provider trial;
 - remaining BLS/Census release-calendar automation;
-- exact point-in-time OANDA financing and commission history.
+- exact historical OANDA financing before the first captured snapshot;
+- account-specific commission terms (not supplied by the practice endpoint).

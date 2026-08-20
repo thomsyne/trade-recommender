@@ -19,6 +19,7 @@ from market.models import (
     Candle,
     IngestionRun,
     Instrument,
+    OandaInstrumentTermsSnapshot,
     SourceRegistry,
     TechnicalSnapshot,
 )
@@ -543,6 +544,7 @@ def operations(request):
             "runs": IngestionRun.objects.select_related("instrument", "source")[:20],
             "events": AuditEvent.objects.all()[:20],
             "sources": SourceRegistry.objects.all(),
+            "oanda_terms": OandaInstrumentTermsSnapshot.objects.select_related("instrument")[:4],
             "research_retrievals": RawRetrieval.objects.select_related("source_policy__source")[
                 :20
             ],

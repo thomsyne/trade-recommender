@@ -36,6 +36,7 @@ class OandaClient:
         }
         if environment not in hosts:
             raise ValueError("OANDA_ENVIRONMENT must be 'practice' or 'live'")
+        self.environment = environment
         self.client = httpx.Client(
             base_url=f"https://{hosts[environment]}/v3",
             headers={"Authorization": f"Bearer {token}"},
@@ -107,6 +108,32 @@ class OandaClient:
         }
         return candles, manifest
 
+    def fetch_account_terms(self, account_id, instruments):
+        if not account_id:
+            raise ValueError("OANDA_ACCOUNT_ID is required")
+        codes = sorted(instruments)
+        summary_response = self.client.get(f"/accounts/{account_id}/summary")
+        summary = _response_json(summary_response)
+        instruments_response = self.client.get(
+            f"/accounts/{account_id}/instruments",
+            params={"instruments": ",".join(codes)},
+        )
+        payload = _response_json(instruments_response)
+        returned = payload.get("instruments", [])
+        if {item.get("name") for item in returned} != set(codes):
+            raise OandaError("OANDA account instruments response was incomplete")
+        return {
+            "account_currency": summary.get("account", {}).get("currency"),
+            "instruments": returned,
+            "manifest": {
+                "endpoint": "account-summary-and-instruments",
+                "environment": self.environment,
+                "instruments": codes,
+                "summary_status": summary_response.status_code,
+                "instruments_status": instruments_response.status_code,
+            },
+        }
+
 
 def manifest_hash(manifest):
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
@@ -128,6 +155,17 @@ def _parse_candle(item):
         ask_low=Decimal(ask["l"]),
         ask_close=Decimal(ask["c"]),
     )
+
+
+def _response_json(response):
+    if response.status_code != 200:
+        try:
+            message = response.json().get("errorMessage")
+        except (json.JSONDecodeError, TypeError):
+            message = None
+        detail = f": {message}" if message else ""
+        raise OandaError(f"OANDA returned HTTP {response.status_code}{detail}")
+    return response.json()
 
 
 def _iso(value):

@@ -71,6 +71,37 @@ class OandaClientTests(SimpleTestCase):
 
         self.assertEqual(include_first_values, ["true", "false"])
 
+    def test_fetches_account_terms_without_account_id_in_manifest(self):
+        def handler(request):
+            if request.url.path.endswith("/summary"):
+                return httpx.Response(200, json={"account": {"currency": "CAD"}})
+            return httpx.Response(
+                200,
+                json={
+                    "instruments": [
+                        {
+                            "name": "USD_CAD",
+                            "marginRate": "0.02",
+                            "pipLocation": -4,
+                            "financing": {
+                                "longRate": "-0.02",
+                                "shortRate": "0.01",
+                                "financingDaysOfWeek": [
+                                    {"dayOfWeek": "WEDNESDAY", "daysCharged": 3}
+                                ],
+                            },
+                        }
+                    ]
+                },
+            )
+
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        payload = client.fetch_account_terms("private-account-id", ["USD_CAD"])
+
+        self.assertEqual(payload["account_currency"], "CAD")
+        self.assertEqual(payload["instruments"][0]["financing"]["longRate"], "-0.02")
+        self.assertNotIn("private-account-id", str(payload["manifest"]))
+
 
 def _payload(timestamp, complete):
     prices = {"o": "1.1000", "h": "1.1020", "l": "1.0990", "c": "1.1010"}

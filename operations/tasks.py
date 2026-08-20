@@ -7,7 +7,7 @@ from forecasts.recommendations import generate_all_recommendations, resolve_due_
 from forecasts.services import resolve_due_forecasts
 from market.models import IngestionRun, Instrument, SourceRegistry
 from market.oanda import OandaClient
-from market.services import store_ingestion
+from market.services import store_ingestion, store_oanda_terms
 from research.models import MacroSeries, SourcePolicy
 from research.services import (
     capture_all_pair_evidence,
@@ -21,6 +21,8 @@ from research.services import (
 def execute_task(task_name, parameters):
     if task_name == "market.ingest_oanda":
         return ingest_oanda(parameters)
+    if task_name == "market.capture_oanda_terms":
+        return capture_oanda_terms()
     if task_name == "research.ingest_feed":
         policy = SourcePolicy.objects.get(slug=parameters["source"])
         return ingest_feed(policy, parameters["url"])
@@ -65,6 +67,15 @@ def ingest_oanda(parameters):
     if run.status == IngestionRun.Status.SUCCEEDED and granularity in {"H1", "D"}:
         resolve_due_paper_trades(instrument)
     return run
+
+
+def capture_oanda_terms():
+    if not settings.OANDA_ACCOUNT_ID:
+        raise ValueError("OANDA_ACCOUNT_ID is not configured")
+    codes = list(Instrument.objects.filter(active=True).values_list("code", flat=True))
+    with OandaClient(settings.OANDA_TOKEN, settings.OANDA_ENVIRONMENT) as client:
+        payload = client.fetch_account_terms(settings.OANDA_ACCOUNT_ID, codes)
+    return store_oanda_terms(payload, settings.OANDA_ACCOUNT_ID)
 
 
 def _datetime(value):
