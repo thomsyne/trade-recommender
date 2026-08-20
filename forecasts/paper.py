@@ -6,7 +6,12 @@ from django.db import transaction
 from django.utils import timezone
 
 from forecasts.costs import assess_due_paper_costs, create_cost_assessment
-from forecasts.models import PaperTradeEntry, PaperTradeResult, Recommendation
+from forecasts.models import (
+    PaperLifecycleEvent,
+    PaperTradeEntry,
+    PaperTradeResult,
+    Recommendation,
+)
 from market.models import AuditEvent, Candle, IngestionRun
 
 PRICE_QUANTUM = Decimal("0.000001")
@@ -19,7 +24,7 @@ NEW_YORK = ZoneInfo("America/New_York")
 def resolve_due_paper_trades(instrument=None):
     assess_due_paper_costs()
     recommendations = Recommendation.objects.filter(
-        contract_version__gte=2,
+        contract_version__in=(2, 3),
         action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
         paper_result__isnull=True,
     ).select_related("reference_candle", "paper_entry")
@@ -40,9 +45,17 @@ def resolve_paper_trade(recommendation):
     if existing:
         return existing
     if (
-        recommendation.contract_version < 2
+        recommendation.contract_version not in {2, 3}
         or recommendation.action == Recommendation.Action.ABSTAIN
     ):
+        return None
+    lifecycle = recommendation.paper_lifecycle_events.order_by("-occurred_at", "-id").first()
+    if not lifecycle or lifecycle.state in {
+        PaperLifecycleEvent.State.LEGACY_UNADJUDICATED,
+        PaperLifecycleEvent.State.EXPIRED_UNOBSERVED,
+        PaperLifecycleEvent.State.CANCELLED,
+        PaperLifecycleEvent.State.MISSING_DATA,
+    }:
         return None
 
     horizon = _horizon_candle(recommendation)
@@ -96,6 +109,11 @@ def resolve_paper_trade(recommendation):
                     entered_at=timezone.now(),
                 )
                 entry_created = True
+                _record_lifecycle(
+                    recommendation,
+                    PaperLifecycleEvent.State.ENTERED,
+                    details={"paper_entry_id": entry.pk, "candle_id": candle.pk},
+                )
                 _audit_entry(entry)
                 if stop_hit:
                     return _create_result(
@@ -144,6 +162,20 @@ def resolve_paper_trade(recommendation):
                 )
 
     if not horizon or not _has_coverage(recommendation, expires_at, candles):
+        if not horizon and timezone.now() > recommendation.generated_at + timedelta(days=14):
+            _record_lifecycle(
+                recommendation,
+                PaperLifecycleEvent.State.MISSING_DATA,
+                reason_code="daily_horizon_unavailable",
+                details={"sessions_required": recommendation.expires_after_sessions},
+            )
+        if expires_at and timezone.now() > expires_at + timedelta(hours=24):
+            _record_lifecycle(
+                recommendation,
+                PaperLifecycleEvent.State.EXPIRED_UNOBSERVED,
+                reason_code="hourly_coverage_unavailable",
+                details={"expected_through": expires_at.isoformat()},
+            )
         return entry if entry_created else None
     if not entry:
         result = PaperTradeResult.objects.create(
@@ -155,6 +187,11 @@ def resolve_paper_trade(recommendation):
                 "hourly_coverage_verified": True,
                 "no_execution_assumed": True,
             },
+        )
+        _record_lifecycle(
+            recommendation,
+            PaperLifecycleEvent.State.CLOSED,
+            details={"paper_result_id": result.pk, "outcome": result.outcome},
         )
         _audit_result(result)
         return result
@@ -252,6 +289,11 @@ def _create_result(
             "commission_included": False,
         },
     )
+    _record_lifecycle(
+        recommendation,
+        PaperLifecycleEvent.State.CLOSED,
+        details={"paper_result_id": result.pk, "outcome": result.outcome},
+    )
     _audit_result(result)
     create_cost_assessment(result)
     return result
@@ -263,6 +305,8 @@ def _horizon_candle(recommendation):
             instrument=recommendation.instrument,
             granularity="D",
             timestamp__gt=recommendation.reference_candle.timestamp,
+            complete=True,
+            ingestion_run__status=IngestionRun.Status.SUCCEEDED,
         ).order_by("timestamp")[: recommendation.expires_after_sessions]
     )
     return candles[-1] if len(candles) == recommendation.expires_after_sessions else None
@@ -331,6 +375,19 @@ def _audit_entry(entry):
             "execution_side": entry.execution_side,
         },
     )
+
+
+def _record_lifecycle(recommendation, state, *, reason_code="", details=None):
+    event, _ = PaperLifecycleEvent.objects.get_or_create(
+        recommendation=recommendation,
+        state=state,
+        defaults={
+            "reason_code": reason_code,
+            "details": details or {},
+            "occurred_at": max(timezone.now(), recommendation.generated_at),
+        },
+    )
+    return event
 
 
 def _audit_result(result):

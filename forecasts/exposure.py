@@ -1,7 +1,9 @@
 from collections import defaultdict
 from decimal import Decimal
 
-from forecasts.models import Recommendation
+from django.db.models import Prefetch
+
+from forecasts.models import PositionSizeAdvice, Recommendation
 from forecasts.sizing import (
     AGGREGATE_RISK_CAP_CAD,
     CURRENCY_DIRECTION_RISK_CAP_CAD,
@@ -16,11 +18,23 @@ CURRENCY_SETUP_BUDGET = 2
 
 
 def active_directional_recommendations():
-    return Recommendation.objects.filter(
-        contract_version__gte=2,
-        action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
-        paper_result__isnull=True,
-    ).select_related("instrument", "paper_entry", "paper_result", "position_size")
+    return (
+        Recommendation.objects.filter(
+            contract_version__in=(2, 3),
+            action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
+            paper_result__isnull=True,
+        )
+        .select_related("instrument", "paper_entry", "paper_result")
+        .prefetch_related(
+            Prefetch(
+                "position_sizes",
+                queryset=PositionSizeAdvice.objects.filter(
+                    policy_key=POLICY_KEY, policy_version=POLICY_VERSION
+                ),
+                to_attr="current_position_sizes",
+            )
+        )
+    )
 
 
 def decompose_pair(base_currency, quote_currency, action):
@@ -44,7 +58,7 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
     total_risk_cad = Decimal("0")
     sizing_missing_count = 0
     for recommendation in recommendations:
-        if recommendation.contract_version < 2 or recommendation.action not in {
+        if recommendation.contract_version not in {2, 3} or recommendation.action not in {
             Recommendation.Action.BUY,
             Recommendation.Action.SELL,
         }:
@@ -53,7 +67,8 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
             continue
 
         entry = getattr(recommendation, "paper_entry", None)
-        size = getattr(recommendation, "position_size", None)
+        current_sizes = getattr(recommendation, "current_position_sizes", None)
+        size = current_sizes[0] if current_sizes else getattr(recommendation, "position_size", None)
         if size:
             total_risk_cad += size.projected_risk_cad
         else:

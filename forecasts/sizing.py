@@ -96,10 +96,19 @@ def quote_to_cad(quote_currency, *, as_of):
 
 @transaction.atomic
 def size_recommendation(recommendation, *, sized_at=None):
-    existing = PositionSizeAdvice.objects.filter(recommendation=recommendation).first()
+    recommendation = (
+        Recommendation.objects.select_for_update()
+        .select_related("instrument")
+        .get(pk=recommendation.pk)
+    )
+    existing = PositionSizeAdvice.objects.filter(
+        recommendation=recommendation,
+        policy_key=POLICY_KEY,
+        policy_version=POLICY_VERSION,
+    ).first()
     if existing:
         return existing
-    if recommendation.contract_version < 2 or recommendation.action not in {
+    if recommendation.contract_version not in {2, 3} or recommendation.action not in {
         Recommendation.Action.BUY,
         Recommendation.Action.SELL,
     }:
@@ -148,7 +157,7 @@ def size_recommendation(recommendation, *, sized_at=None):
 def size_active_recommendations(*, sized_at=None):
     sized_at = sized_at or timezone.now()
     recommendations = Recommendation.objects.filter(
-        contract_version__gte=2,
+        contract_version__in=(2, 3),
         action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
         paper_result__isnull=True,
     ).select_related("instrument")

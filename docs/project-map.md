@@ -1,6 +1,6 @@
 # FX Forecast Lab — Four-Quadrant Project Map
 
-**Status:** Planning complete; Foundation, Market Truth, Forecast Contract, Research Evidence, Governed Recommendations, Prospective Calibration, and Paper Execution implemented
+**Status:** Original architecture walk; Foundation through governed sizing implemented. See `docs/governed-learning-map.md` for the newer controlling map for portfolio admission, notifications, postmortems, and learning governance.
 **Prepared:** 2026-08-18  
 **Purpose:** Durable source of truth for the first implementation and future Amp threads
 

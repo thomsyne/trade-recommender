@@ -1,4 +1,4 @@
-# Governed recommendation contract v2
+# Governed recommendation contract v3
 
 This contract permits one bounded model assessment of an immutable
 `PairEvidenceSnapshot`. It does not authorize broker access, order placement,
@@ -6,12 +6,11 @@ portfolio sizing, silent source reweighting, or historical sentiment replay.
 
 ## Input boundary
 
-The provider receives only the selected snapshot, its information cutoff, a
-frozen daily reference midpoint and neutral band, the fixed five-session
-horizon, and stable evidence IDs added to each included record. It cannot browse
-or call tools. News text is explicitly untrusted data.
-The packet contains bounded normalized market/research fields and filters out
-any news item not explicitly marked eligible for model processing.
+The provider receives rights-cleared macro, event, and news records plus
+non-reconstructable local technical labels. OANDA prices, candle identifiers,
+numeric technicals, reference midpoint, neutral-band value, and setup levels
+are withheld. It cannot browse or call tools. News text is explicitly untrusted
+data, and news not marked eligible for model processing is excluded.
 
 Generation fails closed when the packet is more than eight hours old, its H4
 market/technical inputs exceed 12 weekday hours, fixture market data is present,
@@ -27,17 +26,21 @@ validates:
 - integer up/neutral/down probabilities summing to 100;
 - summary plus separate technical, macro, and sentiment cases;
 - at least one risk and citations to supplied evidence IDs only;
-- conditional entry, target, invalidation, and five-session expiry;
-- directional level ordering;
+- `none`/`null` for all model-authored entry fields;
 - at least one technical and one non-technical citation for a setup.
 
+For a directional response, deterministic local policy v1 attaches the current
+local midpoint as conditional entry and bounded local support/resistance as
+invalidation/target. The model cannot author or override these numeric fields.
+
 Malformed or semantically invalid output creates no recommendation. There is no
-repair prompt in v1: failure is visible and retryable without letting the model
+repair prompt in this contract: failure is visible without letting the model
 negotiate the contract.
 
 ## Immutable audit record
 
-`Recommendation` stores the exact transformed input packet, input SHA-256,
+`Recommendation` stores the exact transformed input packet, full
+prompt/schema/model/request SHA-256,
 source snapshot, provider/model/contract version, provider response ID, token
 counts, calculated API cost, validated output, information cutoff, frozen daily
 reference candle/midpoint/neutral band, and optional mechanical tactical control.
@@ -50,7 +53,7 @@ executed trade.
 
 ## Prospective resolution and calibration
 
-Version 2 defines up, neutral, and down against the midpoint close of the fifth
+Versions 2 and 3 define up, neutral, and down against the midpoint close of the fifth
 subsequently completed OANDA daily candle. The neutral band is frozen at issue
 time as the greater of 0.25 × daily ATR(14) and 2 × closing spread. Equality is
 neutral. `RecommendationResolution` immutably stores the endpoint, outcome,
@@ -59,13 +62,15 @@ score but no directional hit label.
 
 Version 1 recommendations are deliberately excluded: their confidence number
 did not identify a precise event, so retroactive interpretation would create
-false calibration. The dashboard remains explicitly insufficient-sample until
-30 version 2 outcomes resolve. It is descriptive only and cannot alter prompts,
-sources, weights, or execution.
+false calibration. The current dashboard still has a provisional raw-30
+display threshold. It is descriptive only and must be replaced by the
+dependence-aware experiment-health slice before any reportability or skill
+claim.
 
 ## Paper setup lifecycle
 
-Directional version 2 setups are monitored only against completed hourly OANDA
+Directional version 3 setups begin with an immutable `pending` lifecycle event.
+Versions 2 and 3 are monitored only against completed hourly OANDA
 bid/ask candles whose intervals start after recommendation generation. Buys
 enter on ask and exit on bid; sells enter on bid and exit on ask. Limit fills do
 not receive favorable price improvement, adverse stop gaps use the opening
@@ -77,6 +82,8 @@ the entry condition already held at that candle's open. Open setups expire at
 the executable close of the fifth broker daily session. Immutable
 `PaperTradeEntry` and `PaperTradeResult` records store the evidence candles,
 spread, fill prices, gross pips, R-multiple, and policy details.
+Explicit immutable lifecycle events distinguish pending, entered, closed,
+legacy-unadjudicated, expired-unobserved, cancelled, and missing-data states.
 
 These are paper observations, not orders. Gross pips embed bid/ask execution but
 exclude financing, commission, sizing, leverage, and taxes. They are reported
@@ -85,7 +92,7 @@ until 30 activated setups resolve.
 
 ## Currency exposure guardrails
 
-Every unresolved directional version 2 setup is decomposed deterministically:
+Every unresolved directional supported setup is decomposed deterministically:
 buying BASE/QUOTE is long base and short quote; selling it is short base and
 long quote. Waiting entries remain included because they can still activate,
 while abstentions, legacy recommendations, and completed paper setups are
@@ -152,8 +159,10 @@ Defaults use Claude Sonnet 5 list rates and enforce:
 - USD $2 per UTC day;
 - USD $40 per UTC month.
 
-The limits and model are environment configuration. Actual token cost is stored
-on every successful record. The four-hour schedule remains disabled until both
+The limits and model are environment configuration. A serialized reservation is
+created before every provider call; reserved and uncertain attempts count
+conservatively, and estimated versus actual cost remains distinct. Actual token
+cost is stored on every successful record. The four-hour schedule remains disabled until both
 `ANTHROPIC_API_KEY` is configured and `RECOMMENDATION_SCHEDULE_ENABLED=true` is
 set after a successful manual generation.
 
@@ -164,6 +173,6 @@ python manage.py generate_recommendations
 python manage.py generate_recommendations USD_CAD
 ```
 
-The next contract may add portfolio sizing and point-in-time account-specific
-cost capture. It must remain separate from thesis scoring and must not
-reconstruct historical recommendations.
+Portfolio admission remains a later prospective state machine. It must remain
+separate from thesis scoring and must not reconstruct historical
+recommendations.

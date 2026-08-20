@@ -76,6 +76,21 @@ created. Recommendation batches attempt every pair, retain idempotent successes,
 fail visibly when any pair remains incomplete, and expose the latest state on
 Operations.
 
+The Governed Learning reliability kernel is implemented. Recommendation
+contract v3 withholds numeric OANDA market/technical data from Anthropic and
+attaches levels through deterministic local policy. Exact contract versions
+fail closed; v2 remains resolvable without being rewritten. Position-size and
+paper-cost assessments are append-only per policy version, paper lifecycle
+events explicitly represent legacy/pending/entered/closed/missing states, and
+preexisting unresolved recommendations are marked legacy-unadjudicated.
+
+The operations queue now uses owned expiring leases, heartbeats, execution
+deadlines, stale-work recovery, safe error summaries, explicit missed-run
+policies, and timezone-aware daily wall-clock schedules. Transactional outbox
+and delivery-attempt records are ready for later Gmail delivery, and serialized
+provider-budget reservations prevent concurrent authorization from exceeding
+declared caps. No real email adapter is enabled.
+
 ## Verification gate
 
 Run:
@@ -94,10 +109,11 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-After account-term snapshots bracket enough newly resolved holdings, introduce
-a prospective cost-policy version that consumes observed financing without
-rewriting v1 assessments. Keep commission as a declared sensitivity until OANDA
-or another authoritative account source supplies it.
+Implement Slice 2 from `docs/governed-learning-map.md`: prospective portfolio
+admission, competing owner-selection cohorts, dashboard inbox/selector, and the
+Gmail adapter. Use the portfolio guard, versioned assessment, outbox, lease, and
+calendar primitives introduced in Slice 1. Do not send real email until the
+owner supplies and approves deployment configuration.
 
 ## Still OPEN
 

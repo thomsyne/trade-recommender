@@ -335,7 +335,9 @@ class Recommendation(ImmutableModel):
             raise ValidationError("Recommendation and evidence instruments must match")
         if self.control_forecast_id and self.control_forecast.instrument_id != self.instrument_id:
             raise ValidationError("Recommendation and control instruments must match")
-        if self.contract_version >= 2:
+        if self.contract_version not in {1, 2, 3}:
+            raise ValidationError("Unsupported recommendation contract version")
+        if self.contract_version in {2, 3}:
             if (
                 not self.reference_candle_id
                 or self.reference_candle.instrument_id != self.instrument_id
@@ -370,10 +372,14 @@ class Recommendation(ImmutableModel):
         self.full_clean()
         return super().save(*args, **kwargs)
 
+    @property
+    def position_size(self):
+        return self.position_sizes.order_by("-policy_version", "-sized_at", "-id").first()
+
 
 class PositionSizeAdvice(ImmutableModel):
-    recommendation = models.OneToOneField(
-        Recommendation, on_delete=models.PROTECT, related_name="position_size"
+    recommendation = models.ForeignKey(
+        Recommendation, on_delete=models.PROTECT, related_name="position_sizes"
     )
     policy_key = models.CharField(max_length=80)
     policy_version = models.PositiveSmallIntegerField()
@@ -393,6 +399,10 @@ class PositionSizeAdvice(ImmutableModel):
     class Meta:
         ordering = ("-sized_at", "-id")
         constraints = [
+            models.UniqueConstraint(
+                fields=("recommendation", "policy_key", "policy_version"),
+                name="unique_position_size_policy_assessment",
+            ),
             models.CheckConstraint(
                 condition=models.Q(model_equity_cad__gt=0),
                 name="position_size_model_equity_positive",
@@ -428,11 +438,11 @@ class PositionSizeAdvice(ImmutableModel):
 
     def clean(self):
         recommendation = self.recommendation
-        if recommendation.contract_version < 2 or recommendation.action not in {
+        if recommendation.contract_version not in {2, 3} or recommendation.action not in {
             Recommendation.Action.BUY,
             Recommendation.Action.SELL,
         }:
-            raise ValidationError("Only a directional v2 recommendation can be sized")
+            raise ValidationError("Only a directional supported recommendation can be sized")
         if self.account_currency != "CAD":
             raise ValidationError("Position sizing policy v1 requires CAD account currency")
         if self.sized_at < recommendation.generated_at:
@@ -474,7 +484,7 @@ class RecommendationResolution(ImmutableModel):
 
     def clean(self):
         recommendation = self.recommendation
-        if recommendation.contract_version < 2:
+        if recommendation.contract_version not in {2, 3}:
             raise ValidationError("Legacy recommendations do not have a scorable outcome contract")
         if self.horizon_candle.instrument_id != recommendation.instrument_id:
             raise ValidationError(
@@ -514,10 +524,12 @@ class PaperTradeEntry(ImmutableModel):
     def clean(self):
         recommendation = self.recommendation
         if (
-            recommendation.contract_version < 2
+            recommendation.contract_version not in {2, 3}
             or recommendation.action == Recommendation.Action.ABSTAIN
         ):
-            raise ValidationError("Only directional v2 recommendations can enter a paper trade")
+            raise ValidationError(
+                "Only supported directional recommendations can enter a paper trade"
+            )
         if (
             self.candle.instrument_id != recommendation.instrument_id
             or self.candle.granularity != "H1"
@@ -611,10 +623,10 @@ class PaperTradeResult(ImmutableModel):
     def clean(self):
         recommendation = self.recommendation
         if (
-            recommendation.contract_version < 2
+            recommendation.contract_version not in {2, 3}
             or recommendation.action == Recommendation.Action.ABSTAIN
         ):
-            raise ValidationError("Only directional v2 recommendations have paper results")
+            raise ValidationError("Only supported directional recommendations have paper results")
         if self.horizon_candle:
             if self.horizon_candle.instrument_id != recommendation.instrument_id:
                 raise ValidationError(
@@ -644,12 +656,16 @@ class PaperTradeResult(ImmutableModel):
         self.full_clean()
         return super().save(*args, **kwargs)
 
+    @property
+    def cost_assessment(self):
+        return self.cost_assessments.order_by("-assessed_at", "-id").first()
+
 
 class PaperTradeCostAssessment(ImmutableModel):
-    result = models.OneToOneField(
+    result = models.ForeignKey(
         PaperTradeResult,
         on_delete=models.PROTECT,
-        related_name="cost_assessment",
+        related_name="cost_assessments",
     )
     policy_version = models.CharField(max_length=80)
     minimum_financing_days = models.PositiveSmallIntegerField()
@@ -666,6 +682,10 @@ class PaperTradeCostAssessment(ImmutableModel):
     class Meta:
         ordering = ("-assessed_at", "-id")
         constraints = [
+            models.UniqueConstraint(
+                fields=("result", "policy_version"),
+                name="unique_paper_cost_policy_assessment",
+            ),
             models.CheckConstraint(
                 condition=models.Q(minimum_financing_days__lte=models.F("maximum_financing_days")),
                 name="paper_cost_financing_day_range_valid",
@@ -699,3 +719,47 @@ class PaperTradeCostAssessment(ImmutableModel):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class PaperLifecycleEvent(ImmutableModel):
+    class State(models.TextChoices):
+        LEGACY_UNADJUDICATED = "legacy_unadjudicated", "Legacy; not adjudicated"
+        PENDING = "pending", "Waiting for entry"
+        ENTERED = "entered", "Entered"
+        CLOSED = "closed", "Closed"
+        EXPIRED_UNOBSERVED = "expired_unobserved", "Expired; coverage unavailable"
+        CANCELLED = "cancelled", "Cancelled"
+        MISSING_DATA = "missing_data", "Missing data"
+
+    recommendation = models.ForeignKey(
+        Recommendation, on_delete=models.PROTECT, related_name="paper_lifecycle_events"
+    )
+    state = models.CharField(max_length=24, choices=State)
+    reason_code = models.CharField(max_length=80, blank=True)
+    details = models.JSONField(default=dict)
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("occurred_at", "id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("recommendation", "state"),
+                name="unique_paper_lifecycle_state",
+            )
+        ]
+
+    def clean(self):
+        if self.occurred_at < self.recommendation.generated_at:
+            raise ValidationError("A lifecycle event cannot predate its recommendation")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class PortfolioGuard(models.Model):
+    key = models.CharField(max_length=80, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("key",)

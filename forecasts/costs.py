@@ -55,10 +55,15 @@ def financing_day_range(result):
 
 
 def assess_due_paper_costs():
-    results = PaperTradeResult.objects.filter(
-        entry__isnull=False,
-        cost_assessment__isnull=True,
-    ).select_related("entry__candle", "horizon_candle", "exit_candle", "recommendation")
+    results = (
+        PaperTradeResult.objects.filter(
+            entry__isnull=False,
+        )
+        .exclude(
+            cost_assessments__policy_version=POLICY_VERSION,
+        )
+        .select_related("entry__candle", "horizon_candle", "exit_candle", "recommendation")
+    )
     return [create_cost_assessment(result) for result in results]
 
 
@@ -69,7 +74,9 @@ def create_cost_assessment(result):
         .select_related("entry__candle", "horizon_candle", "exit_candle", "recommendation")
         .get(pk=result.pk)
     )
-    existing = PaperTradeCostAssessment.objects.filter(result=result).first()
+    existing = PaperTradeCostAssessment.objects.filter(
+        result=result, policy_version=POLICY_VERSION
+    ).first()
     if existing:
         return existing
     if result.outcome == PaperTradeResult.Outcome.NOT_ACTIVATED or not result.entry_id:

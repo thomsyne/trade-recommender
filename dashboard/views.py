@@ -444,7 +444,7 @@ def calibration(request):
             "mature": len(resolutions) >= 30,
             "remaining": max(0, 30 - len(resolutions)),
             "open_count": Recommendation.objects.filter(
-                contract_version__gte=2, resolution__isnull=True
+                contract_version__in=(2, 3), resolution__isnull=True
             ).count(),
             "legacy_count": Recommendation.objects.filter(contract_version__lt=2).count(),
             "pair_rows": pair_rows,
@@ -458,15 +458,16 @@ def calibration(request):
 def paper_trades(request):
     recommendations = list(
         Recommendation.objects.filter(
-            contract_version__gte=2,
+            contract_version__in=(2, 3),
             action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
-        ).select_related(
+        )
+        .select_related(
             "instrument",
             "paper_entry__candle",
-            "paper_result__cost_assessment",
             "paper_result__exit_candle",
             "paper_result__horizon_candle",
         )
+        .prefetch_related("paper_result__cost_assessments")
     )
     rows = []
     for recommendation in recommendations:

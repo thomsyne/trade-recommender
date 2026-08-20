@@ -1,19 +1,22 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import httpx
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, transaction
+from django.db import DatabaseError, close_old_connections, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from forecasts.models import (
     Forecast,
+    PaperLifecycleEvent,
     PaperTradeCostAssessment,
     PaperTradeEntry,
     PaperTradeResult,
+    PositionSizeAdvice,
     Recommendation,
 )
 from forecasts.paper import resolve_paper_trade
@@ -23,6 +26,7 @@ from forecasts.recommendations import (
     generate_recommendation,
     resolve_recommendation,
 )
+from forecasts.sizing import size_recommendation
 from market.models import AuditEvent, Instrument, SourceRegistry
 from market.services import store_ingestion
 from market.tests.factories import candle
@@ -106,11 +110,11 @@ def output(**changes):
         "macro_case": "The supplied policy-rate observation supports the relative-rate case.",
         "sentiment_case": "No eligible sentiment item was supplied; confidence is capped.",
         "risks": ["Support may fail."],
-        "evidence_ids": ["technical:51", "macro:61"],
-        "entry_condition": "at_or_below",
-        "entry_level": 1.35,
-        "target_level": 1.36,
-        "invalidation_level": 1.34,
+        "evidence_ids": ["technical:local-policy-v1", "macro:61"],
+        "entry_condition": "none",
+        "entry_level": None,
+        "target_level": None,
+        "invalidation_level": None,
         "abstention_reason": "",
     }
     value.update(changes)
@@ -217,26 +221,31 @@ class RecommendationTests(TestCase):
         self.assertEqual(first, second)
         self.assertEqual(provider.calls, 1)
         self.assertEqual(first.entry_level, Decimal("1.350000"))
-        self.assertEqual(first.contract_version, 2)
+        self.assertEqual(first.contract_version, 3)
         self.assertEqual(first.probability_up, Decimal("0.6200"))
         self.assertEqual(first.probability_neutral, Decimal("0.2300"))
         self.assertEqual(first.probability_down, Decimal("0.1500"))
         self.assertEqual(first.confidence_percent, 62)
+        self.assertTrue(first.input_payload["outcome_contract"]["numeric_market_values_withheld"])
+        self.assertNotIn("market", first.input_payload["evidence"])
+        self.assertNotIn("technicals", first.input_payload["evidence"])
         self.assertEqual(
-            first.input_payload["outcome_contract"]["reference_candle_id"],
-            first.reference_candle_id,
-        )
-        self.assertEqual(
-            first.input_payload["evidence"]["technicals"][0]["evidence_id"], "technical:51"
+            first.input_payload["evidence"]["technical_context"]["evidence_id"],
+            "technical:local-policy-v1",
         )
         self.assertEqual(
             [item["document_id"] for item in first.input_payload["evidence"]["recent_news"]],
             [71],
         )
-        self.assertEqual(first.output["evidence_ids"], ["technical:51", "macro:61"])
+        self.assertEqual(first.output["evidence_ids"], ["technical:local-policy-v1", "macro:61"])
         self.assertEqual(first.provider_response_id, "response-1")
         self.assertEqual(first.cost_usd, Decimal("0.005400"))
         self.assertEqual(Forecast.objects.count(), forecast_count)
+        self.assertTrue(
+            PaperLifecycleEvent.objects.filter(
+                recommendation=first, state=PaperLifecycleEvent.State.PENDING
+            ).exists()
+        )
         self.assertTrue(
             AuditEvent.objects.filter(
                 event_type="forecast.recommendation_generated", subject_id=str(first.pk)
@@ -247,7 +256,7 @@ class RecommendationTests(TestCase):
             first.save()
 
     def test_hallucinated_citation_discards_entire_response(self):
-        provider = FakeProvider(output(evidence_ids=["technical:51", "news:72"]))
+        provider = FakeProvider(output(evidence_ids=["technical:local-policy-v1", "news:72"]))
 
         with self.assertRaisesMessage(ValidationError, "unavailable evidence"):
             generate_recommendation(
@@ -286,10 +295,10 @@ class RecommendationTests(TestCase):
 
         self.assertEqual(provider.calls, 0)
 
-    def test_invalid_level_order_is_rejected(self):
-        provider = FakeProvider(output(target_level=1.33))
+    def test_model_supplied_numeric_levels_are_rejected(self):
+        provider = FakeProvider(output(entry_condition="at_or_below", entry_level=1.35))
 
-        with self.assertRaisesMessage(ValidationError, "invalidation < entry < target"):
+        with self.assertRaisesMessage(ValidationError, "cannot supply numeric setup levels"):
             generate_recommendation(
                 self.instrument, provider=provider, generated_at=self.now + timedelta(seconds=1)
             )
@@ -580,6 +589,21 @@ class RecommendationDatabaseTests(TransactionTestCase):
         evidence(instrument, now)
         recommendation = generate_recommendation(
             instrument, provider=FakeProvider(), generated_at=now + timedelta(seconds=1)
+        )
+
+        def size_once(_):
+            close_old_connections()
+            try:
+                return size_recommendation(recommendation, sized_at=recommendation.generated_at).pk
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            sizing_ids = list(executor.map(size_once, range(2)))
+
+        self.assertEqual(sizing_ids[0], sizing_ids[1])
+        self.assertEqual(
+            PositionSizeAdvice.objects.filter(recommendation=recommendation).count(), 1
         )
 
         with self.assertRaises(DatabaseError), transaction.atomic():
