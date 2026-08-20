@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from django.conf import settings
 
-from forecasts.recommendations import generate_all_recommendations
+from forecasts.recommendations import generate_all_recommendations, resolve_due_recommendations
 from forecasts.services import resolve_due_forecasts
 from market.models import IngestionRun, Instrument, SourceRegistry
 from market.oanda import OandaClient
@@ -59,6 +59,7 @@ def ingest_oanda(parameters):
     run = store_ingestion(source, instrument, granularity, start, end, candles, manifest)
     if run.status == IngestionRun.Status.SUCCEEDED and granularity == "D":
         resolve_due_forecasts(instrument)
+        resolve_due_recommendations(instrument)
     return run
 
 

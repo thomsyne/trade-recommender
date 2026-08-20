@@ -1,4 +1,4 @@
-# Governed recommendation contract v1
+# Governed recommendation contract v2
 
 This contract permits one bounded model assessment of an immutable
 `PairEvidenceSnapshot`. It does not authorize broker access, order placement,
@@ -6,9 +6,10 @@ portfolio sizing, silent source reweighting, or historical sentiment replay.
 
 ## Input boundary
 
-The provider receives only the selected snapshot, its information cutoff, the
-fixed five-session horizon, and stable evidence IDs added to each included
-record. It cannot browse or call tools. News text is explicitly untrusted data.
+The provider receives only the selected snapshot, its information cutoff, a
+frozen daily reference midpoint and neutral band, the fixed five-session
+horizon, and stable evidence IDs added to each included record. It cannot browse
+or call tools. News text is explicitly untrusted data.
 The packet contains bounded normalized market/research fields and filters out
 any news item not explicitly marked eligible for model processing.
 
@@ -23,7 +24,7 @@ Claude uses constrained JSON Schema output. The application independently
 validates:
 
 - `buy`, `sell`, or explicit `abstain`;
-- stated confidence from 0–100 for later prospective calibration;
+- integer up/neutral/down probabilities summing to 100;
 - summary plus separate technical, macro, and sentiment cases;
 - at least one risk and citations to supplied evidence IDs only;
 - conditional entry, target, invalidation, and five-session expiry;
@@ -38,14 +39,29 @@ negotiate the contract.
 
 `Recommendation` stores the exact transformed input packet, input SHA-256,
 source snapshot, provider/model/contract version, provider response ID, token
-counts, calculated API cost, validated output, information cutoff, and optional
-mechanical tactical control. Django and PostgreSQL both reject updates and
-deletes. Re-running one provider/model against the same evidence hash is
-idempotent.
+counts, calculated API cost, validated output, information cutoff, frozen daily
+reference candle/midpoint/neutral band, and optional mechanical tactical control.
+Django and PostgreSQL both reject updates and deletes. Re-running one
+provider/model against the same evidence and reference is idempotent.
 
 The model recommendation and mechanical forecast remain separate records. A
 recommendation cannot mutate evidence, replace the control, or count as an
 executed trade.
+
+## Prospective resolution and calibration
+
+Version 2 defines up, neutral, and down against the midpoint close of the fifth
+subsequently completed OANDA daily candle. The neutral band is frozen at issue
+time as the greater of 0.25 × daily ATR(14) and 2 × closing spread. Equality is
+neutral. `RecommendationResolution` immutably stores the endpoint, outcome,
+multiclass Brier score, and directional hit or miss. Abstentions receive a Brier
+score but no directional hit label.
+
+Version 1 recommendations are deliberately excluded: their confidence number
+did not identify a precise event, so retroactive interpretation would create
+false calibration. The dashboard remains explicitly insufficient-sample until
+30 version 2 outcomes resolve. It is descriptive only and cannot alter prompts,
+sources, weights, or execution.
 
 ## Spend limits
 
@@ -67,7 +83,6 @@ python manage.py generate_recommendations
 python manage.py generate_recommendations USD_CAD
 ```
 
-The next contract must resolve recommendations prospectively and measure
-confidence calibration, setup activation, target/invalidation ordering with
-lower-timeframe bid/ask evidence, and paper results. It must not reconstruct
-recommendations for dates before this logger existed.
+The next contract may add setup activation, target/invalidation ordering with
+lower-timeframe bid/ask evidence, and paper results. It must remain separate
+from thesis scoring and must not reconstruct historical recommendations.

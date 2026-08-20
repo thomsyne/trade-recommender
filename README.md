@@ -23,6 +23,8 @@ separate point-in-time evidence ledger.
   resolution, and multiclass Brier scoring;
 - governed Claude recommendations from fresh immutable evidence, strict
   evidence-ID citations, explicit abstention, audit metadata, and spend caps;
+- prospective five-session recommendation resolution, multiclass Brier scoring,
+  directional hit rates, and guarded calibration reporting;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
 - bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
   response-size protections;
@@ -31,8 +33,8 @@ separate point-in-time evidence ledger.
 - Today, Decision, Timeline, market workspace, Research, and Operations interfaces;
 - deterministic fixture data so every screen works before credentials exist.
 
-Recommendation resolution/calibration, article/full-text research, paper
-positions, paid providers, and AWS deployment are deliberately not implemented yet.
+Article/full-text research, paper positions, paid providers, and AWS deployment
+are deliberately not implemented yet.
 See the [project map](docs/project-map.md) for those boundaries.
 
 ## Fresh orb setup

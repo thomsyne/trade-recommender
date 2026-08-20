@@ -5,6 +5,7 @@ from forecasts.models import (
     Forecast,
     ForecastResolution,
     Recommendation,
+    RecommendationResolution,
     TargetContract,
 )
 
@@ -13,3 +14,4 @@ admin.site.register(EvidenceSnapshot)
 admin.site.register(Forecast)
 admin.site.register(ForecastResolution)
 admin.site.register(Recommendation)
+admin.site.register(RecommendationResolution)

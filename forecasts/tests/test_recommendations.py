@@ -13,8 +13,11 @@ from forecasts.recommendations import (
     AnthropicProvider,
     ProviderResult,
     generate_recommendation,
+    resolve_recommendation,
 )
-from market.models import AuditEvent, Instrument
+from market.models import AuditEvent, Instrument, SourceRegistry
+from market.services import store_ingestion
+from market.tests.factories import candle
 from research.models import PairEvidenceSnapshot
 
 
@@ -87,7 +90,9 @@ def evidence(instrument, captured_at=None, market_as_of=None):
 def output(**changes):
     value = {
         "action": "buy",
-        "confidence_percent": 62,
+        "probability_up_percent": 62,
+        "probability_neutral_percent": 23,
+        "probability_down_percent": 15,
         "summary": "Conditional upside thesis.",
         "technical_case": "Support contains downside while resistance defines the target.",
         "macro_case": "The supplied policy-rate observation supports the relative-rate case.",
@@ -102,6 +107,20 @@ def output(**changes):
     }
     value.update(changes)
     return value
+
+
+def rising_candle(timestamp):
+    return candle(
+        timestamp,
+        bid_open=Decimal("1.3590"),
+        bid_high=Decimal("1.3610"),
+        bid_low=Decimal("1.3580"),
+        bid_close=Decimal("1.3598"),
+        ask_open=Decimal("1.3592"),
+        ask_high=Decimal("1.3612"),
+        ask_low=Decimal("1.3582"),
+        ask_close=Decimal("1.3600"),
+    )
 
 
 class FakeProvider:
@@ -122,7 +141,24 @@ class RecommendationTests(TestCase):
         self.instrument = Instrument.objects.create(
             code="USD_CAD", base_currency="USD", quote_currency="CAD", display_order=1
         )
-        self.now = timezone.now()
+        self.source = SourceRegistry.objects.create(
+            name="OANDA v20",
+            tier="established",
+            base_url="https://developer.oanda.com",
+            acquisition_method="v20 REST API",
+            retention_policy="test only",
+        )
+        reference_at = timezone.now() - timedelta(days=1)
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "D",
+            reference_at,
+            reference_at + timedelta(days=1),
+            [candle(reference_at)],
+            {"test": "recommendation-reference", "requests": []},
+        )
+        self.now = timezone.now() + timedelta(seconds=1)
         self.snapshot = evidence(self.instrument, self.now)
 
     def test_generation_is_bounded_immutable_audited_and_idempotent(self):
@@ -139,6 +175,15 @@ class RecommendationTests(TestCase):
         self.assertEqual(first, second)
         self.assertEqual(provider.calls, 1)
         self.assertEqual(first.entry_level, Decimal("1.350000"))
+        self.assertEqual(first.contract_version, 2)
+        self.assertEqual(first.probability_up, Decimal("0.6200"))
+        self.assertEqual(first.probability_neutral, Decimal("0.2300"))
+        self.assertEqual(first.probability_down, Decimal("0.1500"))
+        self.assertEqual(first.confidence_percent, 62)
+        self.assertEqual(
+            first.input_payload["outcome_contract"]["reference_candle_id"],
+            first.reference_candle_id,
+        )
         self.assertEqual(
             first.input_payload["evidence"]["technicals"][0]["evidence_id"], "technical:51"
         )
@@ -168,7 +213,9 @@ class RecommendationTests(TestCase):
             )
 
         self.assertEqual(Recommendation.objects.count(), 0)
-        self.assertEqual(AuditEvent.objects.count(), 0)
+        self.assertFalse(
+            AuditEvent.objects.filter(event_type="forecast.recommendation_generated").exists()
+        )
 
     def test_stale_evidence_fails_before_provider_call(self):
         old_instrument = Instrument.objects.create(
@@ -206,6 +253,52 @@ class RecommendationTests(TestCase):
             )
 
         self.assertEqual(Recommendation.objects.count(), 0)
+
+    def test_probabilities_must_sum_to_one_hundred(self):
+        provider = FakeProvider(output(probability_up_percent=61))
+
+        with self.assertRaisesMessage(ValidationError, "summing to 100"):
+            generate_recommendation(
+                self.instrument, provider=provider, generated_at=self.now + timedelta(seconds=1)
+            )
+
+        self.assertEqual(Recommendation.objects.count(), 0)
+
+    def test_resolution_waits_for_five_daily_sessions_and_scores_probabilities(self):
+        recommendation = generate_recommendation(
+            self.instrument,
+            provider=FakeProvider(),
+            generated_at=self.now + timedelta(seconds=1),
+        )
+        start = recommendation.reference_candle.timestamp + timedelta(days=1)
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "D",
+            start,
+            start + timedelta(days=4),
+            [rising_candle(start + timedelta(days=index)) for index in range(4)],
+            {"test": "recommendation-future-four", "requests": []},
+        )
+        self.assertIsNone(resolve_recommendation(recommendation))
+
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "D",
+            start + timedelta(days=4),
+            start + timedelta(days=5),
+            [rising_candle(start + timedelta(days=4))],
+            {"test": "recommendation-future-five", "requests": []},
+        )
+        resolution = resolve_recommendation(recommendation)
+
+        self.assertEqual(resolution.outcome, Forecast.Direction.UP)
+        self.assertTrue(resolution.directional_hit)
+        self.assertEqual(resolution.brier_score, Decimal("0.073267"))
+        self.assertEqual(resolution.details["sessions_observed"], 5)
+        self.assertTrue(resolution.details["setup_performance_not_measured"])
+        self.assertEqual(resolve_recommendation(recommendation), resolution)
 
     @override_settings(RECOMMENDATION_MAX_RUN_COST_USD=Decimal("0.001"))
     def test_spend_cap_fails_before_provider_call(self):
@@ -247,11 +340,28 @@ class RecommendationTests(TestCase):
 
 
 class RecommendationDatabaseTests(TransactionTestCase):
-    def test_database_rejects_recommendation_mutation(self):
+    def test_database_rejects_recommendation_and_resolution_mutation(self):
         instrument = Instrument.objects.create(
             code="USD_CAD", base_currency="USD", quote_currency="CAD", display_order=1
         )
-        now = timezone.now()
+        source = SourceRegistry.objects.create(
+            name="OANDA v20",
+            tier="established",
+            base_url="https://developer.oanda.com",
+            acquisition_method="v20 REST API",
+            retention_policy="test only",
+        )
+        reference_at = timezone.now() - timedelta(days=1)
+        store_ingestion(
+            source,
+            instrument,
+            "D",
+            reference_at,
+            reference_at + timedelta(days=1),
+            [candle(reference_at)],
+            {"test": "database-reference", "requests": []},
+        )
+        now = timezone.now() + timedelta(seconds=1)
         evidence(instrument, now)
         recommendation = generate_recommendation(
             instrument, provider=FakeProvider(), generated_at=now + timedelta(seconds=1)
@@ -262,3 +372,20 @@ class RecommendationDatabaseTests(TransactionTestCase):
 
         recommendation.refresh_from_db()
         self.assertEqual(recommendation.confidence_percent, 62)
+
+        start = recommendation.reference_candle.timestamp + timedelta(days=1)
+        store_ingestion(
+            source,
+            instrument,
+            "D",
+            start,
+            start + timedelta(days=5),
+            [rising_candle(start + timedelta(days=index)) for index in range(5)],
+            {"test": "database-resolution", "requests": []},
+        )
+        resolution = resolve_recommendation(recommendation)
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            type(resolution).objects.filter(pk=resolution.pk).update(brier_score=0)
+
+        resolution.refresh_from_db()
+        self.assertEqual(resolution.brier_score, Decimal("0.073267"))

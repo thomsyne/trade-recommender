@@ -35,6 +35,12 @@ separation, immutable input/output audit, idempotency, four-hour scheduling,
 and per-run/daily/monthly spend caps. It remains advisory and separate from the
 mechanical control. See `docs/recommendation-contract.md`.
 
+The Prospective Calibration slice is implemented: version 2 freezes an exact
+daily reference and neutral band, records up/neutral/down probabilities, resolves
+after five later completed daily sessions, and stores immutable multiclass Brier
+and directional hit outcomes. Version 1 is excluded rather than reinterpreted.
+The separate Calibration page suppresses conclusions until 30 outcomes exist.
+
 ## Verification gate
 
 Run:
@@ -53,10 +59,9 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Build prospective recommendation resolution and calibration without historical
-sentiment replay. Resolve the declared five-session direction and confidence,
-then add paper setup activation only when lower-timeframe bid/ask ordering and
-cost assumptions are explicit. Keep model-vs-mechanical comparison separate.
+Build paper setup activation only when lower-timeframe bid/ask ordering, spread,
+same-candle ambiguity, and financing assumptions are explicit. Keep setup P&L,
+thesis calibration, and model-vs-mechanical comparison separate.
 
 ## Still OPEN
 

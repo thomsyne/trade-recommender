@@ -241,6 +241,13 @@ class Recommendation(ImmutableModel):
     evidence_snapshot = models.ForeignKey(
         "research.PairEvidenceSnapshot", on_delete=models.PROTECT, related_name="recommendations"
     )
+    reference_candle = models.ForeignKey(
+        Candle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="model_recommendations",
+    )
     control_forecast = models.ForeignKey(
         Forecast, on_delete=models.PROTECT, null=True, blank=True, related_name="recommendations"
     )
@@ -251,6 +258,11 @@ class Recommendation(ImmutableModel):
     information_cutoff = models.DateTimeField()
     action = models.CharField(max_length=8, choices=Action)
     confidence_percent = models.PositiveSmallIntegerField()
+    reference_midpoint = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    neutral_band = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    probability_up = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True)
+    probability_neutral = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True)
+    probability_down = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True)
     entry_condition = models.CharField(max_length=16, choices=EntryCondition)
     entry_level = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
     target_level = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
@@ -293,6 +305,27 @@ class Recommendation(ImmutableModel):
                 condition=models.Q(information_cutoff__lte=models.F("generated_at")),
                 name="recommendation_cutoff_not_after_generation",
             ),
+            models.CheckConstraint(
+                condition=models.Q(contract_version__lt=2)
+                | models.Q(
+                    reference_candle__isnull=False,
+                    reference_midpoint__isnull=False,
+                    neutral_band__isnull=False,
+                    probability_up__isnull=False,
+                    probability_up__gte=0,
+                    probability_up__lte=1,
+                    probability_neutral__isnull=False,
+                    probability_neutral__gte=0,
+                    probability_neutral__lte=1,
+                    probability_down__isnull=False,
+                    probability_down__gte=0,
+                    probability_down__lte=1,
+                    probability_up=models.Value(1)
+                    - models.F("probability_neutral")
+                    - models.F("probability_down"),
+                ),
+                name="recommendation_v2_outcome_contract_valid",
+            ),
         ]
 
     def clean(self):
@@ -300,6 +333,23 @@ class Recommendation(ImmutableModel):
             raise ValidationError("Recommendation and evidence instruments must match")
         if self.control_forecast_id and self.control_forecast.instrument_id != self.instrument_id:
             raise ValidationError("Recommendation and control instruments must match")
+        if self.contract_version >= 2:
+            if (
+                not self.reference_candle_id
+                or self.reference_candle.instrument_id != self.instrument_id
+            ):
+                raise ValidationError("Recommendation reference candle must match its instrument")
+            values = (
+                self.reference_midpoint,
+                self.neutral_band,
+                self.probability_up,
+                self.probability_neutral,
+                self.probability_down,
+            )
+            if any(value is None for value in values):
+                raise ValidationError("A v2 recommendation requires its complete outcome contract")
+            if self.probability_up + self.probability_neutral + self.probability_down != 1:
+                raise ValidationError("Recommendation probabilities must sum to one")
         levels = (self.entry_level, self.target_level, self.invalidation_level)
         if self.action in {self.Action.BUY, self.Action.SELL} and any(
             value is None for value in levels
@@ -313,6 +363,41 @@ class Recommendation(ImmutableModel):
             self.target_level < self.entry_level < self.invalidation_level
         ):
             raise ValidationError("Sell levels must order target < entry < invalidation")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class RecommendationResolution(ImmutableModel):
+    recommendation = models.OneToOneField(
+        Recommendation, on_delete=models.PROTECT, related_name="resolution"
+    )
+    outcome = models.CharField(max_length=8, choices=Forecast.Direction)
+    horizon_candle = models.ForeignKey(Candle, on_delete=models.PROTECT)
+    endpoint_midpoint = models.DecimalField(max_digits=12, decimal_places=6)
+    midpoint_change = models.DecimalField(max_digits=12, decimal_places=6)
+    directional_hit = models.BooleanField(null=True, blank=True)
+    brier_score = models.DecimalField(max_digits=8, decimal_places=6)
+    details = models.JSONField(default=dict)
+    resolved_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-resolved_at", "-id")
+
+    def clean(self):
+        recommendation = self.recommendation
+        if recommendation.contract_version < 2:
+            raise ValidationError("Legacy recommendations do not have a scorable outcome contract")
+        if self.horizon_candle.instrument_id != recommendation.instrument_id:
+            raise ValidationError(
+                "Resolution horizon candle must match the recommendation instrument"
+            )
+        if recommendation.action == Recommendation.Action.ABSTAIN:
+            if self.directional_hit is not None:
+                raise ValidationError("An abstention cannot have a directional hit result")
+        elif self.directional_hit is None:
+            raise ValidationError("A directional recommendation requires a hit result")
 
     def save(self, *args, **kwargs):
         self.full_clean()

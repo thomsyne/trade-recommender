@@ -1,6 +1,6 @@
 # FX Forecast Lab — Four-Quadrant Project Map
 
-**Status:** Planning complete; Foundation, Market Truth, Forecast Contract, Research Evidence, and Governed Recommendations implemented
+**Status:** Planning complete; Foundation, Market Truth, Forecast Contract, Research Evidence, Governed Recommendations, and Prospective Calibration implemented
 **Prepared:** 2026-08-18  
 **Purpose:** Durable source of truth for the first implementation and future Amp threads
 
@@ -71,7 +71,8 @@ scheduler/worker, OANDA market ingestion, deterministic technicals, immutable
 forecast controls, official four-economy macro and release calendars, broader
 RSS collection, seven intermarket series, and scheduled pair-level evidence
 snapshots. Governed model recommendations are immutable, evidence-cited, and
-advisory; research remains unable to issue or mutate forecasts.
+advisory. Versioned probabilistic outcomes now resolve prospectively after five
+sessions; research remains unable to issue or mutate forecasts.
 
 ---
 

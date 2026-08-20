@@ -34,7 +34,8 @@
 - `operations` owns durable occurrence generation, claims, retries, and task
   dispatch. Task implementations call the owning domain service.
 - `forecasts.recommendations` owns the provider-neutral recommendation contract,
-  bounded Claude adapter, semantic validation, idempotency, and spend gates.
+  bounded Claude adapter, semantic validation, idempotency, spend gates,
+  prospective resolution, and calibration metrics.
 - `research.fetch` owns the HTTPS allowlist, DNS/redirect/size/content-type
   safety boundary. It is not exposed as a generic fetch endpoint.
 - `research.services` owns immutable raw research, normalization, vintages,
@@ -60,6 +61,8 @@
 11. Research cannot issue, mutate, resolve, or score a forecast.
 12. A model recommendation cites only records in its immutable input snapshot,
     remains separate from the mechanical control, and has no execution authority.
+13. Only recommendations with a frozen probabilistic outcome contract are
+    resolved; vague legacy confidence is never reinterpreted after the fact.
 
 ## Deliberate first-slice choices
 

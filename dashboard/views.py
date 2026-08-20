@@ -7,7 +7,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 
-from forecasts.models import Forecast, Recommendation
+from forecasts.models import Forecast, Recommendation, RecommendationResolution
 from market.models import (
     AuditEvent,
     Candle,
@@ -106,7 +106,7 @@ def market_detail(request, code):
     )
     recommendations = list(
         Recommendation.objects.filter(instrument=instrument).select_related(
-            "evidence_snapshot", "control_forecast"
+            "evidence_snapshot", "control_forecast", "reference_candle", "resolution"
         )[:20]
     )
     recommendation = recommendations[0] if recommendations else None
@@ -359,6 +359,85 @@ def research(request):
             "calendar_connected": calendar_connected,
             "calendar_coverage_count": calendar_coverage_count,
             "calendar_source_count": len(calendar_sources),
+        },
+    )
+
+
+@login_required
+def calibration(request):
+    resolutions = list(
+        RecommendationResolution.objects.select_related("recommendation__instrument")
+    )
+    directional = [
+        item for item in resolutions if item.recommendation.action != Recommendation.Action.ABSTAIN
+    ]
+    hits = sum(item.directional_hit is True for item in directional)
+    pair_rows = []
+    for instrument in Instrument.objects.filter(active=True):
+        pair_resolutions = [
+            item for item in resolutions if item.recommendation.instrument_id == instrument.pk
+        ]
+        pair_directional = [
+            item
+            for item in pair_resolutions
+            if item.recommendation.action != Recommendation.Action.ABSTAIN
+        ]
+        pair_hits = sum(item.directional_hit is True for item in pair_directional)
+        pair_rows.append(
+            {
+                "instrument": instrument,
+                "count": len(pair_resolutions),
+                "directional_count": len(pair_directional),
+                "hit_rate": (pair_hits * 100 / len(pair_directional) if pair_directional else None),
+                "mean_brier": (
+                    sum(item.brier_score for item in pair_resolutions) / len(pair_resolutions)
+                    if pair_resolutions
+                    else None
+                ),
+            }
+        )
+    bins = []
+    for lower, upper in ((0, 49), (50, 59), (60, 69), (70, 79), (80, 100)):
+        members = [
+            item for item in directional if lower <= item.recommendation.confidence_percent <= upper
+        ]
+        bins.append(
+            {
+                "label": f"{lower}–{upper}%",
+                "count": len(members),
+                "mean_confidence": (
+                    sum(item.recommendation.confidence_percent for item in members) / len(members)
+                    if members
+                    else None
+                ),
+                "hit_rate": (
+                    sum(item.directional_hit is True for item in members) * 100 / len(members)
+                    if members
+                    else None
+                ),
+            }
+        )
+    return render(
+        request,
+        "dashboard/calibration.html",
+        {
+            "resolved_count": len(resolutions),
+            "directional_count": len(directional),
+            "hit_rate": hits * 100 / len(directional) if directional else None,
+            "mean_brier": (
+                sum(item.brier_score for item in resolutions) / len(resolutions)
+                if resolutions
+                else None
+            ),
+            "mature": len(resolutions) >= 30,
+            "remaining": max(0, 30 - len(resolutions)),
+            "open_count": Recommendation.objects.filter(
+                contract_version__gte=2, resolution__isnull=True
+            ).count(),
+            "legacy_count": Recommendation.objects.filter(contract_version__lt=2).count(),
+            "pair_rows": pair_rows,
+            "bins": bins,
+            "recent_resolutions": resolutions[:20],
         },
     )
 
