@@ -1,6 +1,6 @@
 # FX Forecast Lab — Four-Quadrant Project Map
 
-**Status:** Planning complete; Foundation, Market Truth, Forecast Contract, and read-only Research Evidence implemented
+**Status:** Planning complete; Foundation, Market Truth, Forecast Contract, Research Evidence, and Governed Recommendations implemented
 **Prepared:** 2026-08-18  
 **Purpose:** Durable source of truth for the first implementation and future Amp threads
 
@@ -70,7 +70,8 @@ The repository now contains the Django/PostgreSQL application, durable
 scheduler/worker, OANDA market ingestion, deterministic technicals, immutable
 forecast controls, official four-economy macro and release calendars, broader
 RSS collection, seven intermarket series, and scheduled pair-level evidence
-snapshots. Research remains unable to issue or mutate forecasts.
+snapshots. Governed model recommendations are immutable, evidence-cited, and
+advisory; research remains unable to issue or mutate forecasts.
 
 ---
 

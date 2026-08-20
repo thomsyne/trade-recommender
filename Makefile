@@ -1,4 +1,4 @@
-.PHONY: setup resume check test dev worker scheduler ingest seed baseline resolve
+.PHONY: setup resume check test dev worker scheduler ingest seed baseline resolve recommend
 
 setup:
 	./.agents/setup
@@ -36,3 +36,6 @@ baseline:
 
 resolve:
 	.venv/bin/python manage.py resolve_forecasts
+
+recommend:
+	.venv/bin/python manage.py generate_recommendations

@@ -28,6 +28,13 @@ decision calendars, and four-hour immutable pair evidence snapshots. Pair
 pages show evidence freshness, source count, pair macro, intermarket, calendar,
 and news without creating or changing forecasts.
 
+The Governed Recommendation slice is implemented: a provider-neutral contract
+with Claude Sonnet 5 as the initial adapter, strict structured output and
+semantic checks, evidence-ID citations, explicit abstention, prompt-injection
+separation, immutable input/output audit, idempotency, four-hour scheduling,
+and per-run/daily/monthly spend caps. It remains advisory and separate from the
+mechanical control. See `docs/recommendation-contract.md`.
+
 ## Verification gate
 
 Run:
@@ -46,16 +53,14 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Build the first model-forecast contract against `PairEvidenceSnapshot`: pin the
-Anthropic model and prompt, define strict output validation and spend caps, and
-write a new prospective recommendation record without altering evidence or the
-existing mechanical controls. Complete the source-by-source external-model
-terms review before including anything beyond fields already marked model
-eligible.
+Build prospective recommendation resolution and calibration without historical
+sentiment replay. Resolve the declared five-session direction and confidence,
+then add paper setup activation only when lower-timeframe bid/ask ordering and
+cost assumptions are explicit. Keep model-vs-mechanical comparison separate.
 
 ## Still OPEN
 
-- provider permission for external-model processing;
+- provider permission for restricted/full-text external-model processing;
 - paid economic-calendar/PIT provider trial;
 - remaining BLS/Census release-calendar automation;
 - financing history/cost sensitivity parameters.

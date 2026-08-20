@@ -686,6 +686,13 @@ class Command(BaseCommand):
             {},
             14_400,
         )
+        _upsert_job(
+            "Forecast recommendations — all active pairs",
+            "forecast.generate_recommendations",
+            {},
+            14_400,
+            enabled=(settings.RECOMMENDATION_SCHEDULE_ENABLED and bool(settings.ANTHROPIC_API_KEY)),
+        )
         ProviderEvaluation.objects.update_or_create(
             category="economic-calendar",
             provider="Official statistical agencies",

@@ -21,6 +21,8 @@ separate point-in-time evidence ledger.
 - immutable versioned 20-session macro and five-session tactical targets;
 - locked mechanical EWMA baselines, explicit abstention, deterministic
   resolution, and multiclass Brier scoring;
+- governed Claude recommendations from fresh immutable evidence, strict
+  evidence-ID citations, explicit abstention, audit metadata, and spend caps;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
 - bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
   response-size protections;
@@ -29,8 +31,8 @@ separate point-in-time evidence ledger.
 - Today, Decision, Timeline, market workspace, Research, and Operations interfaces;
 - deterministic fixture data so every screen works before credentials exist.
 
-Anthropic forecasts, article/full-text research, paper positions, paid
-providers, and AWS deployment are deliberately not implemented yet.
+Recommendation resolution/calibration, article/full-text research, paper
+positions, paid providers, and AWS deployment are deliberately not implemented yet.
 See the [project map](docs/project-map.md) for those boundaries.
 
 ## Fresh orb setup
@@ -80,6 +82,7 @@ credentials when account reconciliation is added. Review
 | `make ingest` | Show required arguments for direct OANDA ingestion |
 | `make baseline` | Lock one macro and tactical mechanical baseline per pair |
 | `make resolve` | Resolve every forecast whose later sessions are available |
+| `make recommend` | Generate governed recommendations from fresh pair evidence |
 
 Docker Compose describes the eventual single-host process topology and can be
 used on a machine with Docker via `docker compose up --build`. It is a local
@@ -92,4 +95,5 @@ development topology, not the hardened AWS deployment.
 - [Current handoff](docs/handoff.md)
 - [OANDA provider contract](docs/providers/oanda.md)
 - [Forecast contract](docs/forecast-contract.md)
+- [Governed recommendation contract](docs/recommendation-contract.md)
 - [Research ingestion contract](docs/research-ingestion.md)

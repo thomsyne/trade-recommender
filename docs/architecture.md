@@ -33,6 +33,8 @@
 - `market.technicals` is pure deterministic calculation code.
 - `operations` owns durable occurrence generation, claims, retries, and task
   dispatch. Task implementations call the owning domain service.
+- `forecasts.recommendations` owns the provider-neutral recommendation contract,
+  bounded Claude adapter, semantic validation, idempotency, and spend gates.
 - `research.fetch` owns the HTTPS allowlist, DNS/redirect/size/content-type
   safety boundary. It is not exposed as a generic fetch endpoint.
 - `research.services` owns immutable raw research, normalization, vintages,
@@ -56,6 +58,8 @@
 10. A changed macro value appends a vintage and discrepancy; it never rewrites
     an earlier observation.
 11. Research cannot issue, mutate, resolve, or score a forecast.
+12. A model recommendation cites only records in its immutable input snapshot,
+    remains separate from the mechanical control, and has no execution authority.
 
 ## Deliberate first-slice choices
 
@@ -68,7 +72,8 @@
 
 ## Forecast and research seams — implemented
 
-Versioned immutable forecast/evidence contracts, mechanical baselines, and
-proper scoring fixtures now sit above market truth. Rights-aware, point-in-time
-official research sits beside it as a separate evidence ledger. See
-`docs/forecast-contract.md` and `docs/research-ingestion.md`.
+Versioned immutable forecast/evidence contracts, mechanical baselines, governed
+model recommendations, and proper scoring fixtures now sit above market truth.
+Rights-aware, point-in-time official research sits beside them as a separate
+evidence ledger. See `docs/forecast-contract.md`,
+`docs/recommendation-contract.md`, and `docs/research-ingestion.md`.

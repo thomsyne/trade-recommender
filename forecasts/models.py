@@ -222,3 +222,98 @@ class ForecastResolution(ImmutableModel):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class Recommendation(ImmutableModel):
+    class Action(models.TextChoices):
+        ABSTAIN = "abstain", "Abstain"
+        BUY = "buy", "Buy"
+        SELL = "sell", "Sell"
+
+    class EntryCondition(models.TextChoices):
+        NONE = "none", "No conditional entry"
+        AT_OR_BELOW = "at_or_below", "At or below"
+        AT_OR_ABOVE = "at_or_above", "At or above"
+
+    instrument = models.ForeignKey(
+        Instrument, on_delete=models.PROTECT, related_name="recommendations"
+    )
+    evidence_snapshot = models.ForeignKey(
+        "research.PairEvidenceSnapshot", on_delete=models.PROTECT, related_name="recommendations"
+    )
+    control_forecast = models.ForeignKey(
+        Forecast, on_delete=models.PROTECT, null=True, blank=True, related_name="recommendations"
+    )
+    provider = models.CharField(max_length=40)
+    model = models.CharField(max_length=100)
+    contract_version = models.PositiveSmallIntegerField(default=1)
+    generated_at = models.DateTimeField(default=timezone.now)
+    information_cutoff = models.DateTimeField()
+    action = models.CharField(max_length=8, choices=Action)
+    confidence_percent = models.PositiveSmallIntegerField()
+    entry_condition = models.CharField(max_length=16, choices=EntryCondition)
+    entry_level = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    target_level = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    invalidation_level = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    expires_after_sessions = models.PositiveSmallIntegerField(default=5)
+    output = models.JSONField()
+    input_payload = models.JSONField()
+    request_sha256 = models.CharField(max_length=64)
+    provider_response_id = models.CharField(max_length=120, blank=True)
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    cost_usd = models.DecimalField(max_digits=10, decimal_places=6, default=0)
+    idempotency_key = models.CharField(max_length=240, unique=True)
+
+    class Meta:
+        ordering = ("-generated_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(confidence_percent__gte=0, confidence_percent__lte=100),
+                name="recommendation_confidence_range",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    action="abstain",
+                    entry_condition="none",
+                    entry_level__isnull=True,
+                    target_level__isnull=True,
+                    invalidation_level__isnull=True,
+                )
+                | models.Q(
+                    action__in=("buy", "sell"),
+                    entry_condition__in=("at_or_below", "at_or_above"),
+                    entry_level__isnull=False,
+                    target_level__isnull=False,
+                    invalidation_level__isnull=False,
+                ),
+                name="recommendation_setup_shape_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(information_cutoff__lte=models.F("generated_at")),
+                name="recommendation_cutoff_not_after_generation",
+            ),
+        ]
+
+    def clean(self):
+        if self.evidence_snapshot.instrument_id != self.instrument_id:
+            raise ValidationError("Recommendation and evidence instruments must match")
+        if self.control_forecast_id and self.control_forecast.instrument_id != self.instrument_id:
+            raise ValidationError("Recommendation and control instruments must match")
+        levels = (self.entry_level, self.target_level, self.invalidation_level)
+        if self.action in {self.Action.BUY, self.Action.SELL} and any(
+            value is None for value in levels
+        ):
+            raise ValidationError("A directional recommendation requires all setup levels")
+        if self.action == self.Action.BUY and not (
+            self.invalidation_level < self.entry_level < self.target_level
+        ):
+            raise ValidationError("Buy levels must order invalidation < entry < target")
+        if self.action == self.Action.SELL and not (
+            self.target_level < self.entry_level < self.invalidation_level
+        ):
+            raise ValidationError("Sell levels must order target < entry < invalidation")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)

@@ -60,6 +60,8 @@ class DashboardTests(TestCase):
         operations = self.client.get(reverse("operations"))
 
         self.assertContains(pair, "LOCKED MECHANICAL CONTROL", html=False)
+        self.assertContains(pair, "GOVERNED RECOMMENDATION", html=False)
+        self.assertContains(pair, "Awaiting the first model assessment")
         self.assertContains(pair, "IMMUTABLE TIMELINE", html=False)
         self.assertContains(pair, "chart-data")
         self.assertContains(pair, f'href="{reverse("research")}"')

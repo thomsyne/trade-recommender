@@ -7,7 +7,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 
-from forecasts.models import Forecast
+from forecasts.models import Forecast, Recommendation
 from market.models import (
     AuditEvent,
     Candle,
@@ -104,6 +104,21 @@ def market_detail(request, code):
         (forecast for forecast in forecasts if forecast.target_contract.product == "tactical"),
         None,
     )
+    recommendations = list(
+        Recommendation.objects.filter(instrument=instrument).select_related(
+            "evidence_snapshot", "control_forecast"
+        )[:20]
+    )
+    recommendation = recommendations[0] if recommendations else None
+    timeline = sorted(
+        [
+            {"kind": "recommendation", "at": item.generated_at, "item": item}
+            for item in recommendations
+        ]
+        + [{"kind": "forecast", "at": item.issued_at, "item": item} for item in forecasts],
+        key=lambda entry: entry["at"],
+        reverse=True,
+    )
     chart = [
         {
             "time": candle.timestamp.isoformat(),
@@ -147,6 +162,9 @@ def market_detail(request, code):
             "chart": chart,
             "granularity": granularity,
             "forecast": tactical_forecast,
+            "recommendation": recommendation,
+            "recommendations": recommendations,
+            "timeline": timeline,
             "forecasts": forecasts,
             "evidence": evidence,
             "evidence_fresh": evidence_fresh,

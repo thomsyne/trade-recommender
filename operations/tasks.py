@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from django.conf import settings
 
+from forecasts.recommendations import generate_all_recommendations
 from forecasts.services import resolve_due_forecasts
 from market.models import IngestionRun, Instrument, SourceRegistry
 from market.oanda import OandaClient
@@ -37,6 +38,10 @@ def execute_task(task_name, parameters):
         return ingest_official_calendar(policy, parameters["parser"], parameters["url"])
     if task_name == "research.capture_pair_evidence":
         return capture_all_pair_evidence()
+    if task_name == "forecast.generate_recommendations":
+        if not settings.ANTHROPIC_API_KEY:
+            raise ValueError("ANTHROPIC_API_KEY is not configured")
+        return generate_all_recommendations()
     raise ValueError(f"Unknown task: {task_name}")
 
 

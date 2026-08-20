@@ -399,11 +399,92 @@ p {
 .decision-empty p:last-child {
   color: var(--muted);
 }
+.recommendation-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 4px solid var(--green);
+  padding: 30px;
+}
+.recommendation-card.is-abstention {
+  border-top-color: #d0a450;
+}
+.recommendation-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 28px;
+  justify-content: space-between;
+}
+.recommendation-summary {
+  color: var(--muted);
+  line-height: 1.65;
+  max-width: 760px;
+}
+.confidence {
+  border-left: 1px solid var(--line);
+  min-width: 155px;
+  padding-left: 24px;
+}
+.confidence span,
+.confidence small,
+.recommendation-levels span,
+.recommendation-reasons span {
+  color: var(--muted);
+  display: block;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.confidence strong {
+  display: block;
+  font: 600 34px "Manrope", sans-serif;
+  margin: 4px 0;
+}
+.recommendation-levels,
+.recommendation-reasons {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 22px;
+}
+.recommendation-levels {
+  background: var(--dark);
+  color: #fff;
+}
+.recommendation-levels div {
+  border-right: 1px solid #314039;
+  padding: 18px;
+}
+.recommendation-levels strong {
+  display: block;
+  font-size: 12px;
+  margin-top: 5px;
+}
+.recommendation-reasons {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.recommendation-reasons article {
+  border-right: 1px solid var(--line);
+  padding: 20px;
+}
+.recommendation-reasons p {
+  font-size: 12px;
+  line-height: 1.65;
+  margin-bottom: 0;
+}
+.recommendation-footer {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 9px;
+  gap: 8px 18px;
+  padding: 13px 0;
+}
 .forecast-decision {
   background: var(--panel);
   border: 1px solid var(--line);
   border-top: 4px solid var(--green);
   padding: 30px;
+  margin-top: 18px;
 }
 .forecast-lead,
 .forecast-facts,
@@ -1286,6 +1367,9 @@ td small {
   .forecast-facts {
     grid-template-columns: repeat(2, 1fr);
   }
+  .recommendation-levels {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .macro-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1333,6 +1417,23 @@ td small {
   }
   .forecast-lead {
     display: grid;
+  }
+  .recommendation-head {
+    display: grid;
+  }
+  .confidence {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding: 16px 0 0;
+  }
+  .recommendation-levels,
+  .recommendation-reasons {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .recommendation-levels div,
+  .recommendation-reasons article {
+    border-bottom: 1px solid var(--line);
+    border-right: 0;
   }
   .forecast-facts,
   .probability-grid {

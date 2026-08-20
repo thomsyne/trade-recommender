@@ -6,7 +6,11 @@ from research.models import MacroSeries, ProviderEvaluation, SourcePolicy
 
 
 class ResearchSeedTests(TestCase):
-    @override_settings(EODHD_API_TOKEN="")
+    @override_settings(
+        ANTHROPIC_API_KEY="configured-but-not-authorized",
+        EODHD_API_TOKEN="",
+        RECOMMENDATION_SCHEDULE_ENABLED=False,
+    )
     def test_seed_is_idempotent_and_leaves_calendar_provider_unselected(self):
         call_command("seed_research", verbosity=0)
         call_command("seed_research", verbosity=0)
@@ -34,6 +38,9 @@ class ResearchSeedTests(TestCase):
             ScheduledJob.objects.filter(
                 task_name="research.capture_pair_evidence", enabled=True
             ).exists()
+        )
+        self.assertFalse(
+            ScheduledJob.objects.get(task_name="forecast.generate_recommendations").enabled
         )
         self.assertEqual(
             MacroSeries.objects.filter(
