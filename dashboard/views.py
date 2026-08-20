@@ -7,7 +7,12 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 
-from forecasts.models import Forecast, Recommendation, RecommendationResolution
+from forecasts.models import (
+    Forecast,
+    PaperTradeResult,
+    Recommendation,
+    RecommendationResolution,
+)
 from market.models import (
     AuditEvent,
     Candle,
@@ -106,7 +111,12 @@ def market_detail(request, code):
     )
     recommendations = list(
         Recommendation.objects.filter(instrument=instrument).select_related(
-            "evidence_snapshot", "control_forecast", "reference_candle", "resolution"
+            "evidence_snapshot",
+            "control_forecast",
+            "reference_candle",
+            "resolution",
+            "paper_entry__candle",
+            "paper_result__exit_candle",
         )[:20]
     )
     recommendation = recommendations[0] if recommendations else None
@@ -438,6 +448,68 @@ def calibration(request):
             "pair_rows": pair_rows,
             "bins": bins,
             "recent_resolutions": resolutions[:20],
+        },
+    )
+
+
+@login_required
+def paper_trades(request):
+    recommendations = list(
+        Recommendation.objects.filter(
+            contract_version__gte=2,
+            action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
+        ).select_related(
+            "instrument",
+            "paper_entry__candle",
+            "paper_result__exit_candle",
+            "paper_result__horizon_candle",
+        )
+    )
+    rows = []
+    for recommendation in recommendations:
+        entry = getattr(recommendation, "paper_entry", None)
+        result = getattr(recommendation, "paper_result", None)
+        if result:
+            state = result.outcome
+            state_label = result.get_outcome_display()
+        elif entry:
+            state = "entered"
+            state_label = "Entered; monitoring exit"
+        else:
+            state = "waiting"
+            state_label = "Waiting for entry"
+        rows.append(
+            {
+                "recommendation": recommendation,
+                "entry": entry,
+                "result": result,
+                "state": state,
+                "state_label": state_label,
+            }
+        )
+    results = [row["result"] for row in rows if row["result"]]
+    executed_results = [
+        result for result in results if result.outcome != PaperTradeResult.Outcome.NOT_ACTIVATED
+    ]
+    gross_pips = sum(
+        (result.gross_pips for result in executed_results if result.gross_pips is not None),
+        start=0,
+    )
+    return render(
+        request,
+        "dashboard/paper_trades.html",
+        {
+            "rows": rows,
+            "waiting_count": sum(row["state"] == "waiting" for row in rows),
+            "entered_count": sum(row["state"] == "entered" for row in rows),
+            "resolved_count": len(results),
+            "executed_count": len(executed_results),
+            "target_count": sum(
+                result.outcome == PaperTradeResult.Outcome.TARGET for result in results
+            ),
+            "gross_pips": gross_pips,
+            "mature": len(executed_results) >= 30,
+            "remaining": max(0, 30 - len(executed_results)),
         },
     )
 

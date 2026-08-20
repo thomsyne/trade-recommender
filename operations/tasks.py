@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from django.conf import settings
 
+from forecasts.paper import resolve_due_paper_trades
 from forecasts.recommendations import generate_all_recommendations, resolve_due_recommendations
 from forecasts.services import resolve_due_forecasts
 from market.models import IngestionRun, Instrument, SourceRegistry
@@ -49,7 +50,8 @@ def ingest_oanda(parameters):
     instrument = Instrument.objects.get(code=parameters["instrument"])
     granularity = parameters["granularity"]
     end = _datetime(parameters.get("to")) if parameters.get("to") else datetime.now(UTC)
-    days = int(parameters.get("days", 14 if granularity == "H4" else 90))
+    default_days = {"H1": 14, "H4": 14, "D": 90}[granularity]
+    days = int(parameters.get("days", default_days))
     start = (
         _datetime(parameters.get("from")) if parameters.get("from") else end - timedelta(days=days)
     )
@@ -60,6 +62,8 @@ def ingest_oanda(parameters):
     if run.status == IngestionRun.Status.SUCCEEDED and granularity == "D":
         resolve_due_forecasts(instrument)
         resolve_due_recommendations(instrument)
+    if run.status == IngestionRun.Status.SUCCEEDED and granularity in {"H1", "D"}:
+        resolve_due_paper_trades(instrument)
     return run
 
 

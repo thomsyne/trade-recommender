@@ -41,6 +41,12 @@ after five later completed daily sessions, and stores immutable multiclass Brier
 and directional hit outcomes. Version 1 is excluded rather than reinterpreted.
 The separate Calibration page suppresses conclusions until 30 outcomes exist.
 
+The Paper Execution slice is implemented: hourly OANDA bid/ask collection runs
+every hour, directional v2 setups transition through waiting, immutable entry,
+and immutable result records, and adverse ordering resolves ambiguous hourly
+candles. The Paper page reports spread-aware gross pips and R-multiples while
+explicitly excluding financing and keeping results separate from calibration.
+
 ## Verification gate
 
 Run:
@@ -59,9 +65,9 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Build paper setup activation only when lower-timeframe bid/ask ordering, spread,
-same-candle ambiguity, and financing assumptions are explicit. Keep setup P&L,
-thesis calibration, and model-vs-mechanical comparison separate.
+Add portfolio exposure and correlation controls before any position sizing.
+Then add financing/commission sensitivity so paper results can graduate from
+gross spread-aware observations to conservative net estimates.
 
 ## Still OPEN
 

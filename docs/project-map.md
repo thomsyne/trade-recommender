@@ -1,6 +1,6 @@
 # FX Forecast Lab — Four-Quadrant Project Map
 
-**Status:** Planning complete; Foundation, Market Truth, Forecast Contract, Research Evidence, Governed Recommendations, and Prospective Calibration implemented
+**Status:** Planning complete; Foundation, Market Truth, Forecast Contract, Research Evidence, Governed Recommendations, Prospective Calibration, and Paper Execution implemented
 **Prepared:** 2026-08-18  
 **Purpose:** Durable source of truth for the first implementation and future Amp threads
 
@@ -72,7 +72,8 @@ forecast controls, official four-economy macro and release calendars, broader
 RSS collection, seven intermarket series, and scheduled pair-level evidence
 snapshots. Governed model recommendations are immutable, evidence-cited, and
 advisory. Versioned probabilistic outcomes now resolve prospectively after five
-sessions; research remains unable to issue or mutate forecasts.
+sessions. Directional setups are separately observed with hourly bid/ask paper
+execution; research remains unable to issue or mutate forecasts.
 
 ---
 
@@ -198,7 +199,7 @@ All entries below were closed by the user unless marked **Territory** or
 | UU-2 | Password plus IP is not strong independent authentication. | Require password, TOTP, and allowed source IP; recover through SSM. |
 | UU-3 | Private access does not grant universal automation or external-LLM rights. | Apply source-specific terms; process full text where permitted, otherwise use links/metadata/permitted excerpts/notes. |
 | UU-4 | Daily backups can lose irreplaceable forward evidence. | Continuous WAL + daily backups; target ≤15-minute RPO and ≤4-hour RTO; verify by restore drills. |
-| UU-5 | H4/D OHLC cannot prove intrabar entry/stop/target sequence. | Use lower-timeframe bid/ask if available; otherwise retain bounds and use adverse headline result. |
+| UU-5 | H4/D OHLC cannot prove intrabar entry/stop/target sequence. | Hourly bid/ask now drives paper fills; same-hour ambiguity receives the adverse result. |
 | UU-6 | Fifty overlapping/correlated rows are not fifty independent observations. | Keep row/time minimums but require distinct parent/event clusters, effective sample size, and dependence-aware uncertainty. |
 | UU-7 | Repeated proposals can optimize the judge rather than improve forecasts. | Frozen prospective champion/challenger runs, locked metrics/window, shadow candidate, complete attempt history. |
 | UU-8 | Repeated syndicated articles create false corroboration. | Track claim lineage and independent provenance families; URL count is not evidence count. |

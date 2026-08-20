@@ -63,6 +63,26 @@ false calibration. The dashboard remains explicitly insufficient-sample until
 30 version 2 outcomes resolve. It is descriptive only and cannot alter prompts,
 sources, weights, or execution.
 
+## Paper setup lifecycle
+
+Directional version 2 setups are monitored only against completed hourly OANDA
+bid/ask candles whose intervals start after recommendation generation. Buys
+enter on ask and exit on bid; sells enter on bid and exit on ask. Limit fills do
+not receive favorable price improvement, adverse stop gaps use the opening
+executable quote, and target/invalidation fills use their declared levels.
+
+When target and invalidation coexist in one hourly candle, invalidation takes
+precedence. A target touched in the same intrabar entry candle is ignored unless
+the entry condition already held at that candle's open. Open setups expire at
+the executable close of the fifth broker daily session. Immutable
+`PaperTradeEntry` and `PaperTradeResult` records store the evidence candles,
+spread, fill prices, gross pips, R-multiple, and policy details.
+
+These are paper observations, not orders. Gross pips embed bid/ask execution but
+exclude financing, commission, sizing, leverage, and taxes. They are reported
+separately from probabilistic thesis calibration and remain insufficient-sample
+until 30 activated setups resolve.
+
 ## Spend limits
 
 Defaults use Claude Sonnet 5 list rates and enforce:
@@ -83,6 +103,6 @@ python manage.py generate_recommendations
 python manage.py generate_recommendations USD_CAD
 ```
 
-The next contract may add setup activation, target/invalidation ordering with
-lower-timeframe bid/ask evidence, and paper results. It must remain separate
-from thesis scoring and must not reconstruct historical recommendations.
+The next contract may add financing and commission sensitivity, portfolio sizing,
+and exposure controls. It must remain separate from thesis scoring and must not
+reconstruct historical recommendations.

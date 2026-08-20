@@ -36,6 +36,8 @@
 - `forecasts.recommendations` owns the provider-neutral recommendation contract,
   bounded Claude adapter, semantic validation, idempotency, spend gates,
   prospective resolution, and calibration metrics.
+- `forecasts.paper` owns deterministic post-recommendation hourly bid/ask setup
+  activation, conservative exit ordering, expiry, and immutable paper results.
 - `research.fetch` owns the HTTPS allowlist, DNS/redirect/size/content-type
   safety boundary. It is not exposed as a generic fetch endpoint.
 - `research.services` owns immutable raw research, normalization, vintages,
@@ -63,6 +65,8 @@
     remains separate from the mechanical control, and has no execution authority.
 13. Only recommendations with a frozen probabilistic outcome contract are
     resolved; vague legacy confidence is never reinterpreted after the fact.
+14. Paper execution starts strictly after recommendation generation, uses
+    executable bid/ask sides, and remains separate from thesis calibration.
 
 ## Deliberate first-slice choices
 

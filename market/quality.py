@@ -13,7 +13,11 @@ def validate_candles(candles, granularity):
     issues = []
     seen = set()
     previous = None
-    expected_step = {"H4": timedelta(hours=4), "D": timedelta(days=1)}[granularity]
+    expected_step = {
+        "H1": timedelta(hours=1),
+        "H4": timedelta(hours=4),
+        "D": timedelta(days=1),
+    }[granularity]
 
     for index, candle in enumerate(candles):
         timestamp = candle.timestamp

@@ -402,3 +402,157 @@ class RecommendationResolution(ImmutableModel):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class PaperTradeEntry(ImmutableModel):
+    recommendation = models.OneToOneField(
+        Recommendation, on_delete=models.PROTECT, related_name="paper_entry"
+    )
+    candle = models.ForeignKey(Candle, on_delete=models.PROTECT)
+    execution_side = models.CharField(max_length=3, choices=(("ask", "Ask"), ("bid", "Bid")))
+    fill_price = models.DecimalField(max_digits=12, decimal_places=6)
+    observed_open_spread = models.DecimalField(max_digits=12, decimal_places=6)
+    details = models.JSONField(default=dict)
+    entered_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-entered_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(observed_open_spread__gte=0),
+                name="paper_entry_spread_nonnegative",
+            )
+        ]
+
+    def clean(self):
+        recommendation = self.recommendation
+        if (
+            recommendation.contract_version < 2
+            or recommendation.action == Recommendation.Action.ABSTAIN
+        ):
+            raise ValidationError("Only directional v2 recommendations can enter a paper trade")
+        if (
+            self.candle.instrument_id != recommendation.instrument_id
+            or self.candle.granularity != "H1"
+        ):
+            raise ValidationError("Paper entry requires an hourly candle for its instrument")
+        expected_side = "ask" if recommendation.action == Recommendation.Action.BUY else "bid"
+        if self.execution_side != expected_side:
+            raise ValidationError("Paper entry execution side does not match its action")
+        if self.candle.timestamp < recommendation.generated_at:
+            raise ValidationError("Paper entry evidence cannot predate recommendation generation")
+        if self.observed_open_spread < 0:
+            raise ValidationError("Paper entry spread cannot be negative")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class PaperTradeResult(ImmutableModel):
+    class Outcome(models.TextChoices):
+        TARGET = "target", "Target hit"
+        INVALIDATED = "invalidated", "Invalidated"
+        EXPIRED = "expired", "Entered; expired at session close"
+        NOT_ACTIVATED = "not_activated", "Entry not activated"
+
+    recommendation = models.OneToOneField(
+        Recommendation, on_delete=models.PROTECT, related_name="paper_result"
+    )
+    entry = models.OneToOneField(
+        PaperTradeEntry,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="result",
+    )
+    outcome = models.CharField(max_length=16, choices=Outcome)
+    horizon_candle = models.ForeignKey(
+        Candle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="paper_horizon_results",
+    )
+    exit_candle = models.ForeignKey(
+        Candle,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="paper_exit_results",
+    )
+    exit_price = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    gross_pips = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    r_multiple = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    details = models.JSONField(default=dict)
+    resolved_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-resolved_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    outcome="not_activated",
+                    entry__isnull=True,
+                    horizon_candle__isnull=False,
+                    exit_candle__isnull=True,
+                    exit_price__isnull=True,
+                    gross_pips__isnull=True,
+                    r_multiple__isnull=True,
+                )
+                | models.Q(
+                    outcome__in=("target", "invalidated"),
+                    entry__isnull=False,
+                    exit_candle__isnull=False,
+                    exit_price__isnull=False,
+                    gross_pips__isnull=False,
+                    r_multiple__isnull=False,
+                )
+                | models.Q(
+                    outcome="expired",
+                    entry__isnull=False,
+                    horizon_candle__isnull=False,
+                    exit_candle__isnull=False,
+                    exit_price__isnull=False,
+                    gross_pips__isnull=False,
+                    r_multiple__isnull=False,
+                ),
+                name="paper_result_shape_valid",
+            )
+        ]
+
+    def clean(self):
+        recommendation = self.recommendation
+        if (
+            recommendation.contract_version < 2
+            or recommendation.action == Recommendation.Action.ABSTAIN
+        ):
+            raise ValidationError("Only directional v2 recommendations have paper results")
+        if self.horizon_candle:
+            if self.horizon_candle.instrument_id != recommendation.instrument_id:
+                raise ValidationError(
+                    "Paper horizon candle must match its recommendation instrument"
+                )
+            if self.horizon_candle.granularity != "D":
+                raise ValidationError("Paper horizon must be a daily candle")
+        if self.exit_candle and self.exit_candle.instrument_id != recommendation.instrument_id:
+            raise ValidationError("Paper exit candle must match its recommendation instrument")
+        values = (self.exit_candle, self.exit_price, self.gross_pips, self.r_multiple)
+        if self.outcome == self.Outcome.NOT_ACTIVATED:
+            if not self.horizon_candle_id:
+                raise ValidationError("A non-activated setup requires its expiry horizon")
+            if self.entry_id or any(value is not None for value in values):
+                raise ValidationError("A non-activated setup cannot contain execution results")
+        else:
+            if not self.entry_id or any(value is None for value in values):
+                raise ValidationError(
+                    "An activated paper setup requires complete execution results"
+                )
+            if self.entry.recommendation_id != recommendation.pk:
+                raise ValidationError("Paper entry and result recommendations must match")
+            if self.outcome == self.Outcome.EXPIRED and not self.horizon_candle_id:
+                raise ValidationError("An expired paper setup requires its horizon candle")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)

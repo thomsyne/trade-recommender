@@ -59,6 +59,7 @@ class DashboardTests(TestCase):
         pair = self.client.get(reverse("market-detail", args=("USD_CAD",)))
         operations = self.client.get(reverse("operations"))
         calibration = self.client.get(reverse("calibration"))
+        paper = self.client.get(reverse("paper-trades"))
 
         self.assertContains(pair, "LOCKED MECHANICAL CONTROL", html=False)
         self.assertContains(pair, "GOVERNED RECOMMENDATION", html=False)
@@ -71,6 +72,8 @@ class DashboardTests(TestCase):
         self.assertContains(operations, "WAITING FOR CREDENTIAL")
         self.assertContains(calibration, "Insufficient sample—do not infer skill")
         self.assertContains(calibration, "No v2 recommendation has reached five later")
+        self.assertContains(paper, "Insufficient sample—do not infer profitability")
+        self.assertContains(paper, "No directional v2 recommendation exists yet")
 
     def test_research_surface_is_private_read_only_and_escapes_source_text(self):
         self.assertRedirects(

@@ -64,7 +64,8 @@ class Command(BaseCommand):
             if settings.DEBUG:
                 self._seed_candles(fixture, instrument, "D", now, initial, 48)
                 self._seed_candles(fixture, instrument, "H4", now, initial, 72)
-            for granularity, interval in (("H4", 14_400), ("D", 86_400)):
+                self._seed_candles(fixture, instrument, "H1", now, initial, 168)
+            for granularity, interval in (("H1", 3_600), ("H4", 14_400), ("D", 86_400)):
                 job, _ = ScheduledJob.objects.get_or_create(
                     name=f"OANDA {code} {granularity}",
                     defaults={
@@ -94,7 +95,11 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS("canonical market data ready"))
 
     def _seed_candles(self, source, instrument, granularity, end, initial, count):
-        delta = timedelta(days=1) if granularity == "D" else timedelta(hours=4)
+        delta = {
+            "D": timedelta(days=1),
+            "H4": timedelta(hours=4),
+            "H1": timedelta(hours=1),
+        }[granularity]
         start = end - delta * count
         spread = Decimal("0.000120")
         candles = []

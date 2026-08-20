@@ -47,7 +47,7 @@ class SourceRegistry(models.Model):
         return self.name
 
 
-GRANULARITIES = (("D", "Daily"), ("H4", "Four-hour"))
+GRANULARITIES = (("D", "Daily"), ("H4", "Four-hour"), ("H1", "Hourly"))
 
 
 class IngestionRun(models.Model):

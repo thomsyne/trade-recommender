@@ -55,7 +55,11 @@ class OandaClient:
         if start >= end:
             raise ValueError("start must be before end")
 
-        step = {"H4": timedelta(hours=4), "D": timedelta(days=1)}[granularity]
+        step = {
+            "H1": timedelta(hours=1),
+            "H4": timedelta(hours=4),
+            "D": timedelta(days=1),
+        }[granularity]
         window = step * 4999
         cursor = start.astimezone(UTC)
         end = end.astimezone(UTC)

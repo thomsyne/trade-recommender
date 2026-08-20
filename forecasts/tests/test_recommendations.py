@@ -1,6 +1,7 @@
 import json
 from datetime import timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import httpx
 from django.core.exceptions import ValidationError
@@ -8,7 +9,8 @@ from django.db import DatabaseError, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
-from forecasts.models import Forecast, Recommendation
+from forecasts.models import Forecast, PaperTradeEntry, PaperTradeResult, Recommendation
+from forecasts.paper import resolve_paper_trade
 from forecasts.recommendations import (
     AnthropicProvider,
     ProviderResult,
@@ -121,6 +123,40 @@ def rising_candle(timestamp):
         ask_low=Decimal("1.3582"),
         ask_close=Decimal("1.3600"),
     )
+
+
+def hourly_candle(timestamp, **changes):
+    values = {
+        "bid_open": Decimal("1.3510"),
+        "bid_high": Decimal("1.3520"),
+        "bid_low": Decimal("1.3496"),
+        "bid_close": Decimal("1.3505"),
+        "ask_open": Decimal("1.3512"),
+        "ask_high": Decimal("1.3522"),
+        "ask_low": Decimal("1.3498"),
+        "ask_close": Decimal("1.3507"),
+    }
+    values.update(changes)
+    return candle(timestamp, **values)
+
+
+def open_market_hours(start, end):
+    cursor = start.replace(minute=0, second=0, microsecond=0)
+    if cursor < start:
+        cursor += timedelta(hours=1)
+    values = []
+    new_york = ZoneInfo("America/New_York")
+    while cursor < end:
+        local = cursor.astimezone(new_york)
+        market_open = (
+            local.weekday() < 4
+            or (local.weekday() == 4 and local.hour < 17)
+            or (local.weekday() == 6 and local.hour >= 17)
+        )
+        if market_open:
+            values.append(cursor)
+        cursor += timedelta(hours=1)
+    return values
 
 
 class FakeProvider:
@@ -300,6 +336,163 @@ class RecommendationTests(TestCase):
         self.assertTrue(resolution.details["setup_performance_not_measured"])
         self.assertEqual(resolve_recommendation(recommendation), resolution)
 
+    def test_paper_trade_uses_hourly_ask_entry_and_bid_target_after_entry_candle(self):
+        recommendation = generate_recommendation(
+            self.instrument,
+            provider=FakeProvider(),
+            generated_at=self.now + timedelta(seconds=1),
+        )
+        first = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
+            hours=1
+        )
+        candles = [
+            hourly_candle(
+                first,
+                bid_high=Decimal("1.3605"),
+                ask_high=Decimal("1.3607"),
+            ),
+            hourly_candle(
+                first + timedelta(hours=1),
+                bid_high=Decimal("1.3602"),
+                ask_high=Decimal("1.3604"),
+            ),
+        ]
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "H1",
+            recommendation.generated_at - timedelta(hours=1),
+            first + timedelta(hours=2),
+            candles,
+            {"test": "paper-target", "requests": []},
+        )
+
+        result = resolve_paper_trade(recommendation)
+
+        self.assertEqual(result.outcome, PaperTradeResult.Outcome.TARGET)
+        self.assertEqual(result.entry.execution_side, "ask")
+        self.assertEqual(result.entry.fill_price, Decimal("1.350000"))
+        self.assertTrue(result.entry.details["target_touch_on_entry_candle_ignored"])
+        self.assertEqual(result.exit_candle.timestamp, first + timedelta(hours=1))
+        self.assertEqual(result.exit_price, Decimal("1.360000"))
+        self.assertEqual(result.gross_pips, Decimal("100.000"))
+        self.assertEqual(result.r_multiple, Decimal("1.0000"))
+
+    def test_paper_trade_applies_adverse_stop_precedence_on_ambiguous_entry_candle(self):
+        recommendation = generate_recommendation(
+            self.instrument,
+            provider=FakeProvider(),
+            generated_at=self.now + timedelta(seconds=1),
+        )
+        first = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
+            hours=1
+        )
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "H1",
+            recommendation.generated_at - timedelta(hours=1),
+            first + timedelta(hours=1),
+            [
+                hourly_candle(
+                    first,
+                    bid_open=Decimal("1.3490"),
+                    bid_high=Decimal("1.3610"),
+                    bid_low=Decimal("1.3390"),
+                    ask_open=Decimal("1.3492"),
+                    ask_high=Decimal("1.3612"),
+                    ask_low=Decimal("1.3392"),
+                )
+            ],
+            {"test": "paper-ambiguous", "requests": []},
+        )
+
+        result = resolve_paper_trade(recommendation)
+
+        self.assertEqual(result.outcome, PaperTradeResult.Outcome.INVALIDATED)
+        self.assertTrue(result.details["same_candle_target_and_stop"])
+        self.assertTrue(result.details["adverse_invalidation_precedence"])
+        self.assertEqual(result.exit_price, Decimal("1.340000"))
+        self.assertEqual(result.gross_pips, Decimal("-100.000"))
+
+    def test_paper_trade_waits_when_hourly_coverage_does_not_start_after_generation(self):
+        recommendation = generate_recommendation(
+            self.instrument,
+            provider=FakeProvider(),
+            generated_at=self.now + timedelta(seconds=1),
+        )
+        late = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
+            hours=3
+        )
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "H1",
+            recommendation.generated_at - timedelta(hours=1),
+            late + timedelta(hours=1),
+            [hourly_candle(late)],
+            {"test": "paper-incomplete-coverage", "requests": []},
+        )
+
+        self.assertIsNone(resolve_paper_trade(recommendation))
+        self.assertFalse(PaperTradeEntry.objects.exists())
+
+    def test_paper_trade_expires_unactivated_only_after_complete_hourly_coverage(self):
+        recommendation = generate_recommendation(
+            self.instrument,
+            provider=FakeProvider(),
+            generated_at=self.now + timedelta(seconds=1),
+        )
+        first_daily = (recommendation.reference_candle.timestamp + timedelta(days=1)).replace(
+            minute=0, second=0, microsecond=0
+        )
+        future_daily = [rising_candle(first_daily + timedelta(days=index)) for index in range(5)]
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "D",
+            first_daily,
+            first_daily + timedelta(days=5),
+            future_daily,
+            {"test": "paper-expiry-daily", "requests": []},
+        )
+        horizon = future_daily[-1].timestamp
+        local_horizon = horizon.astimezone(ZoneInfo("America/New_York"))
+        expiry = (local_horizon + timedelta(days=1)).astimezone(horizon.tzinfo)
+        hours = open_market_hours(recommendation.generated_at, expiry)
+        no_touch = [
+            hourly_candle(
+                timestamp,
+                bid_open=Decimal("1.3550"),
+                bid_high=Decimal("1.3560"),
+                bid_low=Decimal("1.3540"),
+                bid_close=Decimal("1.3552"),
+                ask_open=Decimal("1.3552"),
+                ask_high=Decimal("1.3562"),
+                ask_low=Decimal("1.3542"),
+                ask_close=Decimal("1.3554"),
+            )
+            for timestamp in hours
+        ]
+        hourly_run = store_ingestion(
+            self.source,
+            self.instrument,
+            "H1",
+            recommendation.generated_at - timedelta(hours=1),
+            expiry,
+            no_touch,
+            {"test": "paper-expiry-hourly", "requests": []},
+        )
+        self.assertEqual(hourly_run.status, "succeeded")
+        self.assertEqual(hourly_run.candles.count(), len(no_touch))
+
+        result = resolve_paper_trade(recommendation)
+
+        self.assertEqual(result.outcome, PaperTradeResult.Outcome.NOT_ACTIVATED)
+        self.assertIsNone(result.entry)
+        self.assertEqual(result.horizon_candle.timestamp, horizon)
+        self.assertTrue(result.details["hourly_coverage_verified"])
+
     @override_settings(RECOMMENDATION_MAX_RUN_COST_USD=Decimal("0.001"))
     def test_spend_cap_fails_before_provider_call(self):
         provider = FakeProvider()
@@ -372,6 +565,37 @@ class RecommendationDatabaseTests(TransactionTestCase):
 
         recommendation.refresh_from_db()
         self.assertEqual(recommendation.confidence_percent, 62)
+
+        first_hour = recommendation.generated_at.replace(
+            minute=0, second=0, microsecond=0
+        ) + timedelta(hours=1)
+        store_ingestion(
+            source,
+            instrument,
+            "H1",
+            recommendation.generated_at - timedelta(hours=1),
+            first_hour + timedelta(hours=1),
+            [
+                hourly_candle(
+                    first_hour,
+                    bid_open=Decimal("1.3490"),
+                    bid_high=Decimal("1.3610"),
+                    bid_low=Decimal("1.3390"),
+                    ask_open=Decimal("1.3492"),
+                    ask_high=Decimal("1.3612"),
+                    ask_low=Decimal("1.3392"),
+                )
+            ],
+            {"test": "database-paper-result", "requests": []},
+        )
+        paper_result = resolve_paper_trade(recommendation)
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            PaperTradeEntry.objects.filter(pk=paper_result.entry_id).update(fill_price=0)
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            PaperTradeResult.objects.filter(pk=paper_result.pk).update(gross_pips=0)
+
+        paper_result.refresh_from_db()
+        self.assertEqual(paper_result.gross_pips, Decimal("-100.000"))
 
         start = recommendation.reference_candle.timestamp + timedelta(days=1)
         store_ingestion(
