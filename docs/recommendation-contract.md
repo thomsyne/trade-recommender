@@ -83,6 +83,21 @@ exclude financing, commission, sizing, leverage, and taxes. They are reported
 separately from probabilistic thesis calibration and remain insufficient-sample
 until 30 activated setups resolve.
 
+## Currency exposure guardrails
+
+Every unresolved directional version 2 setup is decomposed deterministically:
+buying BASE/QUOTE is long base and short quote; selling it is short base and
+long quote. Waiting entries remain included because they can still activate,
+while abstentions, legacy recommendations, and completed paper setups are
+excluded. Entered and waiting states remain visibly distinct.
+
+The Exposure page reports gross and net setup equivalents, repeated
+same-direction currency factors, and opposing factors. More than two unresolved
+setup equivalents in one currency direction breaches the declared advisory
+cap. This is direct factor accounting, not an estimated pair-correlation model.
+Until sizing exists, one setup equivalent is not a risk or cash amount and the
+guardrail cannot place, resize, or block an order.
+
 ## Spend limits
 
 Defaults use Claude Sonnet 5 list rates and enforce:
@@ -103,6 +118,6 @@ python manage.py generate_recommendations
 python manage.py generate_recommendations USD_CAD
 ```
 
-The next contract may add financing and commission sensitivity, portfolio sizing,
-and exposure controls. It must remain separate from thesis scoring and must not
-reconstruct historical recommendations.
+The next contract may add financing and commission sensitivity and portfolio
+sizing. It must remain separate from thesis scoring and must not reconstruct
+historical recommendations.

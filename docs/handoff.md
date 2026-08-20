@@ -47,6 +47,12 @@ and immutable result records, and adverse ordering resolves ambiguous hourly
 candles. The Paper page reports spread-aware gross pips and R-multiples while
 explicitly excluding financing and keeping results separate from calibration.
 
+The Portfolio Exposure slice is implemented: unresolved directional setups are
+decomposed into long/short currency legs, waiting and entered states remain
+visible, and deterministic controls flag repeated factors, opposing views, and
+more than two same-direction setup equivalents. The Exposure page is advisory;
+it does not imply sizing, statistical correlation, or broker enforcement.
+
 ## Verification gate
 
 Run:
@@ -65,9 +71,10 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Add portfolio exposure and correlation controls before any position sizing.
-Then add financing/commission sensitivity so paper results can graduate from
-gross spread-aware observations to conservative net estimates.
+Add financing/commission sensitivity so paper results can graduate from gross
+spread-aware observations to conservative net estimates. Only then define a
+versioned position-sizing contract that converts advisory setup equivalents to
+actual risk budgets.
 
 ## Still OPEN
 

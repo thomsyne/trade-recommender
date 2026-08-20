@@ -1,4 +1,9 @@
 (function () {
+  const activeNavigationLink = document.querySelector(".sidebar nav .active");
+  if (activeNavigationLink && window.matchMedia("(max-width: 950px)").matches) {
+    activeNavigationLink.scrollIntoView({ block: "nearest", inline: "center" });
+  }
+
   window.renderMarketChart = function (id, candles) {
     const canvas = document.getElementById(id);
     if (!canvas || !candles.length) return;

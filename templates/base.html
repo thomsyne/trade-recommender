@@ -24,6 +24,7 @@
         <a class="nav-link {% if request.resolver_match.url_name == 'operations' %}active{% endif %}" href="{% url 'operations' %}"><span>03</span>Operations</a>
         <a class="nav-link {% if request.resolver_match.url_name == 'calibration' %}active{% endif %}" href="{% url 'calibration' %}"><span>04</span>Calibration</a>
         <a class="nav-link {% if request.resolver_match.url_name == 'paper-trades' %}active{% endif %}" href="{% url 'paper-trades' %}"><span>05</span>Paper</a>
+        <a class="nav-link {% if request.resolver_match.url_name == 'exposure' %}active{% endif %}" href="{% url 'exposure' %}"><span>06</span>Exposure</a>
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot"></span> Local research environment

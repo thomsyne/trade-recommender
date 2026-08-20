@@ -612,6 +612,57 @@ p {
   font-size: 11px;
   margin-bottom: 0;
 }
+.exposure-summary {
+  margin-top: 18px;
+}
+.exposure-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  margin-top: 18px;
+}
+.exposure-grid .table-panel {
+  min-width: 0;
+}
+.setup-leg-list {
+  margin-top: 16px;
+}
+.setup-leg-list article {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 15px;
+  justify-content: space-between;
+  padding: 15px 0;
+}
+.setup-leg-list small {
+  color: var(--muted);
+  display: block;
+  font-size: 10px;
+  margin-top: 3px;
+}
+.leg-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.leg-pill {
+  border: 1px solid var(--line);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 6px 8px;
+  white-space: nowrap;
+}
+.leg-pill.long {
+  background: var(--mint);
+  color: var(--green);
+}
+.leg-pill.short {
+  background: var(--amber-bg);
+  color: #71400a;
+}
 .forecast-decision {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -1484,6 +1535,9 @@ td small {
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+  .exposure-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .evidence-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1600,6 +1654,13 @@ td small {
     align-items: flex-start;
     display: grid;
     gap: 8px;
+  }
+  .setup-leg-list article {
+    align-items: flex-start;
+    display: grid;
+  }
+  .leg-pills {
+    justify-content: flex-start;
   }
   .recommendation-levels div,
   .recommendation-reasons article {

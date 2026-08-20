@@ -7,6 +7,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 
+from forecasts.exposure import active_directional_recommendations, build_exposure_report
 from forecasts.models import (
     Forecast,
     PaperTradeResult,
@@ -512,6 +513,12 @@ def paper_trades(request):
             "remaining": max(0, 30 - len(executed_results)),
         },
     )
+
+
+@login_required
+def exposure(request):
+    report = build_exposure_report(active_directional_recommendations())
+    return render(request, "dashboard/exposure.html", report)
 
 
 @login_required

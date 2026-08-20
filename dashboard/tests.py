@@ -60,6 +60,7 @@ class DashboardTests(TestCase):
         operations = self.client.get(reverse("operations"))
         calibration = self.client.get(reverse("calibration"))
         paper = self.client.get(reverse("paper-trades"))
+        exposure = self.client.get(reverse("exposure"))
 
         self.assertContains(pair, "LOCKED MECHANICAL CONTROL", html=False)
         self.assertContains(pair, "GOVERNED RECOMMENDATION", html=False)
@@ -74,6 +75,9 @@ class DashboardTests(TestCase):
         self.assertContains(calibration, "No v2 recommendation has reached five later")
         self.assertContains(paper, "Insufficient sample—do not infer profitability")
         self.assertContains(paper, "No directional v2 recommendation exists yet")
+        self.assertContains(exposure, "Currency exposure")
+        self.assertContains(exposure, "No unresolved directional v2 setup exists")
+        self.assertContains(exposure, "No position size")
 
     def test_research_surface_is_private_read_only_and_escapes_source_text(self):
         self.assertRedirects(
