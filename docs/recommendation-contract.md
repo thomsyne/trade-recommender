@@ -12,9 +12,10 @@ record. It cannot browse or call tools. News text is explicitly untrusted data.
 The packet contains bounded normalized market/research fields and filters out
 any news item not explicitly marked eligible for model processing.
 
-Generation fails closed when evidence is more than eight hours old, fixture
-market data is present, the evidence schema/boundary is invalid, the API key is
-missing, or a spend limit would be crossed.
+Generation fails closed when the packet is more than eight hours old, its H4
+market/technical inputs exceed 12 weekday hours, fixture market data is present,
+the evidence schema/boundary is invalid, the API key is missing, or a spend
+limit would be crossed.
 
 ## Output boundary
 

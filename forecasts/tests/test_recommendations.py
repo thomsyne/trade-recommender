@@ -18,14 +18,16 @@ from market.models import AuditEvent, Instrument
 from research.models import PairEvidenceSnapshot
 
 
-def evidence(instrument, captured_at=None):
+def evidence(instrument, captured_at=None, market_as_of=None):
     captured_at = captured_at or timezone.now()
+    market_as_of = market_as_of or captured_at
     payload = {
         "schema": "pair-evidence-v1",
         "instrument": instrument.code,
         "currencies": [instrument.base_currency, instrument.quote_currency],
         "market": {
             "anchor_candle_id": 41,
+            "as_of": market_as_of.isoformat(),
             "midpoint_close": "1.350000",
             "source": "OANDA v20",
         },
@@ -33,6 +35,7 @@ def evidence(instrument, captured_at=None):
             {
                 "id": 51,
                 "granularity": "H4",
+                "as_of": market_as_of.isoformat(),
                 "support": "1.340000",
                 "resistance": "1.360000",
             }
@@ -179,6 +182,21 @@ class RecommendationTests(TestCase):
 
         self.assertEqual(provider.calls, 0)
 
+    def test_stale_underlying_market_data_fails_before_provider_call(self):
+        stale_instrument = Instrument.objects.create(
+            code="GBP_USD", base_currency="GBP", quote_currency="USD", display_order=3
+        )
+        stale_at = self.now - timedelta(days=1)
+        evidence(stale_instrument, self.now, market_as_of=stale_at)
+        provider = FakeProvider()
+
+        with self.assertRaisesMessage(ValidationError, "Market candle is stale"):
+            generate_recommendation(
+                stale_instrument, provider=provider, generated_at=self.now + timedelta(seconds=1)
+            )
+
+        self.assertEqual(provider.calls, 0)
+
     def test_invalid_level_order_is_rejected(self):
         provider = FakeProvider(output(target_level=1.33))
 
@@ -211,6 +229,7 @@ class RecommendationTests(TestCase):
                 200,
                 json={
                     "id": "msg_test",
+                    "stop_reason": "end_turn",
                     "content": [{"type": "text", "text": json.dumps(output())}],
                     "usage": {"input_tokens": 10, "output_tokens": 20},
                 },
