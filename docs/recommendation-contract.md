@@ -98,6 +98,26 @@ cap. This is direct factor accounting, not an estimated pair-correlation model.
 Until sizing exists, one setup equivalent is not a risk or cash amount and the
 guardrail cannot place, resize, or block an order.
 
+## Financing and commission sensitivity
+
+Every activated paper result receives a separate immutable cost assessment
+under `paper-cost-sensitivity-v1`. Gross pips remain unchanged. The assessment
+reports three net-pip and net-R views:
+
+- optimistic: observed bid/ask execution only;
+- base stress: 3% adverse annual financing and 0.5 round-turn commission pips;
+- conservative: 6% adverse annual financing, 1.0 round-turn commission pip,
+  and the maximum rollover count allowed by hourly timing ambiguity.
+
+Rollover windows use 5 p.m. `America/New_York` boundaries and the standard
+Wednesday three-day charge. The model stores both minimum and maximum possible
+financing days because intrabar entry and exit times are unknown. OANDA's
+published formula is applied in pips using entry price, but the rates and
+commission amounts above are stress assumptions—not observed account charges.
+Exact rates can vary daily by pair, side, holiday, and account terms. Cash cost,
+CAD conversion, and tax treatment remain blocked until position sizing and
+point-in-time account-specific data exist.
+
 ## Spend limits
 
 Defaults use Claude Sonnet 5 list rates and enforce:
@@ -118,6 +138,6 @@ python manage.py generate_recommendations
 python manage.py generate_recommendations USD_CAD
 ```
 
-The next contract may add financing and commission sensitivity and portfolio
-sizing. It must remain separate from thesis scoring and must not reconstruct
-historical recommendations.
+The next contract may add portfolio sizing and point-in-time account-specific
+cost capture. It must remain separate from thesis scoring and must not
+reconstruct historical recommendations.

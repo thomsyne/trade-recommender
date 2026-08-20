@@ -53,6 +53,13 @@ visible, and deterministic controls flag repeated factors, opposing views, and
 more than two same-direction setup equivalents. The Exposure page is advisory;
 it does not imply sizing, statistical correlation, or broker enforcement.
 
+The Cost Sensitivity slice is implemented: each activated result receives an
+immutable optimistic/base/conservative net-pip and net-R assessment. It bounds
+hourly timing ambiguity, applies New York rollover and standard Wednesday
+three-day semantics, and keeps observed gross execution separate from declared
+financing/commission stress assumptions. It does not claim exact broker charges,
+cash returns, or CAD accounting.
+
 ## Verification gate
 
 Run:
@@ -71,14 +78,14 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Add financing/commission sensitivity so paper results can graduate from gross
-spread-aware observations to conservative net estimates. Only then define a
-versioned position-sizing contract that converts advisory setup equivalents to
-actual risk budgets.
+Define a versioned position-sizing contract that converts advisory setup
+equivalents to actual risk budgets and enables cash/CAD reporting. Keep exact
+account-specific financing capture as a separate prospective enhancement once
+`OANDA_ACCOUNT_ID` and the retention contract are settled.
 
 ## Still OPEN
 
 - provider permission for restricted/full-text external-model processing;
 - paid economic-calendar/PIT provider trial;
 - remaining BLS/Census release-calendar automation;
-- financing history/cost sensitivity parameters.
+- exact point-in-time OANDA financing and commission history.

@@ -462,6 +462,7 @@ def paper_trades(request):
         ).select_related(
             "instrument",
             "paper_entry__candle",
+            "paper_result__cost_assessment",
             "paper_result__exit_candle",
             "paper_result__horizon_candle",
         )
@@ -470,6 +471,7 @@ def paper_trades(request):
     for recommendation in recommendations:
         entry = getattr(recommendation, "paper_entry", None)
         result = getattr(recommendation, "paper_result", None)
+        cost = getattr(result, "cost_assessment", None) if result else None
         if result:
             state = result.outcome
             state_label = result.get_outcome_display()
@@ -484,6 +486,7 @@ def paper_trades(request):
                 "recommendation": recommendation,
                 "entry": entry,
                 "result": result,
+                "cost": cost,
                 "state": state,
                 "state_label": state_label,
             }
@@ -492,6 +495,7 @@ def paper_trades(request):
     executed_results = [
         result for result in results if result.outcome != PaperTradeResult.Outcome.NOT_ACTIVATED
     ]
+    cost_assessments = [row["cost"] for row in rows if row["cost"]]
     gross_pips = sum(
         (result.gross_pips for result in executed_results if result.gross_pips is not None),
         start=0,
@@ -509,6 +513,13 @@ def paper_trades(request):
                 result.outcome == PaperTradeResult.Outcome.TARGET for result in results
             ),
             "gross_pips": gross_pips,
+            "costed_count": len(cost_assessments),
+            "base_net_pips": sum(
+                (assessment.base_net_pips for assessment in cost_assessments), start=0
+            ),
+            "conservative_net_pips": sum(
+                (assessment.conservative_net_pips for assessment in cost_assessments), start=0
+            ),
             "mature": len(executed_results) >= 30,
             "remaining": max(0, 30 - len(executed_results)),
         },

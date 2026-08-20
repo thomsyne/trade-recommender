@@ -556,3 +556,59 @@ class PaperTradeResult(ImmutableModel):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class PaperTradeCostAssessment(ImmutableModel):
+    result = models.OneToOneField(
+        PaperTradeResult,
+        on_delete=models.PROTECT,
+        related_name="cost_assessment",
+    )
+    policy_version = models.CharField(max_length=80)
+    minimum_financing_days = models.PositiveSmallIntegerField()
+    maximum_financing_days = models.PositiveSmallIntegerField()
+    optimistic_net_pips = models.DecimalField(max_digits=12, decimal_places=3)
+    base_net_pips = models.DecimalField(max_digits=12, decimal_places=3)
+    conservative_net_pips = models.DecimalField(max_digits=12, decimal_places=3)
+    optimistic_net_r = models.DecimalField(max_digits=12, decimal_places=4)
+    base_net_r = models.DecimalField(max_digits=12, decimal_places=4)
+    conservative_net_r = models.DecimalField(max_digits=12, decimal_places=4)
+    details = models.JSONField()
+    assessed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-assessed_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(minimum_financing_days__lte=models.F("maximum_financing_days")),
+                name="paper_cost_financing_day_range_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(optimistic_net_pips__gte=models.F("base_net_pips"))
+                & models.Q(base_net_pips__gte=models.F("conservative_net_pips")),
+                name="paper_cost_net_pip_scenarios_ordered",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(optimistic_net_r__gte=models.F("base_net_r"))
+                & models.Q(base_net_r__gte=models.F("conservative_net_r")),
+                name="paper_cost_net_r_scenarios_ordered",
+            ),
+        ]
+
+    def clean(self):
+        if (
+            self.result.outcome == PaperTradeResult.Outcome.NOT_ACTIVATED
+            or not self.result.entry_id
+        ):
+            raise ValidationError("Only activated paper results can have cost assessments")
+        if self.minimum_financing_days > self.maximum_financing_days:
+            raise ValidationError("Minimum financing days cannot exceed maximum financing days")
+        if not (
+            self.optimistic_net_pips >= self.base_net_pips >= self.conservative_net_pips
+            and self.optimistic_net_r >= self.base_net_r >= self.conservative_net_r
+        ):
+            raise ValidationError("Paper cost scenarios must be ordered optimistic to conservative")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)

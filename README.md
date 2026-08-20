@@ -27,6 +27,8 @@ separate point-in-time evidence ledger.
   directional hit rates, and guarded calibration reporting;
 - hourly bid/ask paper setup tracking with immutable entries, adverse ambiguity
   handling, spread-aware exits, expiry, gross pips, and R-multiples;
+- immutable optimistic/base/conservative financing and commission sensitivity
+  with bounded New York rollover counts and separate net-pip/net-R views;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
 - bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
   response-size protections;
@@ -35,8 +37,8 @@ separate point-in-time evidence ledger.
 - Today, Decision, Timeline, market workspace, Research, and Operations interfaces;
 - deterministic fixture data so every screen works before credentials exist.
 
-Article/full-text research, financed/net paper returns, paid providers, and AWS
-deployment are deliberately not implemented yet.
+Article/full-text research, exact account-specific cash/CAD returns, paid
+providers, and AWS deployment are deliberately not implemented yet.
 See the [project map](docs/project-map.md) for those boundaries.
 
 ## Fresh orb setup

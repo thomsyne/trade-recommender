@@ -522,6 +522,15 @@ p {
   color: var(--muted);
   font-size: 10px;
 }
+.paper-cost-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.paper-cost-summary div:nth-child(-n + 3) {
+  border-bottom: 1px solid var(--line);
+}
+.paper-cost-summary div:nth-child(3n) {
+  border-right: 0;
+}
 .calibration-status {
   background: var(--amber-bg);
   border: 1px solid #dcc994;
@@ -611,6 +620,17 @@ p {
   color: var(--muted);
   font-size: 11px;
   margin-bottom: 0;
+}
+.cost-policy-panel {
+  border-top: 4px solid var(--green);
+}
+.cost-policy-note {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+  margin: 20px 0 0;
+  padding-top: 16px;
 }
 .exposure-summary {
   margin-top: 18px;
@@ -1566,6 +1586,21 @@ td small {
   .calibration-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .paper-cost-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .paper-cost-summary div {
+    border-bottom: 1px solid var(--line);
+  }
+  .paper-cost-summary div:nth-child(3n) {
+    border-right: 1px solid var(--line);
+  }
+  .paper-cost-summary div:nth-child(2n) {
+    border-right: 0;
+  }
+  .paper-cost-summary div:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
   .paper-trade-strip,
   .method-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -1640,6 +1675,17 @@ td small {
   .outcome-contract,
   .calibration-summary {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .paper-cost-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .paper-cost-summary div,
+  .paper-cost-summary div:nth-child(3n) {
+    border-bottom: 1px solid var(--line);
+    border-right: 0;
+  }
+  .paper-cost-summary div:last-child {
+    border-bottom: 0;
   }
   .outcome-contract div,
   .calibration-summary div {

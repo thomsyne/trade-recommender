@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from django.db import transaction
 from django.utils import timezone
 
+from forecasts.costs import assess_due_paper_costs, create_cost_assessment
 from forecasts.models import PaperTradeEntry, PaperTradeResult, Recommendation
 from market.models import AuditEvent, Candle, IngestionRun
 
@@ -16,6 +17,7 @@ NEW_YORK = ZoneInfo("America/New_York")
 
 
 def resolve_due_paper_trades(instrument=None):
+    assess_due_paper_costs()
     recommendations = Recommendation.objects.filter(
         contract_version__gte=2,
         action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
@@ -251,6 +253,7 @@ def _create_result(
         },
     )
     _audit_result(result)
+    create_cost_assessment(result)
     return result
 
 

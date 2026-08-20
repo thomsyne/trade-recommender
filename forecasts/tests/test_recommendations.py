@@ -9,7 +9,13 @@ from django.db import DatabaseError, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
-from forecasts.models import Forecast, PaperTradeEntry, PaperTradeResult, Recommendation
+from forecasts.models import (
+    Forecast,
+    PaperTradeCostAssessment,
+    PaperTradeEntry,
+    PaperTradeResult,
+    Recommendation,
+)
 from forecasts.paper import resolve_paper_trade
 from forecasts.recommendations import (
     AnthropicProvider,
@@ -377,6 +383,11 @@ class RecommendationTests(TestCase):
         self.assertEqual(result.exit_price, Decimal("1.360000"))
         self.assertEqual(result.gross_pips, Decimal("100.000"))
         self.assertEqual(result.r_multiple, Decimal("1.0000"))
+        self.assertEqual(result.cost_assessment.optimistic_net_pips, Decimal("100.000"))
+        self.assertEqual(result.cost_assessment.base_net_pips, Decimal("99.500"))
+        self.assertEqual(result.cost_assessment.conservative_net_pips, Decimal("99.000"))
+        self.assertFalse(result.cost_assessment.details["historical_financing_rates_available"])
+        self.assertEqual(result.cost_assessment.policy_version, "paper-cost-sensitivity-v1")
 
     def test_paper_trade_applies_adverse_stop_precedence_on_ambiguous_entry_candle(self):
         recommendation = generate_recommendation(
@@ -492,6 +503,7 @@ class RecommendationTests(TestCase):
         self.assertIsNone(result.entry)
         self.assertEqual(result.horizon_candle.timestamp, horizon)
         self.assertTrue(result.details["hourly_coverage_verified"])
+        self.assertFalse(PaperTradeCostAssessment.objects.filter(result=result).exists())
 
     @override_settings(RECOMMENDATION_MAX_RUN_COST_USD=Decimal("0.001"))
     def test_spend_cap_fails_before_provider_call(self):
@@ -593,6 +605,10 @@ class RecommendationDatabaseTests(TransactionTestCase):
             PaperTradeEntry.objects.filter(pk=paper_result.entry_id).update(fill_price=0)
         with self.assertRaises(DatabaseError), transaction.atomic():
             PaperTradeResult.objects.filter(pk=paper_result.pk).update(gross_pips=0)
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            PaperTradeCostAssessment.objects.filter(pk=paper_result.cost_assessment.pk).update(
+                base_net_pips=0
+            )
 
         paper_result.refresh_from_db()
         self.assertEqual(paper_result.gross_pips, Decimal("-100.000"))

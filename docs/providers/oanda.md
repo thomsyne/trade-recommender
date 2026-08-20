@@ -12,8 +12,23 @@
 - pagination windows contain at most 4,999 intervals and later pages use
   `includeFirst=false` to prevent boundary duplication.
 
-The current canonical granularities are `D` and `H4`. Broker daily and H4
-series remain separate; one is never reconstructed from the other.
+The current canonical granularities are `D`, `H4`, and `H1`. Broker daily,
+four-hour, and hourly series remain separate; one is never reconstructed from
+another. Hourly bid/ask candles support prospective paper execution only.
+
+## Cost boundary
+
+OANDA documents annual long/short financing rates, account-specific commission
+fields, financing weekdays, and `daysCharged` through the account instrument
+endpoint. Those values can vary by instrument, side, date, holiday, division,
+and account terms. The application does not yet capture point-in-time account
+instrument snapshots because `OANDA_ACCOUNT_ID` is not configured.
+
+Paper cost reporting therefore remains sensitivity-only under
+`paper-cost-sensitivity-v1`: it uses OANDA's published position-value formula
+and standard 5 p.m. New York/Wednesday rollover semantics, but labels its 0%,
+3%, and 6% adverse annual rates plus 0.0, 0.5, and 1.0 pip commissions as stress
+assumptions rather than observed charges.
 
 ## Credentials
 
