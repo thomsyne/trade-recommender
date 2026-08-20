@@ -5,4 +5,10 @@ services:
     health: /health/
     portal:
       title: FX Forecast Lab
-      description: Private first-slice dashboard using clearly labelled fixture data.
+      description: Private FX research dashboard with governed model recommendations.
+  scheduler:
+    command: >-
+      .venv/bin/python manage.py run_scheduler
+  worker:
+    command: >-
+      .venv/bin/python manage.py run_worker
