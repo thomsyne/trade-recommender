@@ -77,6 +77,39 @@ class MacroParserTests(SimpleTestCase):
 
 
 class CalendarParserTests(SimpleTestCase):
+    def test_bank_of_canada_keeps_documented_eastern_release_time(self):
+        body = b"""<rss xmlns:ev="https://example.test/events"><channel><item>
+<title>Interest Rate Announcement</title><link>https://www.bankofcanada.ca/2026/09/fad-press-release/</link>
+<description>Interest rate announcement at 9:45 (ET)</description>
+<ev:occurrenceDate>2026-09-02</ev:occurrenceDate>
+</item><item><title>Market Participants Survey</title><ev:occurrenceDate>2026-09-03</ev:occurrenceDate></item>
+</channel></rss>"""
+        events = parse_official_calendar("boc", body)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_at, datetime(2026, 9, 2, 13, 45, tzinfo=UTC))
+        self.assertEqual(events[0].time_precision, "exact")
+
+    def test_federal_reserve_uses_final_meeting_day_without_inventing_time(self):
+        body = b"""<a>2026 FOMC Meetings</a>
+<div class="fomc-meeting__month"><strong>September</strong></div>
+<div class="fomc-meeting__date">15-16*</div>
+<a>2025 FOMC Meetings</a>
+<div class="fomc-meeting__month"><strong>August</strong></div>
+<div class="fomc-meeting__date">22 (notation vote)</div>"""
+        events = parse_official_calendar("fed", body)
+        self.assertEqual(events[0].event_at, datetime(2026, 9, 16, tzinfo=UTC))
+        self.assertEqual(events[0].time_precision, "date")
+
+    def test_bank_of_england_and_ecb_dates_remain_date_only(self):
+        boe = b"""<h2>2026 confirmed dates</h2><p>Thursday 17 September</p>"""
+        ecb = b"""<dl><dt>10/09/2026</dt><dd>Monetary policy meeting, day 2</dd></dl>"""
+        boe_event = parse_official_calendar("boe", boe)[0]
+        ecb_event = parse_official_calendar("ecb", ecb)[0]
+        self.assertEqual(boe_event.event_at, datetime(2026, 9, 17, tzinfo=UTC))
+        self.assertEqual(ecb_event.event_at, datetime(2026, 9, 10, tzinfo=UTC))
+        self.assertEqual(boe_event.time_precision, "date")
+        self.assertEqual(ecb_event.time_precision, "date")
+
     def test_eurostat_date_only_event_does_not_invent_release_time(self):
         body = b"""BEGIN:VCALENDAR\r
 BEGIN:VEVENT\r

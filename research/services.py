@@ -5,13 +5,14 @@ from urllib.parse import urlencode
 
 from django.db import transaction
 
-from market.models import AuditEvent
+from market.models import AuditEvent, Candle, Instrument, TechnicalSnapshot
 from research.fetch import fetch
 from research.models import (
     DocumentRepresentation,
     EconomicEvent,
     MacroObservation,
     MacroSeries,
+    PairEvidenceSnapshot,
     RawRetrieval,
     ResearchDiscrepancy,
     ResearchDocument,
@@ -329,6 +330,221 @@ def ingest_official_calendar(policy, parser, url, *, transport=None, resolver=No
             {"events": len(values), "created": created, "parser": parser},
         )
     return retrieval
+
+
+@transaction.atomic
+def capture_pair_evidence(instrument, *, now=None):
+    captured_at = now or datetime.now(UTC)
+    jurisdictions = {
+        "USD": "US",
+        "CAD": "CA",
+        "GBP": "GB",
+        "EUR": "EU",
+    }
+    pair_jurisdictions = {
+        jurisdictions[instrument.base_currency],
+        jurisdictions[instrument.quote_currency],
+    }
+    anchor = (
+        Candle.objects.filter(
+            instrument=instrument,
+            granularity="H4",
+            timestamp__lt=captured_at,
+            ingestion_run__finished_at__lte=captured_at,
+        )
+        .select_related("ingestion_run__source")
+        .order_by("-timestamp")
+        .first()
+    )
+    if not anchor:
+        raise ValueError(f"No H4 market evidence exists for {instrument.code}")
+
+    technicals = []
+    for granularity in ("H4", "D"):
+        snapshot = (
+            TechnicalSnapshot.objects.filter(
+                instrument=instrument,
+                granularity=granularity,
+                as_of__lt=captured_at,
+                calculated_at__lte=captured_at,
+            )
+            .order_by("-as_of")
+            .first()
+        )
+        if snapshot:
+            technicals.append(
+                {
+                    "id": snapshot.pk,
+                    "granularity": granularity,
+                    "as_of": snapshot.as_of.isoformat(),
+                    "atr_14": _decimal_text(snapshot.atr_14),
+                    "ewma_20": _decimal_text(snapshot.ewma_20),
+                    "support": _decimal_text(snapshot.support),
+                    "resistance": _decimal_text(snapshot.resistance),
+                }
+            )
+
+    context_indicators = {
+        MacroSeries.Indicator.EQUITY,
+        MacroSeries.Indicator.VOLATILITY,
+        MacroSeries.Indicator.CRYPTO,
+        MacroSeries.Indicator.COMMODITY,
+        MacroSeries.Indicator.YIELD,
+        MacroSeries.Indicator.DOLLAR,
+    }
+    macro_values = []
+    series_rows = MacroSeries.objects.filter(enabled=True).select_related("source_policy__source")
+    for series in series_rows:
+        if (
+            series.source_policy.jurisdiction not in pair_jurisdictions
+            and series.indicator not in context_indicators
+        ):
+            continue
+        observation = series.observations.filter(
+            available_at__lte=captured_at,
+            vintage_at__lte=captured_at,
+            retrieval__fetched_at__lte=captured_at,
+        ).first()
+        if not observation:
+            continue
+        macro_values.append(
+            {
+                "series": series.code,
+                "label": series.label,
+                "indicator": series.indicator,
+                "jurisdiction": series.source_policy.jurisdiction,
+                "value": observation.normalized_value,
+                "unit": series.unit,
+                "period": observation.observation_period.isoformat(),
+                "available_at": observation.available_at.isoformat(),
+                "vintage_at": observation.vintage_at.isoformat(),
+                "observation_id": observation.pk,
+                "retrieval_id": observation.retrieval_id,
+                "source": series.source_policy.source.name,
+            }
+        )
+
+    event_rows = list(
+        EconomicEvent.objects.filter(
+            country__in=pair_jurisdictions,
+            first_observed_at__lte=captured_at,
+            event_at__gte=captured_at - timedelta(days=1),
+            event_at__lte=captured_at + timedelta(days=45),
+        )
+        .select_related("retrieval__source_policy__source")
+        .order_by("provider_event_key", "-first_observed_at")
+    )
+    latest_events = {}
+    for event in event_rows:
+        latest_events.setdefault(event.provider_event_key, event)
+    events = [
+        {
+            "id": event.pk,
+            "country": event.country,
+            "title": event.event_type,
+            "event_at": event.event_at.isoformat(),
+            "time_precision": event.time_precision,
+            "period": event.period,
+            "first_observed_at": event.first_observed_at.isoformat(),
+            "retrieval_id": event.retrieval_id,
+            "source": event.retrieval.source_policy.source.name,
+            "source_url": event.source_url,
+            "consensus": None,
+        }
+        for event in sorted(latest_events.values(), key=lambda value: value.event_at)
+    ]
+
+    cutoff_start = captured_at - timedelta(hours=72)
+    representations = (
+        DocumentRepresentation.objects.filter(
+            retrieval__source_policy__jurisdiction__in=pair_jurisdictions | {"ZZ"},
+            retrieval__fetched_at__lte=captured_at,
+            document__first_observed_at__lte=captured_at,
+            document__published_at__gte=cutoff_start,
+            document__published_at__lte=captured_at,
+        )
+        .select_related("document", "retrieval__source_policy__source")
+        .order_by("-document__published_at", "-document__first_observed_at")
+    )
+    news = []
+    seen_documents = set()
+    for representation in representations:
+        if representation.document_id in seen_documents:
+            continue
+        seen_documents.add(representation.document_id)
+        source = representation.retrieval.source_policy.source
+        news.append(
+            {
+                "document_id": representation.document_id,
+                "title": representation.document.title,
+                "url": representation.document.canonical_url,
+                "published_at": _iso(representation.document.published_at),
+                "first_observed_at": representation.document.first_observed_at.isoformat(),
+                "summary": representation.summary,
+                "source": source.name,
+                "source_tier": source.tier,
+                "model_eligible": source.llm_processing_allowed,
+            }
+        )
+        if len(news) == 20:
+            break
+
+    payload = {
+        "schema": "pair-evidence-v1",
+        "instrument": instrument.code,
+        "currencies": [instrument.base_currency, instrument.quote_currency],
+        "jurisdictions": sorted(pair_jurisdictions),
+        "market": {
+            "anchor_candle_id": anchor.pk,
+            "as_of": anchor.timestamp.isoformat(),
+            "midpoint_close": _decimal_text(anchor.midpoint_close),
+            "source": anchor.ingestion_run.source.name,
+            "manifest": anchor.ingestion_run.request_manifest_hash,
+        },
+        "technicals": technicals,
+        "macro_and_intermarket": sorted(macro_values, key=lambda value: value["series"]),
+        "upcoming_events": events,
+        "recent_news": news,
+        "boundaries": {
+            "read_only": True,
+            "forecast_write_authorized": False,
+            "consensus_inferred": False,
+            "news_window_hours": 72,
+        },
+    }
+    digest = _digest(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    existing = PairEvidenceSnapshot.objects.filter(sha256=digest).first()
+    if existing:
+        return existing
+    snapshot = PairEvidenceSnapshot.objects.create(
+        instrument=instrument,
+        information_cutoff=captured_at,
+        payload=payload,
+        sha256=digest,
+        captured_at=captured_at,
+    )
+    AuditEvent.objects.create(
+        event_type="research.pair_evidence_captured",
+        actor="research.services.capture_pair_evidence",
+        subject_type="PairEvidenceSnapshot",
+        subject_id=str(snapshot.pk),
+        payload={
+            "instrument": instrument.code,
+            "sha256": snapshot.sha256,
+            "macro_values": len(macro_values),
+            "events": len(events),
+            "news": len(news),
+        },
+    )
+    return snapshot
+
+
+def capture_all_pair_evidence(*, now=None):
+    captured_at = now or datetime.now(UTC)
+    return [
+        capture_pair_evidence(instrument, now=captured_at)
+        for instrument in Instrument.objects.filter(active=True)
+    ]
 
 
 def _store_raw(policy, result, *, quality=RawRetrieval.Quality.ACCEPTED, quality_reason=""):

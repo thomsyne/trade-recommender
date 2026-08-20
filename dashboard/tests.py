@@ -107,7 +107,7 @@ class DashboardTests(TestCase):
         content = response.content.decode()
         self.assertContains(response, "Evidence only")
         self.assertContains(response, "Four-economy coverage")
-        self.assertContains(response, "0/4 COLLECTED")
+        self.assertContains(response, "0/8 COLLECTED")
         self.assertContains(response, "No consensus is inferred")
         self.assertContains(response, "Official statistical agencies")
         self.assertContains(response, "Trading Economics")

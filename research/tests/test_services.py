@@ -1,23 +1,29 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import httpx
 from django.core.exceptions import ValidationError
-from django.test import TestCase
+from django.core.management import call_command
+from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from forecasts.models import Forecast
+from market.models import Candle, Instrument, TechnicalSnapshot
 from research.models import (
     DocumentRepresentation,
     EconomicEvent,
     MacroObservation,
     MacroSeries,
+    PairEvidenceSnapshot,
     RawRetrieval,
     ResearchDiscrepancy,
     ResearchDocument,
+    SourcePolicy,
 )
 from research.parsers import ParseRejected, parse_feed
 from research.services import (
+    capture_pair_evidence,
     ingest_eodhd_calendar,
     ingest_feed,
     ingest_macro,
@@ -273,3 +279,112 @@ END:VCALENDAR\r
 
         self.assertEqual(EconomicEvent.objects.count(), 1)
         self.assertEqual(RawRetrieval.objects.count(), 2)
+
+
+@override_settings(DEBUG=True, OANDA_TOKEN="")
+class PairEvidenceTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_demo", verbosity=0)
+
+    def retrieval(self, policy, fetched_at, marker):
+        return RawRetrieval.objects.create(
+            source_policy=policy,
+            url=f"https://{policy.allowed_hosts[0]}/evidence/{marker}",
+            request_fingerprint=marker * 64,
+            fetched_at=fetched_at,
+            http_status=200,
+            content_type=policy.allowed_content_types[0],
+            byte_count=4,
+            body_sha256=marker * 64,
+            body=b"test",
+            retention_decision="test",
+        )
+
+    def observation(self, series, value, period, known_at, marker):
+        return MacroObservation.objects.create(
+            series=series,
+            retrieval=self.retrieval(series.source_policy, known_at, marker),
+            observation_period=period,
+            value=Decimal(value),
+            normalized_value=value,
+            available_at=known_at,
+            vintage_at=known_at,
+        )
+
+    def test_capture_is_point_in_time_pair_scoped_deduplicated_and_read_only(self):
+        instrument = Instrument.objects.get(code="USD_CAD")
+        candle = (
+            Candle.objects.filter(instrument=instrument, granularity="H4")
+            .select_related("ingestion_run")
+            .last()
+        )
+        technical = TechnicalSnapshot.objects.get(instrument=instrument, granularity="H4")
+        cutoff = max(
+            timezone.now(), candle.ingestion_run.finished_at, technical.calculated_at
+        ) + timedelta(seconds=2)
+        canada = MacroSeries.objects.get(code="CA_CPI_YOY")
+        euro = MacroSeries.objects.get(code="EU_HICP_YOY")
+        sp500 = MacroSeries.objects.get(code="GLOBAL_SP500")
+        known_at = cutoff - timedelta(hours=1)
+        self.observation(canada, "2.1", datetime(2026, 7, 1).date(), known_at, "a")
+        self.observation(euro, "1.8", datetime(2026, 7, 1).date(), known_at, "b")
+        self.observation(sp500, "6500", datetime(2026, 8, 18).date(), known_at, "c")
+        self.observation(
+            canada,
+            "9.9",
+            datetime(2026, 8, 1).date(),
+            cutoff + timedelta(days=1),
+            "d",
+        )
+        news_policy = SourcePolicy.objects.get(slug="bbc-business")
+        news_retrieval = self.retrieval(news_policy, known_at, "f")
+        for title, published_at, marker in (
+            ("Known headline", cutoff - timedelta(minutes=30), "g"),
+            ("Future-dated headline", cutoff + timedelta(minutes=30), "h"),
+        ):
+            document = ResearchDocument.objects.create(
+                canonical_url=f"https://example.com/{marker}",
+                canonical_hash=marker * 64,
+                title=title,
+                published_at=published_at,
+                first_observed_at=known_at,
+                quality=ResearchDocument.Quality.VERIFIED,
+            )
+            DocumentRepresentation.objects.create(
+                document=document,
+                retrieval=news_retrieval,
+                source_item_id=marker,
+                dedup_key=marker * 64,
+                source_title=title,
+                source_published_at=published_at,
+            )
+        forecast_count = Forecast.objects.count()
+
+        first = capture_pair_evidence(instrument, now=cutoff)
+        repeated = capture_pair_evidence(instrument, now=cutoff + timedelta(minutes=1))
+
+        values = {item["series"]: item["value"] for item in first.payload["macro_and_intermarket"]}
+        self.assertEqual(values["CA_CPI_YOY"], "2.1")
+        self.assertEqual(values["GLOBAL_SP500"], "6500")
+        self.assertNotIn("EU_HICP_YOY", values)
+        self.assertEqual(
+            [item["title"] for item in first.payload["recent_news"]], ["Known headline"]
+        )
+        self.assertEqual(first, repeated)
+        self.assertTrue(first.payload["boundaries"]["read_only"])
+        self.assertFalse(first.payload["boundaries"]["forecast_write_authorized"])
+        self.assertEqual(Forecast.objects.count(), forecast_count)
+
+        changed_at = cutoff + timedelta(hours=2)
+        self.observation(
+            sp500,
+            "6510",
+            datetime(2026, 8, 19).date(),
+            changed_at - timedelta(minutes=1),
+            "e",
+        )
+        changed = capture_pair_evidence(instrument, now=changed_at)
+        self.assertNotEqual(changed.sha256, first.sha256)
+        self.assertEqual(PairEvidenceSnapshot.objects.count(), 2)
+        self.assertEqual(Forecast.objects.count(), forecast_count)

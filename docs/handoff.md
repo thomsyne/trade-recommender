@@ -21,6 +21,13 @@ publication/retrieval/vintage timestamps, deduplication, revisions/conflicts,
 rights metadata, scheduled jobs, provider-comparison records, and a read-only
 Research ledger. See `docs/research-ingestion.md`.
 
+The Decision Evidence extension is implemented: five broader business/market
+RSS feeds, S&P 500/VIX/Bitcoin/WTI/US 10-year/broad-USD context, a slower
+explicitly labelled World Bank-derived gold series, official BoC/Fed/BoE/ECB
+decision calendars, and four-hour immutable pair evidence snapshots. Pair
+pages show evidence freshness, source count, pair macro, intermarket, calendar,
+and news without creating or changing forecasts.
+
 ## Verification gate
 
 Run:
@@ -39,16 +46,16 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Before synthesis, finish source qualification: verify current official CPI and
-employment identifiers/revision semantics, run a bounded economic-calendar
-candidate trial, and complete terms review for any evidence sent to an external
-model. Preserve the strict research→forecast boundary; any later thesis model
-must consume locked evidence snapshots and write a new prospective contract,
-not alter this ledger.
+Build the first model-forecast contract against `PairEvidenceSnapshot`: pin the
+Anthropic model and prompt, define strict output validation and spend caps, and
+write a new prospective recommendation record without altering evidence or the
+existing mechanical controls. Complete the source-by-source external-model
+terms review before including anything beyond fields already marked model
+eligible.
 
 ## Still OPEN
 
 - provider permission for external-model processing;
 - paid economic-calendar/PIT provider trial;
-- official CPI and employment release-time/revision contracts;
+- remaining BLS/Census release-calendar automation;
 - financing history/cost sensitivity parameters.

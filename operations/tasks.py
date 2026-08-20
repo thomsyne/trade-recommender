@@ -8,6 +8,7 @@ from market.oanda import OandaClient
 from market.services import store_ingestion
 from research.models import MacroSeries, SourcePolicy
 from research.services import (
+    capture_all_pair_evidence,
     ingest_eodhd_calendar,
     ingest_feed,
     ingest_macro,
@@ -34,6 +35,8 @@ def execute_task(task_name, parameters):
             slug=parameters["source"], state=SourcePolicy.State.ENABLED
         )
         return ingest_official_calendar(policy, parameters["parser"], parameters["url"])
+    if task_name == "research.capture_pair_evidence":
+        return capture_all_pair_evidence()
     raise ValueError(f"Unknown task: {task_name}")
 
 

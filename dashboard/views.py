@@ -20,6 +20,7 @@ from operations.models import JobOccurrence, ScheduledJob
 from research.models import (
     EconomicEvent,
     MacroSeries,
+    PairEvidenceSnapshot,
     ProviderEvaluation,
     RawRetrieval,
     ResearchDiscrepancy,
@@ -113,6 +114,29 @@ def market_detail(request, code):
         }
         for candle in candles
     ]
+    evidence = PairEvidenceSnapshot.objects.filter(instrument=instrument).first()
+    intermarket = []
+    pair_macro = []
+    evidence_source_count = 0
+    evidence_fresh = False
+    if evidence:
+        context_indicators = {
+            MacroSeries.Indicator.EQUITY,
+            MacroSeries.Indicator.VOLATILITY,
+            MacroSeries.Indicator.CRYPTO,
+            MacroSeries.Indicator.COMMODITY,
+            MacroSeries.Indicator.YIELD,
+            MacroSeries.Indicator.DOLLAR,
+        }
+        for item in evidence.payload.get("macro_and_intermarket", []):
+            (intermarket if item["indicator"] in context_indicators else pair_macro).append(item)
+        source_names = {
+            item["source"] for item in evidence.payload.get("macro_and_intermarket", [])
+        }
+        source_names.update(item["source"] for item in evidence.payload.get("recent_news", []))
+        source_names.update(item["source"] for item in evidence.payload.get("upcoming_events", []))
+        evidence_source_count = len(source_names)
+        evidence_fresh = timezone.now() - evidence.captured_at <= timedelta(hours=8)
     return render(
         request,
         "dashboard/market_detail.html",
@@ -124,6 +148,11 @@ def market_detail(request, code):
             "granularity": granularity,
             "forecast": tactical_forecast,
             "forecasts": forecasts,
+            "evidence": evidence,
+            "evidence_fresh": evidence_fresh,
+            "evidence_source_count": evidence_source_count,
+            "intermarket": intermarket,
+            "pair_macro": pair_macro,
             "fixture_mode": bool(candles)
             and candles[-1].ingestion_run.source.name == "Development fixtures",
         },
@@ -195,7 +224,7 @@ def research(request):
             "statistics-canada",
             "schedule-key_indicators-eng.json",
             "CPI · labour · GDP · building permits",
-            "Housing starts and policy decisions are not yet scheduled here.",
+            "Housing starts remain outside this statistical release schedule.",
         ),
         (
             "US",
@@ -203,7 +232,7 @@ def research(request):
             "us-bea",
             "release_dates.json",
             "GDP · personal income/PCE",
-            "BLS inflation/labour, Census housing, and Fed decisions remain explicit gaps.",
+            "BLS inflation/labour and Census housing remain explicit gaps.",
         ),
         (
             "GB",
@@ -211,7 +240,7 @@ def research(request):
             "uk-ons",
             "releasecalendar",
             "CPI · labour · GDP · house prices",
-            "Bank of England decisions are not yet scheduled here.",
+            "This is the statistical schedule; policy decisions are collected separately.",
         ),
         (
             "EU",
@@ -219,7 +248,39 @@ def research(request):
             "eurostat",
             "eventsIcal",
             "HICP · unemployment · GDP · house prices",
-            "Eurostat supplies dates, not exact release times; ECB decisions remain a gap.",
+            "Eurostat supplies dates, not exact release times.",
+        ),
+        (
+            "CA",
+            "Bank of Canada",
+            "bank-of-canada",
+            "upcoming-events",
+            "Policy-rate decisions",
+            "Exact Eastern release time is retained when the Bank supplies it.",
+        ),
+        (
+            "US",
+            "Federal Reserve",
+            "federal-reserve",
+            "fomccalendars",
+            "FOMC policy decisions",
+            "Meeting dates are retained as date-only; no release time is invented.",
+        ),
+        (
+            "GB",
+            "Bank of England",
+            "bank-of-england",
+            "upcoming-mpc-dates",
+            "MPC policy decisions",
+            "Decision dates are retained as date-only; no release time is invented.",
+        ),
+        (
+            "EU",
+            "European Central Bank",
+            "european-central-bank",
+            "mgcgc",
+            "Governing Council policy decisions",
+            "Decision dates are retained as date-only; no release time is invented.",
         ),
     )
     calendar_sources = []
@@ -279,6 +340,7 @@ def research(request):
             "calendar_sources": calendar_sources,
             "calendar_connected": calendar_connected,
             "calendar_coverage_count": calendar_coverage_count,
+            "calendar_source_count": len(calendar_sources),
         },
     )
 

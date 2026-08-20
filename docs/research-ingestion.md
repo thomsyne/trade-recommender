@@ -30,6 +30,26 @@ Exact provider release timestamps are retained when supplied. Otherwise
 footnotes are retained, and changed values append a vintage so revisions are
 learned prospectively rather than reconstructed with hindsight.
 
+## Intermarket context
+
+Seven read-only context series are collected daily unless their source updates
+more slowly:
+
+| Signal | Series | Cadence / source |
+|---|---|---|
+| S&P 500 | FRED `SP500` | Business daily |
+| VIX | FRED `VIXCLS` | Business daily |
+| Bitcoin/USD | FRED `CBBTCUSD` | Daily |
+| WTI crude | FRED `DCOILWTICO` | Business daily |
+| US 10-year yield | FRED `DGS10` | Business daily |
+| Broad USD index | FRED `DTWEXBGS` | Business daily |
+| Gold/USD | World Bank-derived DataHub series | Monthly |
+
+Gold is deliberately slower. FRED and EODHD no longer distribute the LBMA
+precious-metal series because of licensing changes; the system therefore labels
+the public World Bank-derived monthly observation honestly instead of presenting
+a stale discontinued series as current.
+
 ## Official release calendar
 
 Upcoming releases are collected daily without a paid calendar subscription:
@@ -40,12 +60,15 @@ Upcoming releases are collected daily without a paid calendar subscription:
 | United States | BEA machine-readable release dates | GDP and personal income/PCE | Exact UTC timestamp supplied by BEA |
 | United Kingdom | ONS upcoming-release RSS | CPI, labour market, GDP, house prices | Exact UTC timestamp supplied by ONS |
 | Euro area | Eurostat euro-indicator iCalendar | HICP, unemployment, GDP, house prices | Date only; no time is inferred |
+| Canada | Bank of Canada upcoming-events RSS | Policy-rate decisions | Exact Eastern time when supplied |
+| United States | Federal Reserve FOMC calendar | Policy-rate decisions | Date only; no time is inferred |
+| United Kingdom | Bank of England MPC calendar | Policy-rate decisions | Date only; no time is inferred |
+| Euro area | ECB Governing Council calendar | Policy-rate decisions | Date only; no time is inferred |
 
 This is deliberately honest partial coverage. BLS blocks automated calendar
-retrieval from this environment, and Census housing plus Fed, Bank of Canada,
-Bank of England, and ECB decisions are not silently replaced by unofficial
-sources. The dashboard names those gaps. EODHD remains disabled because its
-free key excludes economic events; it is not needed for the official schedule.
+retrieval from this environment and Census housing remains a named gap. EODHD
+remains disabled because its current subscription does not include economic
+events; it is not needed for official release or policy-decision dates.
 
 Each normalized event links to its related macro series where an exact mapping
 exists. Consensus is always null because official schedules do not provide it.
@@ -78,23 +101,33 @@ never rendered.
 - `MacroObservation` preserves every distinct value as a vintage. A changed
   value appends a revision rather than overwriting history.
 - `ResearchDiscrepancy` records syndication, conflicts, and revisions.
+- `PairEvidenceSnapshot` binds one pair to exact market/technical record IDs,
+  point-in-time macro vintages, calendar vintages, recent verified RSS items,
+  and intermarket observations under one canonical SHA-256.
 
-Raw retrievals, representations, macro observations, economic events, and discrepancies reject
-update/delete in both Django and PostgreSQL. Invalid but successfully retrieved
-payloads are retained as quarantined raw evidence and do not normalize.
+Raw retrievals, representations, macro observations, economic events, pair
+evidence snapshots, and discrepancies reject update/delete in both Django and
+PostgreSQL. Identical pair payloads deduplicate; changed evidence appends a new
+snapshot. Future retrieval vintages are excluded even when they describe an
+older observation period. Invalid but successfully retrieved payloads are
+retained as quarantined raw evidence and do not normalize.
 
 ## Rights and model use
 
-Only bounded official API/RSS payloads are currently retained, for private
-research. Article full text is not collected, raw bodies are not exported, and
-all sources remain `llm_processing_allowed=False`. Each source records its
-rights URL and retention/deletion/export policy. A full provider-terms review
-is still required before external-model processing or redistribution.
+Only bounded API/RSS payloads are retained for private research. The broader
+wire currently adds BBC Business, CBC Business, Guardian Business, New York
+Times Business, and CoinDesk RSS. Article full text is not collected or
+rendered, raw bodies are not exported, and model eligibility is explicit per
+source. These public-feed titles and supplied summaries are model-eligible;
+official macro raw bodies and restricted full text are not. Each source records
+its rights URL and retention/deletion/export policy. A fresh terms review is
+still required before restricted full-text processing or redistribution.
 
 ## Operations
 
-Seeding creates four six-hour feed schedules, twenty daily macro schedules,
-four daily official-calendar schedules, and a disabled optional EODHD schedule:
+Seeding creates nine six-hour feed schedules, twenty-seven daily macro
+schedules, eight daily official-calendar schedules, one four-hour immutable
+pair-evidence schedule, and a disabled optional EODHD schedule:
 
 ```bash
 .venv/bin/python manage.py seed_research

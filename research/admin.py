@@ -5,6 +5,7 @@ from research.models import (
     EconomicEvent,
     MacroObservation,
     MacroSeries,
+    PairEvidenceSnapshot,
     ProviderEvaluation,
     RawRetrieval,
     ResearchDiscrepancy,
@@ -21,3 +22,4 @@ admin.site.register(MacroObservation)
 admin.site.register(ResearchDiscrepancy)
 admin.site.register(ProviderEvaluation)
 admin.site.register(EconomicEvent)
+admin.site.register(PairEvidenceSnapshot)

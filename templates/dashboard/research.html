@@ -107,7 +107,7 @@
 </div>
 
 <section class="research-section provider-lab">
-  <div class="section-heading research-heading"><div><p class="eyebrow">ECONOMIC CALENDAR</p><h2>Official release schedule</h2></div><span class="calendar-health {% if calendar_connected %}connected{% endif %}">{% if calendar_connected %}4/4 FRESH{% else %}{{ calendar_coverage_count }}/4 COLLECTED{% endif %}</span></div>
+  <div class="section-heading research-heading"><div><p class="eyebrow">ECONOMIC CALENDAR</p><h2>Official release schedule</h2></div><span class="calendar-health {% if calendar_connected %}connected{% endif %}">{% if calendar_connected %}{{ calendar_source_count }}/{{ calendar_source_count }} FRESH{% else %}{{ calendar_coverage_count }}/{{ calendar_source_count }} COLLECTED{% endif %}</span></div>
   <div class="calendar-sources">
     {% for source in calendar_sources %}
     <article>

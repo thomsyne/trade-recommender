@@ -11,11 +11,11 @@ class ResearchSeedTests(TestCase):
         call_command("seed_research", verbosity=0)
         call_command("seed_research", verbosity=0)
 
-        self.assertEqual(SourcePolicy.objects.count(), 12)
-        self.assertEqual(MacroSeries.objects.count(), 20)
-        self.assertEqual(ScheduledJob.objects.filter(task_name__startswith="research.").count(), 29)
+        self.assertEqual(SourcePolicy.objects.count(), 18)
+        self.assertEqual(MacroSeries.objects.count(), 27)
+        self.assertEqual(ScheduledJob.objects.filter(task_name__startswith="research.").count(), 46)
         self.assertEqual(
-            MacroSeries.objects.exclude(indicator="policy_rate")
+            MacroSeries.objects.filter(indicator__in=("cpi", "unemployment", "gdp", "housing"))
             .values("source_policy__jurisdiction", "indicator")
             .distinct()
             .count(),
@@ -28,7 +28,25 @@ class ResearchSeedTests(TestCase):
             ScheduledJob.objects.filter(
                 task_name="research.ingest_official_calendar", enabled=True
             ).count(),
-            4,
+            8,
+        )
+        self.assertTrue(
+            ScheduledJob.objects.filter(
+                task_name="research.capture_pair_evidence", enabled=True
+            ).exists()
+        )
+        self.assertEqual(
+            MacroSeries.objects.filter(
+                indicator__in=(
+                    MacroSeries.Indicator.EQUITY,
+                    MacroSeries.Indicator.VOLATILITY,
+                    MacroSeries.Indicator.CRYPTO,
+                    MacroSeries.Indicator.COMMODITY,
+                    MacroSeries.Indicator.YIELD,
+                    MacroSeries.Indicator.DOLLAR,
+                )
+            ).count(),
+            7,
         )
         selected = ProviderEvaluation.objects.get(provider="Official statistical agencies")
         self.assertEqual(selected.status, ProviderEvaluation.Status.SELECTED)

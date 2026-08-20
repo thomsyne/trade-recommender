@@ -1,7 +1,7 @@
 from django.core.exceptions import ValidationError
 from django.db import models
 
-from market.models import SourceRegistry
+from market.models import Instrument, SourceRegistry
 
 
 class ImmutableRecord(models.Model):
@@ -114,6 +114,12 @@ class MacroSeries(models.Model):
         UNEMPLOYMENT = "unemployment", "Unemployment"
         GDP = "gdp", "GDP growth"
         HOUSING = "housing", "Housing"
+        EQUITY = "equity", "Equity market"
+        VOLATILITY = "volatility", "Market volatility"
+        CRYPTO = "crypto", "Cryptoasset"
+        COMMODITY = "commodity", "Commodity"
+        YIELD = "yield", "Government yield"
+        DOLLAR = "dollar", "US dollar index"
 
     class Parser(models.TextChoices):
         BOC_VALET = "boc_valet", "Bank of Canada Valet JSON"
@@ -126,6 +132,7 @@ class MacroSeries(models.Model):
         EUROSTAT_JSON = "eurostat_json", "Eurostat JSON-stat"
         LAND_REGISTRY_CSV = "land_registry_csv", "UK HPI linked-data CSV"
         STATCAN_ZIP = "statcan_zip", "Statistics Canada bounded table ZIP"
+        DATE_VALUE_CSV = "date_value_csv", "Date/value CSV"
 
     class RequestMethod(models.TextChoices):
         GET = "GET", "GET"
@@ -269,3 +276,17 @@ class EconomicEvent(ImmutableRecord):
                 name="unique_economic_event_vintage",
             )
         ]
+
+
+class PairEvidenceSnapshot(ImmutableRecord):
+    instrument = models.ForeignKey(
+        Instrument, on_delete=models.PROTECT, related_name="research_evidence_snapshots"
+    )
+    information_cutoff = models.DateTimeField()
+    payload = models.JSONField()
+    sha256 = models.CharField(max_length=64, unique=True)
+    captured_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ("-captured_at", "-id")
+        indexes = [models.Index(fields=("instrument", "-captured_at"))]

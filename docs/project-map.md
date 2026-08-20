@@ -1,6 +1,6 @@
 # FX Forecast Lab — Four-Quadrant Project Map
 
-**Status:** Planning complete; Foundation, Market Truth, and Forecast Contract implemented
+**Status:** Planning complete; Foundation, Market Truth, Forecast Contract, and read-only Research Evidence implemented
 **Prepared:** 2026-08-18  
 **Purpose:** Durable source of truth for the first implementation and future Amp threads
 
@@ -66,11 +66,11 @@ The system will:
 
 ### Current repository facts
 
-The repository contains no application stack yet. Its orb setup reports that
-no dependencies are declared (`.agents/setup`, lines 7–8), and resume reports
-that no services need repair (`.agents/resume`, line 7). The existing lifecycle
-files are executable and committed. This leaves the application architecture
-free of inherited framework constraints.
+The repository now contains the Django/PostgreSQL application, durable
+scheduler/worker, OANDA market ingestion, deterministic technicals, immutable
+forecast controls, official four-economy macro and release calendars, broader
+RSS collection, seven intermarket series, and scheduled pair-level evidence
+snapshots. Research remains unable to issue or mutate forecasts.
 
 ---
 
@@ -440,8 +440,10 @@ These slices are dependency-aware, but each ends in something reviewable.
    New York alignment, deterministic technicals, basic charts.
 3. **Forecast contract — complete:** target schemas, immutable event/evidence store,
    deterministic resolver, baseline forecasts, proper scoring fixtures.
-4. **Research ingestion:** official macro vintages/releases, approved RSS/web
-   fetch boundary, provenance/lineage, calendar-provider trial harness.
+4. **Research evidence core — complete:** official macro vintages/releases,
+   approved RSS fetch boundary, provenance/lineage, policy-decision calendars,
+   intermarket context, and immutable pair evidence. Paid consensus/PIT
+   enrichment remains an optional provider trial.
 5. **Model forecast:** pinned Anthropic synthesis, strict validation, budgets,
    abstention, evidence cards, immutable prompt/model records.
 6. **Paper experiment:** entries, costs, ambiguity bounds, CAD/currency exposure,

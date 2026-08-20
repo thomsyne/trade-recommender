@@ -22,6 +22,22 @@
     {% else %}<p>No technical snapshot is available.</p>{% endif %}
   </aside>
 </div>
+<section class="evidence-panel">
+  <div class="panel-head evidence-heading">
+    <div><p class="eyebrow">READ-ONLY DECISION EVIDENCE</p><h2>Point-in-time context</h2></div>
+    {% if evidence %}<span class="evidence-health {% if evidence_fresh %}fresh{% endif %}">{% if evidence_fresh %}FRESH{% else %}STALE{% endif %} · {{ evidence_source_count }} SOURCE{{ evidence_source_count|pluralize }}</span>{% else %}<span class="evidence-health">AWAITING FIRST CAPTURE</span>{% endif %}
+  </div>
+  {% if evidence %}
+  <div class="evidence-meta"><span>Captured {{ evidence.captured_at|date:"M j, Y H:i" }} UTC</span><span>Cutoff {{ evidence.information_cutoff|date:"M j, Y H:i" }} UTC</span><span>Snapshot <code>{{ evidence.sha256|slice:":12" }}</code></span></div>
+  <div class="evidence-grid">
+    <article><p class="eyebrow">INTERMARKET</p><h3>{{ intermarket|length }} tracked signals</h3><div class="evidence-list">{% for item in intermarket %}<div><span>{{ item.label }}</span><strong>{{ item.value|floatformat:"2" }} <small>{{ item.unit }}</small></strong><small>{{ item.period }} · {{ item.source }}</small></div>{% empty %}<p class="quiet">Collection is pending.</p>{% endfor %}</div></article>
+    <article><p class="eyebrow">PAIR MACRO</p><h3>{{ pair_macro|length }} current observations</h3><div class="evidence-list">{% for item in pair_macro %}<div><span>{{ item.jurisdiction }} · {{ item.label }}</span><strong>{{ item.value|floatformat:"2" }} <small>{{ item.unit }}</small></strong><small>{{ item.period }} · known {{ item.available_at|slice:":10" }}</small></div>{% empty %}<p class="quiet">Collection is pending.</p>{% endfor %}</div></article>
+    <article><p class="eyebrow">CALENDAR</p><h3>{{ evidence.payload.upcoming_events|length }} upcoming events</h3><div class="evidence-list">{% for item in evidence.payload.upcoming_events|slice:":6" %}<div><span>{{ item.country }} · {{ item.title }}</span><strong>{{ item.event_at|slice:":10" }}</strong><small>{% if item.time_precision == "date" %}Time not supplied{% else %}{{ item.event_at|slice:"11:16" }} UTC{% endif %} · {{ item.source }}</small></div>{% empty %}<p class="quiet">No collected event falls in the 45-day window.</p>{% endfor %}</div></article>
+    <article><p class="eyebrow">NEWS WINDOW</p><h3>{{ evidence.payload.recent_news|length }} verified items</h3><div class="evidence-list news-evidence">{% for item in evidence.payload.recent_news|slice:":6" %}<div><a href="{{ item.url }}" rel="noopener noreferrer">{{ item.title }}</a><small>{{ item.published_at|slice:":16" }} · {{ item.source }}</small></div>{% empty %}<p class="quiet">No verified publication falls in the 72-hour window.</p>{% endfor %}</div></article>
+  </div>
+  <div class="evidence-boundary"><strong>Evidence only</strong><span>This snapshot cannot issue forecasts, infer missing consensus, score sources, or reweight the system.</span></div>
+  {% else %}<div class="research-empty"><strong>The evidence collector is scheduled.</strong><p>It will capture market, technical, macro, calendar, news, and intermarket inputs without changing any forecast.</p></div>{% endif %}
+</section>
 <section class="timeline-panel" id="forecast-history">
   <div class="panel-head"><div><p class="eyebrow">IMMUTABLE TIMELINE</p><h2>Forecast history</h2></div><span>{{ forecasts|length }} locked record{{ forecasts|length|pluralize }}</span></div>
   <div class="timeline-list">

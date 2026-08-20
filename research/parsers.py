@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import re
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -226,6 +227,8 @@ def parse_macro(series, body):
                 for row in records
                 if row.get("VECTOR", "").lstrip("v") == series.provider_series_id
             ]
+        elif series.parser == MacroSeries.Parser.DATE_VALUE_CSV:
+            rows = [(row.get("Date"), row.get("Price"), None, "") for row in records]
         else:
             raise ParseRejected(f"unsupported macro parser: {series.parser}")
     values = []
@@ -308,6 +311,14 @@ def parse_official_calendar(parser, body):
         return _parse_ons_calendar(body)
     if parser == "eurostat":
         return _parse_eurostat_calendar(body)
+    if parser == "boc":
+        return _parse_boc_calendar(body)
+    if parser == "fed":
+        return _parse_fed_calendar(body)
+    if parser == "boe":
+        return _parse_boe_calendar(body)
+    if parser == "ecb":
+        return _parse_ecb_calendar(body)
     raise ParseRejected(f"unsupported official calendar parser: {parser}")
 
 
@@ -485,10 +496,184 @@ def _parse_eurostat_calendar(body):
     return _require_calendar_values(values, "Eurostat")
 
 
+def _parse_boc_calendar(body):
+    try:
+        root = ElementTree.fromstring(body)
+    except Exception as error:
+        raise ParseRejected(f"Bank of Canada calendar is invalid XML: {error}") from error
+    values = []
+    for node in [item for item in root.iter() if _local(item.tag) == "item"]:
+        title = plain_text(_child_text(node, "title"))
+        if not title.lower().startswith("interest rate announcement"):
+            continue
+        occurrence = _descendant_text(node, "occurrenceDate")
+        description = plain_text(_child_text(node, "description"))
+        match = re.search(r"\b(\d{1,2}):(\d{2})\s*\(ET\)", description)
+        try:
+            release_date = datetime.strptime(occurrence, "%Y-%m-%d")
+        except ValueError as error:
+            raise ParseRejected("Bank of Canada calendar contains an invalid date") from error
+        if not match:
+            raise ParseRejected("Bank of Canada policy event has no documented Eastern time")
+        event_at = release_date.replace(
+            hour=int(match.group(1)),
+            minute=int(match.group(2)),
+            tzinfo=ZoneInfo("America/Toronto"),
+        ).astimezone(UTC)
+        source_url = _link(node).strip()
+        if not source_url:
+            raise ParseRejected("Bank of Canada policy event has no source URL")
+        values.append(
+            CalendarValue(
+                event_at,
+                "CA",
+                title,
+                "",
+                "",
+                None,
+                None,
+                None,
+                source_url,
+                source_url,
+                series_code="CA_POLICY_RATE",
+            )
+        )
+    return _require_calendar_values(values, "Bank of Canada")
+
+
+def _parse_fed_calendar(body):
+    text = _decode_html(body, "Federal Reserve")
+    values = []
+    sections = list(
+        re.finditer(
+            r">(20\d{2}) FOMC Meetings</a>(.*?)(?=>(?:20\d{2}) FOMC Meetings</a>|$)",
+            text,
+            re.DOTALL,
+        )
+    )
+    for section in sections:
+        year = int(section.group(1))
+        for match in re.finditer(
+            r"fomc-meeting__month[^>]*><strong>([A-Za-z]+)</strong>.*?"
+            r"fomc-meeting__date[^>]*>([^<]+)",
+            section.group(2),
+            re.DOTALL,
+        ):
+            month = match.group(1)
+            raw_days = plain_text(match.group(2)).replace("*", "")
+            day_matches = re.findall(r"\d{1,2}", raw_days)
+            if not day_matches:
+                raise ParseRejected("Federal Reserve calendar contains an invalid date")
+            final_day = day_matches[-1]
+            try:
+                release_date = datetime.strptime(f"{year} {month} {final_day}", "%Y %B %d")
+            except ValueError as error:
+                raise ParseRejected("Federal Reserve calendar contains an invalid date") from error
+            date_text = release_date.date().isoformat()
+            values.append(
+                CalendarValue(
+                    release_date.replace(tzinfo=UTC),
+                    "US",
+                    "FOMC monetary policy decision",
+                    "",
+                    "",
+                    None,
+                    None,
+                    None,
+                    f"FOMC|{date_text}",
+                    "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
+                    time_precision="date",
+                    series_code="US_POLICY_TARGET_UPPER",
+                )
+            )
+    return _require_calendar_values(values, "Federal Reserve")
+
+
+def _parse_boe_calendar(body):
+    text = _decode_html(body, "Bank of England")
+    values = []
+    for section in re.finditer(
+        r"<h2>(20\d{2}) (?:confirmed|provisional) dates</h2>(.*?)(?=<h2>|$)",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    ):
+        year = int(section.group(1))
+        section_text = plain_text(section.group(2))
+        for match in re.finditer(
+            r"(?:Monday|Tuesday|Wednesday|Thursday|Friday)\s+(\d{1,2})\s+([A-Za-z]+)",
+            section_text,
+        ):
+            try:
+                release_date = datetime.strptime(
+                    f"{year} {match.group(2)} {match.group(1)}", "%Y %B %d"
+                )
+            except ValueError as error:
+                raise ParseRejected("Bank of England calendar contains an invalid date") from error
+            date_text = release_date.date().isoformat()
+            values.append(
+                CalendarValue(
+                    release_date.replace(tzinfo=UTC),
+                    "GB",
+                    "Bank of England MPC decision",
+                    "",
+                    "",
+                    None,
+                    None,
+                    None,
+                    f"BOE-MPC|{date_text}",
+                    "https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates",
+                    time_precision="date",
+                    series_code="GB_BANK_RATE",
+                )
+            )
+    return _require_calendar_values(values, "Bank of England")
+
+
+def _parse_ecb_calendar(body):
+    text = _decode_html(body, "ECB")
+    values = []
+    for match in re.finditer(r"<dt>\s*([^<]+)\s*</dt>\s*<dd>(.*?)</dd>", text, re.DOTALL):
+        description = plain_text(match.group(2))
+        if (
+            "monetary policy meeting" not in description.lower()
+            or "day 2" not in description.lower()
+        ):
+            continue
+        try:
+            release_date = datetime.strptime(match.group(1).strip(), "%d/%m/%Y")
+        except ValueError as error:
+            raise ParseRejected("ECB calendar contains an invalid date") from error
+        date_text = release_date.date().isoformat()
+        values.append(
+            CalendarValue(
+                release_date.replace(tzinfo=UTC),
+                "EU",
+                "ECB monetary policy decision",
+                "",
+                "",
+                None,
+                None,
+                None,
+                f"ECB-MP|{date_text}",
+                "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html",
+                time_precision="date",
+                series_code="EU_DEPOSIT_FACILITY_RATE",
+            )
+        )
+    return _require_calendar_values(values, "ECB")
+
+
 def _require_calendar_values(values, provider):
     if not values:
         raise ParseRejected(f"{provider} calendar contains no tracked releases")
     return values
+
+
+def _decode_html(body, provider):
+    try:
+        return body.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ParseRejected(f"{provider} calendar is not UTF-8") from error
 
 
 def _local(tag):
@@ -499,6 +684,13 @@ def _child_text(node, *names):
     for child in node:
         if _local(child.tag) in names and child.text:
             return child.text
+    return ""
+
+
+def _descendant_text(node, *names):
+    for child in node.iter():
+        if _local(child.tag) in names and child.text:
+            return child.text.strip()
     return ""
 
 

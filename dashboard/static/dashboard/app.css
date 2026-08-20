@@ -558,6 +558,93 @@ p {
   padding: 15px;
   font-size: 11px;
 }
+.evidence-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  margin-top: 18px;
+  padding: 25px;
+}
+.evidence-health {
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 7px 9px;
+}
+.evidence-health.fresh {
+  border-color: var(--green);
+  color: var(--green);
+}
+.evidence-meta {
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 10px;
+  gap: 8px 18px;
+  padding: 12px 0 16px;
+}
+.evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.evidence-grid > article {
+  min-width: 0;
+  padding: 22px;
+}
+.evidence-grid > article:nth-child(odd) {
+  border-right: 1px solid var(--line);
+}
+.evidence-grid > article:nth-child(-n + 2) {
+  border-bottom: 1px solid var(--line);
+}
+.evidence-grid h3 {
+  font-family: Georgia, serif;
+  font-size: 17px;
+  margin: 4px 0 14px;
+}
+.evidence-list {
+  display: grid;
+  gap: 11px;
+}
+.evidence-list > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.evidence-list span,
+.evidence-list a {
+  color: var(--ink);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.evidence-list strong {
+  font-family: monospace;
+  font-size: 12px;
+}
+.evidence-list small {
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 400;
+}
+.news-evidence a {
+  font-weight: 600;
+  line-height: 1.35;
+}
+.evidence-boundary {
+  align-items: center;
+  background: #eff2ec;
+  display: flex;
+  font-size: 10px;
+  gap: 12px;
+  padding: 12px 15px;
+}
+.evidence-boundary strong {
+  color: var(--green);
+  text-transform: uppercase;
+}
 .method-note p {
   color: var(--muted);
   margin: 5px 0;
@@ -1177,6 +1264,15 @@ td small {
   }
   .workspace-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .evidence-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .evidence-grid > article:nth-child(odd) {
+    border-right: 0;
+  }
+  .evidence-grid > article:not(:last-child) {
+    border-bottom: 1px solid var(--line);
   }
   .market-grid {
     grid-template-columns: minmax(0, 1fr);
