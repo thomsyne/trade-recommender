@@ -1039,6 +1039,72 @@ td small {
   color: #746650;
   font-size: 13px;
 }
+.calendar-sources {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+.calendar-sources article {
+  min-width: 0;
+  padding: 16px;
+  background: var(--panel);
+}
+.calendar-sources header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: center;
+}
+.calendar-sources header > span {
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 700;
+}
+.calendar-sources header strong {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.calendar-sources header em {
+  grid-column: 1 / -1;
+  width: fit-content;
+  margin-top: 4px;
+  font-style: normal;
+}
+.calendar-sources p {
+  margin: 13px 0 5px;
+  color: #4f5d55;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.calendar-sources small,
+.calendar-sources time {
+  display: block;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+.calendar-sources time {
+  margin-top: 9px;
+  font-family: monospace;
+}
+.calendar-note {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 12px 15px;
+  border-left: 3px solid var(--green);
+  background: #edf1eb;
+  color: #59665f;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.calendar-note strong {
+  flex: 0 0 auto;
+  color: #304a3c;
+}
 .calendar-events {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1054,8 +1120,12 @@ td small {
   font-size: 11px;
 }
 .calendar-events time,
-.calendar-events span {
+.calendar-events span,
+.calendar-events small {
   color: var(--muted);
+}
+.calendar-events strong a:hover {
+  color: var(--green);
 }
 .provider-comparison {
   margin-top: 35px;
@@ -1227,6 +1297,9 @@ td small {
   .calendar-events {
     grid-template-columns: minmax(0, 1fr);
   }
+  .calendar-sources {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .entry-meta {
     align-items: flex-start;
     flex-direction: column;
@@ -1277,5 +1350,17 @@ td small {
     font-weight: 600;
     letter-spacing: 0.1em;
     text-transform: uppercase;
+  }
+}
+@media (max-width: 520px) {
+  .calendar-sources {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .calendar-note {
+    display: block;
+  }
+  .calendar-note strong {
+    display: block;
+    margin-bottom: 4px;
   }
 }

@@ -236,11 +236,23 @@ class ProviderEvaluation(models.Model):
 
 
 class EconomicEvent(ImmutableRecord):
+    class TimePrecision(models.TextChoices):
+        EXACT = "exact", "Exact time"
+        DATE = "date", "Date only"
+
     retrieval = models.ForeignKey(RawRetrieval, on_delete=models.PROTECT)
+    series = models.ForeignKey(
+        MacroSeries, on_delete=models.PROTECT, null=True, blank=True, related_name="release_events"
+    )
     provider_event_key = models.CharField(max_length=64)
     event_at = models.DateTimeField()
+    time_precision = models.CharField(
+        max_length=8, choices=TimePrecision, default=TimePrecision.EXACT
+    )
     country = models.CharField(max_length=2)
     event_type = models.CharField(max_length=240)
+    source_url = models.URLField(max_length=1000, blank=True)
+    status = models.CharField(max_length=24, default="scheduled")
     comparison = models.CharField(max_length=12, blank=True)
     period = models.CharField(max_length=40, blank=True)
     actual = models.DecimalField(max_digits=24, decimal_places=8, null=True)

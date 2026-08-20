@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from defusedxml import ElementTree
@@ -47,6 +47,11 @@ class CalendarValue:
     actual: Decimal | None
     estimate: Decimal | None
     previous: Decimal | None
+    provider_event_key: str = ""
+    source_url: str = ""
+    status: str = "scheduled"
+    time_precision: str = "exact"
+    series_code: str = ""
 
 
 class _TextExtractor(HTMLParser):
@@ -291,6 +296,198 @@ def parse_eodhd_events(body):
                 _optional_decimal(row.get("previous")),
             )
         )
+    return values
+
+
+def parse_official_calendar(parser, body):
+    if parser == "statcan":
+        return _parse_statcan_calendar(body)
+    if parser == "bea":
+        return _parse_bea_calendar(body)
+    if parser == "ons":
+        return _parse_ons_calendar(body)
+    if parser == "eurostat":
+        return _parse_eurostat_calendar(body)
+    raise ParseRejected(f"unsupported official calendar parser: {parser}")
+
+
+def _parse_statcan_calendar(body):
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ParseRejected("Statistics Canada calendar is invalid JSON") from error
+    mappings = {
+        "Consumer Price Index": "CA_CPI_YOY",
+        "Labour Force Survey": "CA_UNEMPLOYMENT",
+        "Gross domestic product by industry": "CA_REAL_GDP_GROWTH",
+        "Gross domestic product, income and expenditure": "CA_REAL_GDP_GROWTH",
+        "Building permits": "CA_HOUSING_STARTS",
+    }
+    values = []
+    for row in payload if isinstance(payload, list) else []:
+        title = str(row.get("title") or "").strip()
+        series_code = mappings.get(title)
+        if not series_code:
+            continue
+        try:
+            release_date = datetime.strptime(str(row["date"])[:10], "%Y-%m-%d")
+        except (KeyError, ValueError) as error:
+            raise ParseRejected("Statistics Canada calendar contains an invalid date") from error
+        event_at = release_date.replace(
+            hour=8, minute=30, tzinfo=ZoneInfo("America/Toronto")
+        ).astimezone(UTC)
+        period = str(row.get("description") or "").strip()[:40]
+        source_url = urljoin(
+            "https://www150.statcan.gc.ca/n1/", str(row.get("url") or "").lstrip("/")
+        )
+        identity = f"{title}|{period}"
+        values.append(
+            CalendarValue(
+                event_at,
+                "CA",
+                title,
+                "",
+                period,
+                None,
+                None,
+                None,
+                identity,
+                source_url if row.get("url") else "",
+                series_code=series_code,
+            )
+        )
+    return _require_calendar_values(values, "Statistics Canada")
+
+
+def _parse_bea_calendar(body):
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ParseRejected("BEA calendar is invalid JSON") from error
+    mappings = {
+        "Gross Domestic Product": "US_REAL_GDP_GROWTH",
+        "Personal Income and Outlays": "",
+    }
+    values = []
+    for title, series_code in mappings.items():
+        for raw_date in (payload.get(title) or {}).get("release_dates", []):
+            event_at = _parse_datetime(raw_date)
+            if not event_at:
+                raise ParseRejected("BEA calendar contains an invalid date")
+            values.append(
+                CalendarValue(
+                    event_at,
+                    "US",
+                    title,
+                    "",
+                    "",
+                    None,
+                    None,
+                    None,
+                    f"{title}|{event_at.isoformat()}",
+                    "https://www.bea.gov/news/schedule",
+                    series_code=series_code,
+                )
+            )
+    return _require_calendar_values(values, "BEA")
+
+
+def _parse_ons_calendar(body):
+    try:
+        root = ElementTree.fromstring(body)
+    except Exception as error:
+        raise ParseRejected(f"ONS calendar is invalid XML: {error}") from error
+    mappings = (
+        ("consumer price inflation", "GB_CPI_YOY"),
+        ("uk labour market", "GB_UNEMPLOYMENT"),
+        ("gdp monthly estimate", "GB_REAL_GDP_GROWTH"),
+        ("gdp quarterly national accounts", "GB_REAL_GDP_GROWTH"),
+        ("private rent and house prices", "GB_HOUSE_PRICE_YOY"),
+    )
+    values = []
+    for node in [item for item in root.iter() if _local(item.tag) == "item"]:
+        title = plain_text(_child_text(node, "title"))
+        lowered = title.lower()
+        if "time series" in lowered:
+            continue
+        series_code = next((code for phrase, code in mappings if phrase in lowered), "")
+        if not series_code:
+            continue
+        event_at = _parse_datetime(_child_text(node, "pubDate"))
+        source_url = _link(node).strip()
+        if not event_at or not source_url:
+            raise ParseRejected("ONS calendar contains an invalid event")
+        identity = _child_text(node, "guid") or source_url
+        values.append(
+            CalendarValue(
+                event_at,
+                "GB",
+                title,
+                "",
+                "",
+                None,
+                None,
+                None,
+                identity.strip(),
+                source_url,
+                series_code=series_code,
+            )
+        )
+    return _require_calendar_values(values, "ONS")
+
+
+def _parse_eurostat_calendar(body):
+    try:
+        text = body.decode("utf-8-sig").replace("\r\n", "\n")
+    except UnicodeDecodeError as error:
+        raise ParseRejected("Eurostat calendar is not UTF-8") from error
+    unfolded = text.replace("\n ", "").replace("\n\t", "")
+    mappings = (
+        ("inflation", "EU_HICP_YOY"),
+        ("unemployment", "EU_UNEMPLOYMENT"),
+        ("gdp", "EU_REAL_GDP_GROWTH"),
+        ("house price", "EU_HOUSE_PRICE_INDEX"),
+    )
+    values = []
+    for block in unfolded.split("BEGIN:VEVENT")[1:]:
+        event = block.split("END:VEVENT", 1)[0]
+        fields = {}
+        for line in event.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                fields[key.split(";", 1)[0]] = value.strip().replace("\\,", ",")
+        title = fields.get("SUMMARY", "").strip()
+        series_code = next((code for phrase, code in mappings if phrase in title.lower()), "")
+        if not series_code:
+            continue
+        raw_date = fields.get("DTSTART", "")
+        try:
+            release_date = datetime.strptime(raw_date, "%Y%m%d")
+        except ValueError as error:
+            raise ParseRejected("Eurostat calendar contains a non-date event") from error
+        event_at = release_date.replace(tzinfo=UTC)
+        values.append(
+            CalendarValue(
+                event_at,
+                "EU",
+                title,
+                "",
+                "",
+                None,
+                None,
+                None,
+                f"{title}|{raw_date}",
+                "https://ec.europa.eu/eurostat/news/release-calendar",
+                time_precision="date",
+                series_code=series_code,
+            )
+        )
+    return _require_calendar_values(values, "Eurostat")
+
+
+def _require_calendar_values(values, provider):
+    if not values:
+        raise ParseRejected(f"{provider} calendar contains no tracked releases")
     return values
 
 

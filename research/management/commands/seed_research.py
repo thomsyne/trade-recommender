@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from market.models import SourceRegistry
 from operations.models import ScheduledJob
-from research.models import MacroSeries, ProviderEvaluation, RawRetrieval, SourcePolicy
+from research.models import MacroSeries, ProviderEvaluation, SourcePolicy
 
 SOURCES = (
     {
@@ -90,6 +90,16 @@ SOURCES = (
         "types": ["application/json"],
     },
     {
+        "slug": "us-bea",
+        "name": "US Bureau of Economic Analysis",
+        "jurisdiction": "US",
+        "currency": "USD",
+        "base_url": "https://www.bea.gov/",
+        "terms_url": "https://www.bea.gov/statement-commitment-scientific-integrity-bea",
+        "hosts": ["apps.bea.gov"],
+        "types": ["application/json"],
+    },
+    {
         "slug": "uk-ons",
         "name": "UK Office for National Statistics",
         "jurisdiction": "GB",
@@ -97,7 +107,7 @@ SOURCES = (
         "base_url": "https://www.ons.gov.uk/",
         "terms_url": "https://www.ons.gov.uk/methodology/geography/licences",
         "hosts": ["www.ons.gov.uk"],
-        "types": ["application/octet-stream", "text/csv"],
+        "types": ["application/octet-stream", "text/csv", "application/rss+xml"],
     },
     {
         "slug": "eurostat",
@@ -107,7 +117,7 @@ SOURCES = (
         "base_url": "https://ec.europa.eu/eurostat/",
         "terms_url": "https://ec.europa.eu/eurostat/about-us/policies/copyright",
         "hosts": ["ec.europa.eu"],
-        "types": ["application/json"],
+        "types": ["application/json", "text/plain"],
     },
     {
         "slug": "uk-land-registry",
@@ -340,15 +350,38 @@ SERIES = (
     },
 )
 
+CALENDARS = (
+    {
+        "policy": "statistics-canada",
+        "parser": "statcan",
+        "label": "Statistics Canada key indicators",
+        "url": "https://www150.statcan.gc.ca/n1/dai-quo/ssi/homepage/schedule-key_indicators-eng.json",
+    },
+    {
+        "policy": "us-bea",
+        "parser": "bea",
+        "label": "BEA release dates",
+        "url": "https://apps.bea.gov/API/signup/release_dates.json",
+    },
+    {
+        "policy": "uk-ons",
+        "parser": "ons",
+        "label": "ONS upcoming releases",
+        "url": "https://www.ons.gov.uk/releasecalendar?rss&limit=100&release-type=type-upcoming&sort=date-newest",
+    },
+    {
+        "policy": "eurostat",
+        "parser": "eurostat",
+        "label": "Eurostat euro indicators",
+        "url": "https://ec.europa.eu/eurostat/o/calendars/eventsIcal?theme=2&category=2",
+    },
+)
+
 
 class Command(BaseCommand):
     help = "Seed verified official research sources and durable collection schedules"
 
     def handle(self, *args, **options):
-        calendar_connected = RawRetrieval.objects.filter(
-            source_policy__slug="eodhd-calendar",
-            quality=RawRetrieval.Quality.ACCEPTED,
-        ).exists()
         policies = {}
         for item in SOURCES:
             source, _ = SourceRegistry.objects.update_or_create(
@@ -432,11 +465,39 @@ class Command(BaseCommand):
         ScheduledJob.objects.filter(task_name="research.ingest_macro").exclude(
             name__in=[f"Research macro — {item['code']}" for item in SERIES]
         ).delete()
+        for item in CALENDARS:
+            _upsert_job(
+                f"Research calendar — {item['label']}",
+                "research.ingest_official_calendar",
+                {
+                    "source": item["policy"],
+                    "parser": item["parser"],
+                    "url": item["url"],
+                },
+                86_400,
+            )
+        ScheduledJob.objects.filter(task_name="research.ingest_official_calendar").exclude(
+            name__in=[f"Research calendar — {item['label']}" for item in CALENDARS]
+        ).delete()
+        ProviderEvaluation.objects.update_or_create(
+            category="economic-calendar",
+            provider="Official statistical agencies",
+            defaults={
+                "status": ProviderEvaluation.Status.SELECTED,
+                "evidence_url": "https://ec.europa.eu/eurostat/news/release-calendar",
+                "pricing_status": "Free official public schedules",
+                "timestamp_semantics": "Exact official times where supplied; Eurostat date-only events remain date-only",
+                "revision_support": "Every retrieval and changed normalized schedule payload is retained prospectively",
+                "retention_rights": "Official public records retained for private research; no raw-body redistribution",
+                "reliability_result": "SELECTED — CA/US/GB/EU OFFICIAL COVERAGE",
+                "next_check": "Add BLS and central-bank schedules only when their official endpoints are reliably automatable.",
+            },
+        )
         ProviderEvaluation.objects.update_or_create(
             category="economic-calendar",
             provider="EODHD",
             defaults={
-                "status": ProviderEvaluation.Status.TESTING,
+                "status": ProviderEvaluation.Status.REJECTED,
                 "evidence_url": "https://eodhd.com/financial-apis/economic-events-data-api",
                 "pricing_status": (
                     "USD $59.99 monthly or $599.90 annually ($49.99/month equivalent); key configured"
@@ -446,20 +507,8 @@ class Command(BaseCommand):
                 "timestamp_semantics": "Event date/time plus actual, estimate, and previous; timezone semantics require trial verification",
                 "revision_support": "Distinct changed payloads are retained prospectively; provider vintage guarantees not documented",
                 "retention_rights": "Private-use terms reviewed at a high level; confirm model-input and long-term retention rights before purchase",
-                "reliability_result": (
-                    "CONNECTED — BOUNDED RETRIEVAL SUCCEEDED"
-                    if calendar_connected
-                    else (
-                        "NOT CONNECTED — KEY CONFIGURED; PAID API ENTITLEMENT REQUIRED"
-                        if settings.EODHD_API_TOKEN
-                        else "NOT CONNECTED — API KEY REQUIRED"
-                    )
-                ),
-                "next_check": (
-                    "Measure coverage, timestamps, revisions, and latency against official releases."
-                    if calendar_connected
-                    else "Activate the Fundamentals Data Feed entitlement, then run a bounded trial."
-                ),
+                "reliability_result": "NOT SELECTED — FREE KEY EXCLUDES ECONOMIC EVENTS",
+                "next_check": "Optional future source for consensus only; no purchase is needed for release schedules.",
             },
         )
         ProviderEvaluation.objects.update_or_create(
@@ -481,7 +530,7 @@ class Command(BaseCommand):
             "research.ingest_eodhd_calendar",
             {},
             3_600,
-            enabled=calendar_connected,
+            enabled=False,
         )
         self.stdout.write(self.style.SUCCESS("official research registry ready"))
 

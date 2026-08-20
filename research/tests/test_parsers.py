@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from django.test import SimpleTestCase
 
 from research.models import MacroSeries
-from research.parsers import parse_macro
+from research.parsers import parse_macro, parse_official_calendar
 
 
 def series(parser, provider_series_id, transformation=MacroSeries.Transformation.NONE):
@@ -74,3 +74,29 @@ class MacroParserTests(SimpleTestCase):
         self.assertEqual(value.period.isoformat(), "2026-01-01")
         self.assertEqual(value.provider_status, "e")
         self.assertEqual(value.available_at, datetime(2026, 8, 14, 9, tzinfo=UTC))
+
+
+class CalendarParserTests(SimpleTestCase):
+    def test_eurostat_date_only_event_does_not_invent_release_time(self):
+        body = b"""BEGIN:VCALENDAR\r
+BEGIN:VEVENT\r
+DTSTART;VALUE=DATE:20260901\r
+SUMMARY:Flash estimate inflation euro area\r
+UID:inflation-2026-09\r
+END:VEVENT\r
+END:VCALENDAR\r
+"""
+        event = parse_official_calendar("eurostat", body)[0]
+        self.assertEqual(event.event_at, datetime(2026, 9, 1, tzinfo=UTC))
+        self.assertEqual(event.time_precision, "date")
+        self.assertEqual(event.series_code, "EU_HICP_YOY")
+        self.assertEqual(event.provider_event_key, "Flash estimate inflation euro area|20260901")
+
+    def test_ons_keeps_primary_release_and_omits_time_series_duplicate(self):
+        body = b"""<rss><channel>
+<item><title>Consumer price inflation, UK: July 2026</title><link>https://www.ons.gov.uk/releases/cpi</link><guid>cpi</guid><pubDate>Wed, 19 Aug 2026 07:00:00 +0000</pubDate></item>
+<item><title>Consumer price inflation, UK: July 2026 time series</title><link>https://www.ons.gov.uk/releases/cpi-ts</link><guid>cpi-ts</guid><pubDate>Wed, 19 Aug 2026 07:00:00 +0000</pubDate></item>
+</channel></rss>"""
+        events = parse_official_calendar("ons", body)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].provider_event_key, "cpi")

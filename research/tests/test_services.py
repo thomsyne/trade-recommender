@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -16,7 +17,12 @@ from research.models import (
     ResearchDocument,
 )
 from research.parsers import ParseRejected, parse_feed
-from research.services import ingest_eodhd_calendar, ingest_feed, ingest_macro
+from research.services import (
+    ingest_eodhd_calendar,
+    ingest_feed,
+    ingest_macro,
+    ingest_official_calendar,
+)
 from research.tests.factories import source_policy
 
 PUBLIC_RESOLVER = lambda _host: {"93.184.216.34"}  # noqa: E731
@@ -187,3 +193,83 @@ class ResearchServiceTests(TestCase):
         self.assertNotIn("private-token", retrieval.url)
         self.assertEqual(EconomicEvent.objects.get().actual, Decimal("1.2"))
         self.assertEqual(Forecast.objects.count(), before)
+
+    def test_official_calendar_links_series_and_preserves_schedule_changes(self):
+        self.policy.allowed_content_types = ["application/json"]
+        self.policy.save()
+        series = MacroSeries.objects.create(
+            source_policy=self.policy,
+            code="CA_CPI_YOY",
+            provider_series_id="CPI",
+            label="CPI inflation",
+            unit="percent",
+            frequency="monthly",
+            parser=MacroSeries.Parser.STATCAN_WDS,
+            url="https://official.example/cpi",
+            point_in_time_note="test",
+        )
+        before = Forecast.objects.count()
+        for date in ("2026-08-24 00:00:01", "2026-08-25 00:00:01"):
+            body = json.dumps(
+                [
+                    {
+                        "date": date,
+                        "title": "Consumer Price Index",
+                        "description": "July 2026",
+                        "url": "/daily/cpi",
+                    }
+                ]
+            ).encode()
+            ingest_official_calendar(
+                self.policy,
+                "statcan",
+                "https://official.example/calendar.json",
+                transport=response_transport(body, "application/json"),
+                resolver=PUBLIC_RESOLVER,
+                now=self.now,
+            )
+
+        events = list(EconomicEvent.objects.order_by("event_at"))
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].series, series)
+        self.assertEqual(events[0].event_at, datetime(2026, 8, 24, 12, 30, tzinfo=UTC))
+        self.assertEqual(events[0].source_url, "https://www150.statcan.gc.ca/n1/daily/cpi")
+        self.assertIsNone(events[0].estimate)
+        self.assertEqual(events[0].provider_event_key, events[1].provider_event_key)
+        self.assertNotEqual(events[0].payload_fingerprint, events[1].payload_fingerprint)
+        self.assertEqual(Forecast.objects.count(), before)
+
+    def test_eurostat_regenerated_ics_uids_do_not_duplicate_events(self):
+        self.policy.allowed_content_types = ["text/plain"]
+        self.policy.save()
+        MacroSeries.objects.create(
+            source_policy=self.policy,
+            code="EU_HICP_YOY",
+            provider_series_id="HICP",
+            label="HICP inflation",
+            unit="percent",
+            frequency="monthly",
+            parser=MacroSeries.Parser.EUROSTAT_JSON,
+            url="https://official.example/hicp",
+            point_in_time_note="test",
+        )
+        for uid in ("generated-1", "generated-2"):
+            body = f"""BEGIN:VCALENDAR\r
+BEGIN:VEVENT\r
+DTSTART;VALUE=DATE:20260901\r
+SUMMARY:Flash estimate inflation euro area\r
+UID:{uid}\r
+END:VEVENT\r
+END:VCALENDAR\r
+""".encode()
+            ingest_official_calendar(
+                self.policy,
+                "eurostat",
+                "https://official.example/calendar.ics",
+                transport=response_transport(body, "text/plain"),
+                resolver=PUBLIC_RESOLVER,
+                now=self.now,
+            )
+
+        self.assertEqual(EconomicEvent.objects.count(), 1)
+        self.assertEqual(RawRetrieval.objects.count(), 2)

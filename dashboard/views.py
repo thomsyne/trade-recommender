@@ -1,6 +1,5 @@
 from datetime import timedelta
 
-from django.conf import settings
 from django.contrib.auth.decorators import login_required
 from django.db import connection
 from django.db.models import F
@@ -189,14 +188,81 @@ def research(request):
             policy.latest_retrieval
             and timezone.now() - policy.latest_retrieval.fetched_at <= timedelta(hours=36)
         )
-    calendar_retrieval = RawRetrieval.objects.filter(
-        source_policy__slug="eodhd-calendar", quality=RawRetrieval.Quality.ACCEPTED
-    ).first()
-    calendar_connected = bool(
-        settings.EODHD_API_TOKEN
-        and calendar_retrieval
-        and timezone.now() - calendar_retrieval.fetched_at <= timedelta(hours=2)
+    calendar_specs = (
+        (
+            "CA",
+            "Statistics Canada",
+            "statistics-canada",
+            "schedule-key_indicators-eng.json",
+            "CPI · labour · GDP · building permits",
+            "Housing starts and policy decisions are not yet scheduled here.",
+        ),
+        (
+            "US",
+            "BEA",
+            "us-bea",
+            "release_dates.json",
+            "GDP · personal income/PCE",
+            "BLS inflation/labour, Census housing, and Fed decisions remain explicit gaps.",
+        ),
+        (
+            "GB",
+            "ONS",
+            "uk-ons",
+            "releasecalendar",
+            "CPI · labour · GDP · house prices",
+            "Bank of England decisions are not yet scheduled here.",
+        ),
+        (
+            "EU",
+            "Eurostat",
+            "eurostat",
+            "eventsIcal",
+            "HICP · unemployment · GDP · house prices",
+            "Eurostat supplies dates, not exact release times; ECB decisions remain a gap.",
+        ),
     )
+    calendar_sources = []
+    for jurisdiction, name, slug, url_fragment, coverage, gap in calendar_specs:
+        retrieval = (
+            RawRetrieval.objects.filter(
+                source_policy__slug=slug,
+                url__contains=url_fragment,
+                quality=RawRetrieval.Quality.ACCEPTED,
+            )
+            .order_by("-fetched_at")
+            .first()
+        )
+        fresh = bool(retrieval and timezone.now() - retrieval.fetched_at <= timedelta(hours=36))
+        calendar_sources.append(
+            {
+                "jurisdiction": jurisdiction,
+                "name": name,
+                "coverage": coverage,
+                "gap": gap,
+                "retrieval": retrieval,
+                "fresh": fresh,
+            }
+        )
+    calendar_rows = list(
+        EconomicEvent.objects.filter(event_at__gte=timezone.now() - timedelta(days=1))
+        .select_related("series")
+        .order_by("provider_event_key", "-first_observed_at")
+    )
+    latest_events = {}
+    for event in calendar_rows:
+        latest_events.setdefault(event.provider_event_key, event)
+    semantic_events = {}
+    for event in latest_events.values():
+        semantic_key = (event.country, event.event_type, event.event_at, event.period)
+        current = semantic_events.get(semantic_key)
+        if not current or event.first_observed_at > current.first_observed_at:
+            semantic_events[semantic_key] = event
+    calendar_events = sorted(semantic_events.values(), key=lambda event: event.event_at)[:20]
+    for event in calendar_events:
+        event.latest_observation = event.series.observations.first() if event.series else None
+    calendar_connected = all(item["fresh"] for item in calendar_sources)
+    calendar_coverage_count = sum(bool(item["retrieval"]) for item in calendar_sources)
     return render(
         request,
         "dashboard/research.html",
@@ -209,8 +275,10 @@ def research(request):
             "conflict_count": ResearchDiscrepancy.objects.filter(kind="conflict").count(),
             "quarantine_count": ResearchDocument.objects.filter(quality="quarantined").count(),
             "provider_evaluations": ProviderEvaluation.objects.all(),
-            "calendar_events": EconomicEvent.objects.all()[:20],
+            "calendar_events": calendar_events,
+            "calendar_sources": calendar_sources,
             "calendar_connected": calendar_connected,
+            "calendar_coverage_count": calendar_coverage_count,
         },
     )
 

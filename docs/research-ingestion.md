@@ -30,6 +30,29 @@ Exact provider release timestamps are retained when supplied. Otherwise
 footnotes are retained, and changed values append a vintage so revisions are
 learned prospectively rather than reconstructed with hindsight.
 
+## Official release calendar
+
+Upcoming releases are collected daily without a paid calendar subscription:
+
+| Jurisdiction | Official schedule | Current tracked coverage | Time semantics |
+|---|---|---|---|
+| Canada | Statistics Canada key-indicator JSON | CPI, Labour Force Survey, GDP, building permits | 08:30 America/Toronto, as documented for *The Daily* |
+| United States | BEA machine-readable release dates | GDP and personal income/PCE | Exact UTC timestamp supplied by BEA |
+| United Kingdom | ONS upcoming-release RSS | CPI, labour market, GDP, house prices | Exact UTC timestamp supplied by ONS |
+| Euro area | Eurostat euro-indicator iCalendar | HICP, unemployment, GDP, house prices | Date only; no time is inferred |
+
+This is deliberately honest partial coverage. BLS blocks automated calendar
+retrieval from this environment, and Census housing plus Fed, Bank of Canada,
+Bank of England, and ECB decisions are not silently replaced by unofficial
+sources. The dashboard names those gaps. EODHD remains disabled because its
+free key excludes economic events; it is not needed for the official schedule.
+
+Each normalized event links to its related macro series where an exact mapping
+exists. Consensus is always null because official schedules do not provide it.
+Actual values continue through `MacroObservation`; they are never inferred from
+a schedule. Raw schedule snapshots are immutable, and a changed date or event
+payload appends a new event vintage instead of rewriting the earlier capture.
+
 ## Retrieval boundary
 
 `research.fetch` is the only network boundary. It requires:
@@ -71,7 +94,7 @@ is still required before external-model processing or redistribution.
 ## Operations
 
 Seeding creates four six-hour feed schedules, twenty daily macro schedules,
-and a disabled hourly calendar schedule:
+four daily official-calendar schedules, and a disabled optional EODHD schedule:
 
 ```bash
 .venv/bin/python manage.py seed_research
@@ -79,14 +102,12 @@ and a disabled hourly calendar schedule:
 .venv/bin/python manage.py ingest_research \
   --feed bank-of-canada \
   --url https://www.bankofcanada.ca/content_type/press-releases/feed/
+.venv/bin/python manage.py ingest_research \
+  --calendar eurostat \
+  --parser eurostat \
+  --url 'https://ec.europa.eu/eurostat/o/calendars/eventsIcal?theme=2&category=2'
 ```
 
-The EODHD economic-events adapter accepts `EODHD_API_KEY` (or the legacy alias
-`EODHD_API_TOKEN`). A free API key does not include this endpoint: the
-Fundamentals Data Feed entitlement is required and is advertised at USD $59.99
-monthly or $599.90 annually. The hourly schedule remains disabled until a
-manual bounded retrieval succeeds; a key alone cannot create a failing retry
-loop. The dashboard likewise displays `CONNECTED` only after a recent accepted
-retrieval. Confirm long-term retention and model-input rights with EODHD before
-purchase. Trading Economics remains an unselected fallback pending a quote and
-written rights.
+The EODHD adapter still accepts `EODHD_API_KEY` (or the legacy alias
+`EODHD_API_TOKEN`) but its schedule remains disabled. Trading Economics also
+remains an unselected consensus fallback pending a quote and written rights.

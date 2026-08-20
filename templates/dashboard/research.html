@@ -107,13 +107,34 @@
 </div>
 
 <section class="research-section provider-lab">
-  <div class="section-heading research-heading"><div><p class="eyebrow">ECONOMIC CALENDAR</p><h2>Provider connection</h2></div><span class="calendar-health {% if calendar_connected %}connected{% endif %}">{% if calendar_connected %}CONNECTED{% else %}NOT CONNECTED{% endif %}</span></div>
-  {% if calendar_connected %}
-  <div class="calendar-events">{% for event in calendar_events %}<article><time>{{ event.event_at|date:"M j · H:i" }} UTC</time><strong>{{ event.country }} · {{ event.event_type }}</strong><span>Actual {{ event.actual|default:"—" }} · Estimate {{ event.estimate|default:"—" }} · Previous {{ event.previous|default:"—" }}</span></article>{% endfor %}</div>
+  <div class="section-heading research-heading"><div><p class="eyebrow">ECONOMIC CALENDAR</p><h2>Official release schedule</h2></div><span class="calendar-health {% if calendar_connected %}connected{% endif %}">{% if calendar_connected %}4/4 FRESH{% else %}{{ calendar_coverage_count }}/4 COLLECTED{% endif %}</span></div>
+  <div class="calendar-sources">
+    {% for source in calendar_sources %}
+    <article>
+      <header><span>{{ source.jurisdiction }}</span><strong>{{ source.name }}</strong><em class="state {% if source.fresh %}healthy{% else %}warning{% endif %}">{% if source.fresh %}FRESH{% elif source.retrieval %}STALE{% else %}AWAITING FIRST RUN{% endif %}</em></header>
+      <p>{{ source.coverage }}</p>
+      <small>{{ source.gap }}</small>
+      {% if source.retrieval %}<time>Captured {{ source.retrieval.fetched_at|date:"M j, H:i" }} UTC</time>{% endif %}
+    </article>
+    {% endfor %}
+  </div>
+  <div class="calendar-note"><strong>No consensus is inferred.</strong><span>Schedules come directly from official agencies. Estimates stay unavailable; actual observations continue through the separate immutable macro ledger.</span></div>
+  {% if calendar_events %}
+  <div class="calendar-events">
+    {% for event in calendar_events %}
+    <article>
+      <time>{% if event.time_precision == 'date' %}{{ event.event_at|date:"M j, Y" }} · TIME NOT SUPPLIED{% else %}{{ event.event_at|date:"M j · H:i" }} UTC{% endif %}</time>
+      <strong>{% if event.source_url %}<a href="{{ event.source_url }}" rel="noopener noreferrer" target="_blank">{{ event.country }} · {{ event.event_type }}</a>{% else %}{{ event.country }} · {{ event.event_type }}{% endif %}</strong>
+      {% if event.period %}<span>Reference period · {{ event.period }}</span>{% endif %}
+      <span>Consensus · unavailable{% if event.latest_observation %} · Latest official series value · {{ event.latest_observation.value|floatformat:2 }}{% endif %}</span>
+      <small>Schedule first captured {{ event.first_observed_at|date:"M j, H:i" }} UTC</small>
+    </article>
+    {% endfor %}
+  </div>
   {% else %}
-  <div class="calendar-disconnected"><strong>No live calendar events are entering the system.</strong><p>The EODHD adapter is ready, but a free API key does not include economic events. Activate the Fundamentals Data Feed entitlement, then run a bounded trial. The hourly schedule stays disabled until that trial succeeds.</p></div>
+  <div class="calendar-disconnected"><strong>Official adapters are configured.</strong><p>The first bounded scheduled collection will populate upcoming events; no sample events are fabricated.</p></div>
   {% endif %}
-  <div class="section-heading research-heading provider-comparison"><div><p class="eyebrow">PROVIDER LAB</p><h2>Purchase path</h2></div><span class="quiet">Evaluation evidence, not production health</span></div>
-  <div class="table-scroll"><table><thead><tr><th>Provider</th><th>Status</th><th>Pricing</th><th>Release timestamps</th><th>Revisions</th><th>Retention rights</th><th>Reliability</th></tr></thead><tbody>{% for evaluation in provider_evaluations %}<tr><td data-label="Provider"><strong><a href="{{ evaluation.evidence_url }}" rel="noopener noreferrer" target="_blank">{{ evaluation.provider }} ↗</a></strong><small>{{ evaluation.next_check }}</small></td><td data-label="Status"><span class="state warning">{{ evaluation.get_status_display|upper }}</span></td><td data-label="Pricing">{{ evaluation.pricing_status }}</td><td data-label="Release timestamps">{{ evaluation.timestamp_semantics }}</td><td data-label="Revisions">{{ evaluation.revision_support }}</td><td data-label="Retention rights">{{ evaluation.retention_rights }}</td><td data-label="Reliability">{{ evaluation.reliability_result }}</td></tr>{% empty %}<tr><td colspan="7">No provider is under evaluation.</td></tr>{% endfor %}</tbody></table></div>
+  <div class="section-heading research-heading provider-comparison"><div><p class="eyebrow">SOURCE DECISION</p><h2>Official core and optional enrichment</h2></div><span class="quiet">Consensus remains optional and separate</span></div>
+  <div class="table-scroll"><table><thead><tr><th>Provider</th><th>Status</th><th>Pricing</th><th>Release timestamps</th><th>Revisions</th><th>Retention rights</th><th>Reliability</th></tr></thead><tbody>{% for evaluation in provider_evaluations %}<tr><td data-label="Provider"><strong><a href="{{ evaluation.evidence_url }}" rel="noopener noreferrer" target="_blank">{{ evaluation.provider }} ↗</a></strong><small>{{ evaluation.next_check }}</small></td><td data-label="Status"><span class="state {% if evaluation.status == 'selected' %}healthy{% else %}warning{% endif %}">{{ evaluation.get_status_display|upper }}</span></td><td data-label="Pricing">{{ evaluation.pricing_status }}</td><td data-label="Release timestamps">{{ evaluation.timestamp_semantics }}</td><td data-label="Revisions">{{ evaluation.revision_support }}</td><td data-label="Retention rights">{{ evaluation.retention_rights }}</td><td data-label="Reliability">{{ evaluation.reliability_result }}</td></tr>{% empty %}<tr><td colspan="7">No provider is under evaluation.</td></tr>{% endfor %}</tbody></table></div>
 </section>
 {% endblock %}

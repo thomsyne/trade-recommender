@@ -11,11 +11,18 @@ from research.models import (
     DocumentRepresentation,
     EconomicEvent,
     MacroObservation,
+    MacroSeries,
     RawRetrieval,
     ResearchDiscrepancy,
     ResearchDocument,
 )
-from research.parsers import ParseRejected, parse_eodhd_events, parse_feed, parse_macro
+from research.parsers import (
+    ParseRejected,
+    parse_eodhd_events,
+    parse_feed,
+    parse_macro,
+    parse_official_calendar,
+)
 
 
 def ingest_feed(policy, url, *, transport=None, resolver=None, now=None):
@@ -246,6 +253,81 @@ def ingest_eodhd_calendar(policy, api_token, *, transport=None, resolver=None, n
             )
             created += int(was_created)
         _audit("research.calendar_ingested", retrieval, {"events": len(values), "created": created})
+    return retrieval
+
+
+def ingest_official_calendar(policy, parser, url, *, transport=None, resolver=None, now=None):
+    observed_at = now or datetime.now(UTC)
+    options = {"transport": transport, "now": now}
+    if resolver is not None:
+        options["resolver"] = resolver
+    result = fetch(policy, url, **options)
+    try:
+        parsed_values = parse_official_calendar(parser, result.body)
+        window_start = observed_at - timedelta(days=7)
+        window_end = observed_at + timedelta(days=550)
+        values = [item for item in parsed_values if window_start <= item.event_at <= window_end]
+        if not values:
+            raise ParseRejected(
+                "Official calendar contains no events in the bounded forward window"
+            )
+    except (ParseRejected, ValueError, KeyError, TypeError):
+        with transaction.atomic():
+            retrieval = _store_raw(
+                policy,
+                result,
+                quality=RawRetrieval.Quality.QUARANTINED,
+                quality_reason="Official calendar parsing failed closed",
+            )
+            _audit("research.calendar_quarantined", retrieval, {"parser": parser})
+        raise
+    series_by_code = {
+        item.code: item
+        for item in MacroSeries.objects.filter(
+            code__in={item.series_code for item in values if item.series_code}
+        )
+    }
+    with transaction.atomic():
+        retrieval = _store_raw(policy, result)
+        created = 0
+        for item in values:
+            identity = _digest(f"{policy.slug}|{item.provider_event_key}")
+            payload = {
+                "event_at": item.event_at.isoformat(),
+                "event_type": item.event_type,
+                "period": item.period,
+                "source_url": item.source_url,
+                "status": item.status,
+                "time_precision": item.time_precision,
+                "series_code": item.series_code,
+            }
+            fingerprint = _digest(json.dumps(payload, sort_keys=True))
+            _, was_created = EconomicEvent.objects.get_or_create(
+                provider_event_key=identity,
+                payload_fingerprint=fingerprint,
+                defaults={
+                    "retrieval": retrieval,
+                    "series": series_by_code.get(item.series_code),
+                    "event_at": item.event_at,
+                    "time_precision": item.time_precision,
+                    "country": item.country,
+                    "event_type": item.event_type,
+                    "source_url": item.source_url,
+                    "status": item.status,
+                    "comparison": item.comparison,
+                    "period": item.period,
+                    "actual": None,
+                    "estimate": None,
+                    "previous": None,
+                    "first_observed_at": result.fetched_at,
+                },
+            )
+            created += int(was_created)
+        _audit(
+            "research.calendar_ingested",
+            retrieval,
+            {"events": len(values), "created": created, "parser": parser},
+        )
     return retrieval
 
 
