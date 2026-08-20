@@ -338,11 +338,18 @@ logical deliveries are deduplicated with uncertain attempts retained, and
 versioned assessments do not drift with current constants. Portfolio
 over-admission is tested in Slice 2 when admission exists.
 
-### Slice 2 — Prospective admission and owner selection
+### Slice 2 — Prospective admission and owner selection — complete
 
 Add policy-effective boundary, legacy classification, capacity assessments,
 competing cohorts, immutable/superseding owner selections, admissions, selector
 cards, dashboard inbox, Gmail notifications, and audit history.
+
+Implemented with an explicit policy activation timestamp, serialized portfolio
+guard, append-only cohorts/selections/admission events, trigger-aware cohort
+closure, confidence-labelled selector cards, owner-only POST/CSRF controls,
+dashboard notifications, and a controlled Gmail SMTP adapter over the durable
+outbox. Real Gmail delivery remains disabled until deployment secrets and the
+canonical URL are configured.
 
 **Gate:** every recommendation remains scoreable; stale/duplicate POSTs fail
 closed; trigger/expiry/new-batch closure is deterministic; confidence displays

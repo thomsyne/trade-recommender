@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Inbox · FX Forecast Lab{% endblock %}
+{% block content %}
+<header class="page-header"><div><p class="eyebrow">OWNER DECISIONS</p><h1>Research inbox</h1><p class="lede">Choose which competing setups enter paper monitoring. Every recommendation remains frozen and scored whether selected or not.</p></div><div class="calibration-status"><span>AUTHORITY</span><strong>OWNER ONLY</strong><small>Email links here; it never approves</small></div></header>
+
+{% for item in cohorts %}
+<section class="selector-panel" id="cohort-{{ item.cohort.pk }}">
+  <div class="panel-head"><div><p class="eyebrow">COHORT {{ item.cohort.pk }} · {{ item.cohort.policy_key }}-v{{ item.cohort.policy_version }}</p><h2>{% if item.open %}Select the setups worth monitoring{% else %}Closed decision cohort{% endif %}</h2></div><span class="state {% if item.open %}warning{% else %}foundation{% endif %}">{% if item.open %}ACTIONABLE{% else %}CLOSED{% endif %}</span></div>
+  <p class="quiet">Issued {{ item.cohort.generated_at|date:"M j, Y H:i" }} UTC · Confidence is uncalibrated context and is never used to rank or allocate capacity.</p>
+  <form method="post" action="{% url 'select-cohort' item.cohort.pk %}" class="cohort-selector" data-cohort="{{ item.cohort.pk }}">
+    {% csrf_token %}
+    {{ item.cohort.capacity_snapshot|json_script:item.cohort.idempotency_key }}
+    <div class="selector-cards">
+      {% for member in item.members %}
+      <label class="selector-card {% if member.recommendation_id in item.selected_ids %}selected{% endif %}">
+        <input type="checkbox" name="recommendation" value="{{ member.recommendation_id }}" data-risk="{{ member.projected_risk_cad }}" data-legs="{% for leg in member.currency_legs %}{{ leg.currency }}:{{ leg.direction }}{% if not forloop.last %},{% endif %}{% endfor %}" {% if member.recommendation_id in item.selected_ids %}checked{% endif %} {% if not item.open %}disabled{% endif %}>
+        <div class="selector-card-head"><div><span>{{ member.recommendation.instrument }}</span><strong>{{ member.recommendation.get_action_display|upper }}</strong></div><div class="confidence"><strong>{{ member.recommendation.confidence_percent }}%</strong><small>uncalibrated</small></div></div>
+        <p>{{ member.recommendation.output.summary }}</p>
+        <div class="selector-levels"><span>Entry<strong>{{ member.recommendation.entry_level }}</strong></span><span>Target<strong>{{ member.recommendation.target_level }}</strong></span><span>Invalidation<strong>{{ member.recommendation.invalidation_level }}</strong></span></div>
+        <div class="selector-foot"><span>C${{ member.projected_risk_cad }} paper risk</span><span>{{ member.position_size.recommended_units }} units</span></div>
+      </label>
+      {% endfor %}
+    </div>
+    <div class="capacity-preview" data-capacity-preview><div><span>Selected risk</span><strong data-total-risk>—</strong></div><div><span>Largest currency direction</span><strong data-largest-direction>—</strong></div><div><span>Policy result</span><strong data-policy-result>—</strong></div>{% if item.open %}<button class="primary-button" type="submit">Record immutable selection</button>{% endif %}</div>
+  </form>
+  {% if item.selection %}<p class="selection-history">Latest decision: {{ item.selection.get_mode_display }} at {{ item.selection.selected_at|date:"M j H:i:s" }} UTC{% if item.selection.supersedes_id %} · supersedes selection {{ item.selection.supersedes_id }}{% endif %}</p>{% endif %}
+</section>
+{% empty %}
+<section class="empty-decision"><p class="eyebrow">NO COHORTS YET</p><h2>The next complete recommendation batch starts prospective admission.</h2><p>Existing recommendations remain research-only. New batches will be automatically admitted when all setups fit, or appear here when your choice is required.</p></section>
+{% endfor %}
+
+<section class="table-panel notification-ledger"><div class="panel-head"><div><p class="eyebrow">CHRONOLOGICAL INBOX</p><h2>Owner notifications</h2></div><span>{{ notifications|length }} shown</span></div><div class="notification-list">{% for notification in notifications %}<article><span class="state {% if notification.severity == 'action' or notification.severity == 'warning' %}warning{% else %}foundation{% endif %}">{{ notification.get_severity_display|upper }}</span><div><strong>{{ notification.title }}</strong><p>{{ notification.body }}</p><small>{{ notification.created_at|date:"M j H:i:s" }} UTC</small></div>{% if notification.action_path %}<a href="{{ notification.action_path }}">Review</a>{% endif %}</article>{% empty %}<p class="quiet">No notifications yet.</p>{% endfor %}</div></section>
+<div class="evidence-boundary"><strong>Paper admission only</strong><span>Your selection controls prospective paper monitoring. It does not place an order, change recommendation confidence, or erase unselected research outcomes.</span></div>
+{% endblock %}

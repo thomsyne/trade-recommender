@@ -31,6 +31,25 @@ class DashboardTests(TestCase):
         response = self.client.get(reverse("today"))
         self.assertRedirects(response, f"{reverse('login')}?next=/")
 
+    def test_authenticated_non_owner_is_forbidden(self):
+        non_owner = get_user_model().objects.create_user(username="viewer", password="test-only")
+        self.client.force_login(non_owner)
+
+        for name in (
+            "today",
+            "inbox",
+            "research",
+            "operations",
+            "calibration",
+            "paper-trades",
+            "exposure",
+        ):
+            self.assertEqual(self.client.get(reverse(name)).status_code, 403)
+        self.assertEqual(
+            self.client.get(reverse("market-detail", args=("USD_CAD",))).status_code,
+            403,
+        )
+
     def test_today_shows_four_pairs_and_locked_fixture_baselines(self):
         self.client.force_login(self.user)
         response = self.client.get(reverse("today"))

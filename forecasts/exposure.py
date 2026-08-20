@@ -18,8 +18,11 @@ CURRENCY_SETUP_BUDGET = 2
 
 
 def active_directional_recommendations():
+    from forecasts.portfolio import active_admitted_recommendation_ids
+
     return (
         Recommendation.objects.filter(
+            pk__in=active_admitted_recommendation_ids(),
             contract_version__in=(2, 3),
             action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
             paper_result__isnull=True,

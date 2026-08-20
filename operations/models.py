@@ -157,3 +157,23 @@ class ProviderBudgetReservation(models.Model):
     budget_at = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+
+class OwnerNotification(models.Model):
+    class Severity(models.TextChoices):
+        INFO = "info", "Information"
+        ACTION = "action", "Action required"
+        WARNING = "warning", "Warning"
+
+    idempotency_key = models.CharField(max_length=200, unique=True)
+    kind = models.CharField(max_length=80)
+    severity = models.CharField(max_length=12, choices=Severity)
+    title = models.CharField(max_length=160)
+    body = models.TextField()
+    action_path = models.CharField(max_length=240, blank=True)
+    subject_type = models.CharField(max_length=80)
+    subject_id = models.CharField(max_length=120)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-created_at", "-id")

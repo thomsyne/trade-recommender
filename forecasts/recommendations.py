@@ -317,6 +317,9 @@ def generate_all_recommendations(*, provider=None, generated_at=None, allow_fixt
             recommendations.append(recommendation)
     if failures:
         raise RuntimeError("Recommendation batch incomplete — " + "; ".join(failures))
+    from forecasts.portfolio import assess_recommendation_batch
+
+    assess_recommendation_batch(recommendations, generated_at=generated_at)
     return recommendations
 
 

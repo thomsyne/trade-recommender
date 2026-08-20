@@ -1,5 +1,6 @@
 from decimal import ROUND_HALF_UP, Decimal
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
@@ -763,3 +764,115 @@ class PortfolioGuard(models.Model):
 
     class Meta:
         ordering = ("key",)
+
+
+class PortfolioCohort(ImmutableModel):
+    idempotency_key = models.CharField(max_length=240, unique=True)
+    policy_key = models.CharField(max_length=80)
+    policy_version = models.PositiveSmallIntegerField()
+    generated_at = models.DateTimeField()
+    capacity_snapshot = models.JSONField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-generated_at", "-id")
+
+
+class PortfolioPolicyActivation(ImmutableModel):
+    policy_key = models.CharField(max_length=80)
+    policy_version = models.PositiveSmallIntegerField()
+    effective_at = models.DateTimeField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("policy_key", "policy_version"),
+                name="unique_portfolio_policy_activation",
+            )
+        ]
+
+
+class PortfolioCohortMember(ImmutableModel):
+    cohort = models.ForeignKey(PortfolioCohort, on_delete=models.PROTECT, related_name="members")
+    recommendation = models.OneToOneField(
+        Recommendation, on_delete=models.PROTECT, related_name="portfolio_membership"
+    )
+    position_size = models.ForeignKey(PositionSizeAdvice, on_delete=models.PROTECT)
+    projected_risk_cad = models.DecimalField(max_digits=12, decimal_places=2)
+    currency_legs = models.JSONField()
+    eligible = models.BooleanField(default=True)
+    reason_code = models.CharField(max_length=80, blank=True)
+
+    class Meta:
+        ordering = ("recommendation__instrument__display_order", "recommendation_id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("cohort", "recommendation"), name="unique_portfolio_cohort_member"
+            )
+        ]
+
+
+class PortfolioSelection(ImmutableModel):
+    class Mode(models.TextChoices):
+        AUTOMATIC = "automatic", "Automatic; all fit"
+        OWNER = "owner", "Owner selection"
+
+    cohort = models.ForeignKey(PortfolioCohort, on_delete=models.PROTECT, related_name="selections")
+    supersedes = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="superseded_by",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="portfolio_selections",
+    )
+    mode = models.CharField(max_length=12, choices=Mode)
+    idempotency_key = models.CharField(max_length=240, unique=True)
+    selected_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-selected_at", "-id")
+
+
+class PortfolioSelectionMember(ImmutableModel):
+    selection = models.ForeignKey(
+        PortfolioSelection, on_delete=models.PROTECT, related_name="selected_members"
+    )
+    recommendation = models.ForeignKey(Recommendation, on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("selection", "recommendation"),
+                name="unique_portfolio_selection_member",
+            )
+        ]
+
+
+class PortfolioAdmissionEvent(ImmutableModel):
+    class State(models.TextChoices):
+        ADMITTED = "admitted", "Admitted to paper portfolio"
+        REVOKED = "revoked", "Admission revoked while pending"
+
+    recommendation = models.ForeignKey(
+        Recommendation, on_delete=models.PROTECT, related_name="portfolio_admission_events"
+    )
+    cohort = models.ForeignKey(
+        PortfolioCohort, on_delete=models.PROTECT, related_name="admission_events"
+    )
+    selection = models.ForeignKey(
+        PortfolioSelection, on_delete=models.PROTECT, related_name="admission_events"
+    )
+    state = models.CharField(max_length=12, choices=State)
+    reason_code = models.CharField(max_length=80)
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("occurred_at", "id")

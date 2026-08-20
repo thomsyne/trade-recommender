@@ -107,3 +107,26 @@ RECOMMENDATION_OUTPUT_USD_PER_MTOK = Decimal(os.getenv("RECOMMENDATION_OUTPUT_US
 RECOMMENDATION_MAX_RUN_COST_USD = Decimal(os.getenv("RECOMMENDATION_MAX_RUN_COST_USD", "0.10"))
 RECOMMENDATION_DAILY_BUDGET_USD = Decimal(os.getenv("RECOMMENDATION_DAILY_BUDGET_USD", "2"))
 RECOMMENDATION_MONTHLY_BUDGET_USD = Decimal(os.getenv("RECOMMENDATION_MONTHLY_BUDGET_USD", "40"))
+
+EMAIL_DELIVERY_ENABLED = os.getenv("EMAIL_DELIVERY_ENABLED", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465"))
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "true").lower() in {"1", "true", "yes"}
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "false").lower() in {"1", "true", "yes"}
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER") or os.getenv("EMAIL_AUTH_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD") or os.getenv("EMAIL_AUTH_PASSWORD", "")
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL") or EMAIL_HOST_USER
+OWNER_EMAIL = os.getenv("OWNER_EMAIL", "")
+
+if EMAIL_DELIVERY_ENABLED and not all(
+    (PUBLIC_URL, EMAIL_HOST_USER, EMAIL_HOST_PASSWORD, DEFAULT_FROM_EMAIL, OWNER_EMAIL)
+):
+    raise RuntimeError(
+        "Email delivery requires PUBLIC_URL, EMAIL_HOST_USER, EMAIL_HOST_PASSWORD, "
+        "DEFAULT_FROM_EMAIL, and OWNER_EMAIL"
+    )

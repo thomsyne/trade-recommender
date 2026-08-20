@@ -1,19 +1,25 @@
 from datetime import timedelta
 
-from django.contrib.auth.decorators import login_required
+from django.conf import settings
+from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.db import connection
 from django.db.models import F
 from django.http import JsonResponse
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.views.decorators.http import require_POST
 
+from dashboard.auth import owner_required
 from forecasts.exposure import active_directional_recommendations, build_exposure_report
 from forecasts.models import (
     Forecast,
     PaperTradeResult,
+    PortfolioCohort,
     Recommendation,
     RecommendationResolution,
 )
+from forecasts.portfolio import cohort_is_open, select_portfolio_cohort
 from market.models import (
     AuditEvent,
     Candle,
@@ -23,7 +29,7 @@ from market.models import (
     SourceRegistry,
     TechnicalSnapshot,
 )
-from operations.models import JobOccurrence, ScheduledJob
+from operations.models import JobOccurrence, OutboxMessage, OwnerNotification, ScheduledJob
 from research.models import (
     EconomicEvent,
     MacroSeries,
@@ -43,7 +49,7 @@ def health(request):
     return JsonResponse({"status": "ok", "database": database})
 
 
-@login_required
+@owner_required
 def today(request):
     cards = []
     for instrument in Instrument.objects.filter(active=True):
@@ -85,7 +91,7 @@ def today(request):
     )
 
 
-@login_required
+@owner_required
 def market_detail(request, code):
     instrument = get_object_or_404(Instrument, code=code, active=True)
     granularity = request.GET.get("granularity", "H4")
@@ -189,7 +195,7 @@ def market_detail(request, code):
     )
 
 
-@login_required
+@owner_required
 def research(request):
     documents = ResearchDocument.objects.order_by(
         F("published_at").desc(nulls_last=True), "-first_observed_at"
@@ -375,7 +381,7 @@ def research(request):
     )
 
 
-@login_required
+@owner_required
 def calibration(request):
     resolutions = list(
         RecommendationResolution.objects.select_related("recommendation__instrument")
@@ -454,7 +460,7 @@ def calibration(request):
     )
 
 
-@login_required
+@owner_required
 def paper_trades(request):
     recommendations = list(
         Recommendation.objects.filter(
@@ -528,13 +534,69 @@ def paper_trades(request):
     )
 
 
-@login_required
+@owner_required
 def exposure(request):
     report = build_exposure_report(active_directional_recommendations())
     return render(request, "dashboard/exposure.html", report)
 
 
-@login_required
+@owner_required
+def inbox(request):
+    cohorts = []
+    for cohort in PortfolioCohort.objects.prefetch_related(
+        "members__recommendation__instrument",
+        "members__position_size",
+        "selections__selected_members",
+    )[:12]:
+        latest = cohort.selections.first()
+        selected_ids = (
+            set(latest.selected_members.values_list("recommendation_id", flat=True))
+            if latest
+            else set()
+        )
+        cohorts.append(
+            {
+                "cohort": cohort,
+                "members": list(cohort.members.all()),
+                "selection": latest,
+                "selected_ids": selected_ids,
+                "open": cohort_is_open(cohort),
+            }
+        )
+    return render(
+        request,
+        "dashboard/inbox.html",
+        {
+            "cohorts": cohorts,
+            "notifications": OwnerNotification.objects.all()[:30],
+        },
+    )
+
+
+@owner_required
+@require_POST
+def select_cohort(request, cohort_id):
+    cohort = get_object_or_404(PortfolioCohort, pk=cohort_id)
+    try:
+        selection = select_portfolio_cohort(
+            cohort,
+            request.POST.getlist("recommendation"),
+            actor=request.user,
+        )
+    except (ValidationError, ValueError) as error:
+        messages.error(
+            request, "; ".join(error.messages) if hasattr(error, "messages") else str(error)
+        )
+    else:
+        count = selection.selected_members.count()
+        messages.success(
+            request,
+            f"Selection recorded. {count} setup{'s' if count != 1 else ''} admitted to paper monitoring.",
+        )
+    return redirect("inbox")
+
+
+@owner_required
 def operations(request):
     recommendation_run = JobOccurrence.objects.filter(
         task_name="forecast.generate_recommendations"
@@ -560,5 +622,7 @@ def operations(request):
             "recommendation_run": recommendation_run,
             "failed_recommendation_runs": failed_recommendation_runs,
             "active_pair_count": Instrument.objects.filter(active=True).count(),
+            "outbox_messages": OutboxMessage.objects.all()[:20],
+            "email_delivery_enabled": settings.EMAIL_DELIVERY_ENABLED,
         },
     )

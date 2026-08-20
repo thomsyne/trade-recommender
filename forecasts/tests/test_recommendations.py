@@ -20,6 +20,7 @@ from forecasts.models import (
     Recommendation,
 )
 from forecasts.paper import resolve_paper_trade
+from forecasts.portfolio import assess_recommendation_batch
 from forecasts.recommendations import (
     AnthropicProvider,
     ProviderResult,
@@ -33,7 +34,7 @@ from market.tests.factories import candle
 from research.models import PairEvidenceSnapshot
 
 
-def evidence(instrument, captured_at=None, market_as_of=None):
+def evidence(instrument, captured_at=None, market_as_of=None, sha256=None):
     captured_at = captured_at or timezone.now()
     market_as_of = market_as_of or captured_at
     payload = {
@@ -94,7 +95,7 @@ def evidence(instrument, captured_at=None, market_as_of=None):
         instrument=instrument,
         information_cutoff=captured_at,
         payload=payload,
-        sha256=("a" if not PairEvidenceSnapshot.objects.exists() else "b") * 64,
+        sha256=sha256 or ("a" if not PairEvidenceSnapshot.objects.exists() else "b") * 64,
         captured_at=captured_at,
     )
 
@@ -206,6 +207,10 @@ class RecommendationTests(TestCase):
         )
         self.now = timezone.now() + timedelta(seconds=1)
         self.snapshot = evidence(self.instrument, self.now)
+
+    def admit(self, recommendation):
+        size_recommendation(recommendation, sized_at=recommendation.generated_at)
+        assess_recommendation_batch([recommendation], generated_at=recommendation.generated_at)
 
     def test_generation_is_bounded_immutable_audited_and_idempotent(self):
         provider = FakeProvider()
@@ -357,6 +362,7 @@ class RecommendationTests(TestCase):
             provider=FakeProvider(),
             generated_at=self.now + timedelta(seconds=1),
         )
+        self.admit(recommendation)
         first = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
             hours=1
         )
@@ -414,6 +420,7 @@ class RecommendationTests(TestCase):
             provider=FakeProvider(),
             generated_at=self.now + timedelta(seconds=1),
         )
+        self.admit(recommendation)
         first = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
             hours=1
         )
@@ -451,6 +458,7 @@ class RecommendationTests(TestCase):
             provider=FakeProvider(),
             generated_at=self.now + timedelta(seconds=1),
         )
+        self.admit(recommendation)
         late = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
             hours=3
         )
@@ -473,6 +481,7 @@ class RecommendationTests(TestCase):
             provider=FakeProvider(),
             generated_at=self.now + timedelta(seconds=1),
         )
+        self.admit(recommendation)
         first_daily = (recommendation.reference_candle.timestamp + timedelta(days=1)).replace(
             minute=0, second=0, microsecond=0
         )
@@ -605,6 +614,7 @@ class RecommendationDatabaseTests(TransactionTestCase):
         self.assertEqual(
             PositionSizeAdvice.objects.filter(recommendation=recommendation).count(), 1
         )
+        assess_recommendation_batch([recommendation], generated_at=recommendation.generated_at)
 
         with self.assertRaises(DatabaseError), transaction.atomic():
             Recommendation.objects.filter(pk=recommendation.pk).update(confidence_percent=99)

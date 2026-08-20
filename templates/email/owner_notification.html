@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<body style="background:#f5f3ed;color:#15211c;font-family:Arial,sans-serif;margin:0;padding:28px">
+  <div style="background:#fffefa;border:1px solid #deddd4;border-radius:12px;margin:auto;max-width:620px;padding:28px">
+    <p style="color:#718078;font-size:12px;font-weight:bold;letter-spacing:.12em;margin:0 0 10px">FX FORECAST LAB</p>
+    <h1 style="font-size:24px;margin:0 0 16px">{{ notification.title }}</h1>
+    <p style="font-size:16px;line-height:1.55">{{ notification.body }}</p>
+    {% if action_url %}<p style="margin:24px 0"><a href="{{ action_url }}" style="background:#164c3b;border-radius:7px;color:white;display:inline-block;padding:12px 18px;text-decoration:none">Review securely</a></p>{% endif %}
+    <p style="border-top:1px solid #deddd4;color:#718078;font-size:12px;line-height:1.5;margin-top:24px;padding-top:16px">Research and paper-trading only. This email cannot approve a decision or place an order.</p>
+  </div>
+</body>
+</html>

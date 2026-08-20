@@ -91,6 +91,16 @@ and delivery-attempt records are ready for later Gmail delivery, and serialized
 provider-budget reservations prevent concurrent authorization from exceeding
 declared caps. No real email adapter is enabled.
 
+Prospective portfolio admission is now implemented. A versioned activation
+timestamp keeps all earlier recommendations research-only. Complete new batches
+are assessed under one serialized CAD-risk policy: all-fitting sets are admitted
+automatically, while competing sets create an owner-only inbox decision. Owner
+selections are append-only, idempotent, and may only be superseded before any
+cohort member's entry price triggers. Confidence is displayed as uncalibrated
+context and never ranks or allocates capacity. The Gmail SMTP adapter uses the
+transactional outbox and controlled templates but remains disabled until the
+settings in `docs/gmail-notifications.md` are supplied.
+
 ## Verification gate
 
 Run:
@@ -109,11 +119,9 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Implement Slice 2 from `docs/governed-learning-map.md`: prospective portfolio
-admission, competing owner-selection cohorts, dashboard inbox/selector, and the
-Gmail adapter. Use the portfolio guard, versioned assessment, outbox, lease, and
-calendar primitives introduced in Slice 1. Do not send real email until the
-owner supplies and approves deployment configuration.
+Implement Slice 3 from `docs/governed-learning-map.md`: frozen deterministic
+thesis, execution, and reconciliation postmortems with explicit missing-data
+coverage, source lineage, notebook presentation, and chronological timeline.
 
 ## Still OPEN
 

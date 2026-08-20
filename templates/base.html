@@ -13,6 +13,7 @@
       <a class="brand" href="{% url 'today' %}"><span class="brand-mark">F</span><span>FX Forecast Lab<small>Research instrument</small></span></a>
       <nav>
         <a class="nav-link {% if request.resolver_match.url_name == 'today' %}active{% endif %}" href="{% url 'today' %}"><span>01</span>Today</a>
+        <a class="nav-link {% if request.resolver_match.url_name == 'inbox' %}active{% endif %}" href="{% url 'inbox' %}"><span>!</span>Inbox</a>
         <p class="nav-label">Markets</p>
         {% for nav_market in instruments_navigation %}
         <a class="nav-link {% if request.resolver_match.kwargs.code == nav_market.code %}active{% endif %}" href="{% url 'market-detail' nav_market.code %}"><span>·</span>{{ nav_market }}</a>
@@ -34,6 +35,7 @@
       </div>
     </aside>
     <main class="main">
+      {% if messages %}<div class="message-stack">{% for message in messages %}<div class="app-message {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
       {% block content %}{% endblock %}
     </main>
   </div>

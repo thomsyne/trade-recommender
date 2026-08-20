@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from django.core.management.base import BaseCommand
 
+from operations.email_delivery import deliver_one_email
 from operations.services import claim_next_job, finish_job, heartbeat_job
 from operations.tasks import execute_task
 
@@ -39,7 +40,8 @@ class Command(BaseCommand):
                         else:
                             finish_job(occurrence, worker_id)
                             break
+                email_delivered = deliver_one_email(worker_id)
                 if options["once"]:
                     return
-                if not occurrence:
+                if not occurrence and not email_delivered:
                     time.sleep(5)

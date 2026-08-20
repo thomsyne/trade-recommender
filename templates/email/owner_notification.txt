@@ -1,0 +1,11 @@
+FX Forecast Lab
+
+{{ notification.title }}
+
+{{ notification.body }}
+{% if action_url %}
+Review in the authenticated dashboard:
+{{ action_url }}
+{% endif %}
+
+Research and paper-trading only. This email cannot approve a decision or place an order.

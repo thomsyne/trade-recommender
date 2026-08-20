@@ -49,6 +49,10 @@ def resolve_paper_trade(recommendation):
         or recommendation.action == Recommendation.Action.ABSTAIN
     ):
         return None
+    from forecasts.portfolio import active_admitted_recommendation_ids
+
+    if recommendation.pk not in active_admitted_recommendation_ids():
+        return None
     lifecycle = recommendation.paper_lifecycle_events.order_by("-occurred_at", "-id").first()
     if not lifecycle or lifecycle.state in {
         PaperLifecycleEvent.State.LEGACY_UNADJUDICATED,

@@ -52,4 +52,37 @@
       );
     });
   };
+
+  document.querySelectorAll(".cohort-selector").forEach((form) => {
+    const script = form.querySelector('script[type="application/json"]');
+    if (!script) return;
+    const policy = JSON.parse(script.textContent);
+    const boxes = Array.from(form.querySelectorAll('input[type="checkbox"]'));
+    const update = () => {
+      let total = Number(policy.base_total_risk_cad || 0);
+      const directions = Object.fromEntries(
+        Object.entries(policy.base_currency_direction_risk_cad || {}).map(([key, value]) => [key, Number(value)]),
+      );
+      boxes.forEach((box) => {
+        box.closest(".selector-card").classList.toggle("selected", box.checked);
+        if (!box.checked) return;
+        const risk = Number(box.dataset.risk);
+        total += risk;
+        box.dataset.legs.split(",").filter(Boolean).forEach((leg) => {
+          directions[leg] = (directions[leg] || 0) + risk;
+        });
+      });
+      const largest = Math.max(0, ...Object.values(directions));
+      const valid = total <= Number(policy.aggregate_risk_cap_cad) && largest <= Number(policy.currency_direction_risk_cap_cad);
+      form.querySelector("[data-total-risk]").textContent = `C$${total.toFixed(0)} / C$${Number(policy.aggregate_risk_cap_cad).toFixed(0)}`;
+      form.querySelector("[data-largest-direction]").textContent = `C$${largest.toFixed(0)} / C$${Number(policy.currency_direction_risk_cap_cad).toFixed(0)}`;
+      const result = form.querySelector("[data-policy-result]");
+      result.textContent = valid ? "FITS" : "EXCEEDS CAP";
+      result.classList.toggle("invalid", !valid);
+      const submit = form.querySelector('button[type="submit"]');
+      if (submit) submit.disabled = !valid;
+    };
+    boxes.forEach((box) => box.addEventListener("change", update));
+    update();
+  });
 })();

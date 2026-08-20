@@ -31,6 +31,10 @@ separate point-in-time evidence ledger.
   with bounded New York rollover counts and separate net-pip/net-R views;
 - hourly private OANDA account-term snapshots with prospective long/short
   financing schedules and explicit missing-commission state;
+- prospective, capacity-limited paper-portfolio admission with immutable cohorts,
+  automatic all-fit decisions, and owner selection for competing setups;
+- an owner-only research inbox plus optional Gmail notifications delivered from
+  the durable outbox with authenticated in-app decisions;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
 - bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
   response-size protections;
@@ -101,6 +105,7 @@ development topology, not the hardened AWS deployment.
 - [Architecture](docs/architecture.md)
 - [Project map and roadmap](docs/project-map.md)
 - [Current handoff](docs/handoff.md)
+- [Gmail owner notifications](docs/gmail-notifications.md)
 - [OANDA provider contract](docs/providers/oanda.md)
 - [Forecast contract](docs/forecast-contract.md)
 - [Governed recommendation contract](docs/recommendation-contract.md)

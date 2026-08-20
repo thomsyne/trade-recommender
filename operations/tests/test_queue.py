@@ -3,10 +3,12 @@ from datetime import time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from django.core import mail
 from django.db import close_old_connections
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
+from operations.email_delivery import deliver_one_email
 from operations.models import (
     DeliveryAttempt,
     JobOccurrence,
@@ -14,6 +16,7 @@ from operations.models import (
     ProviderBudget,
     ScheduledJob,
 )
+from operations.notifications import create_owner_notification
 from operations.services import (
     claim_next_job,
     claim_outbox,
@@ -183,6 +186,33 @@ class DurableQueueTests(TestCase):
         second = reserve_provider_budget("anthropic", "review", "request:2", "1.00")
         self.assertIsNotNone(second)
         self.assertTrue(mark_provider_budget_uncertain(second))
+
+    @override_settings(
+        EMAIL_DELIVERY_ENABLED=True,
+        EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+        PUBLIC_URL="https://research.example",
+        DEFAULT_FROM_EMAIL="lab@example.com",
+        OWNER_EMAIL="owner@example.com",
+    )
+    def test_controlled_owner_email_is_delivered_once_through_outbox(self):
+        notification = create_owner_notification(
+            idempotency_key="selection:1",
+            kind="portfolio_selection_required",
+            severity="action",
+            title="Choose paper setups",
+            body="Two setups compete for the same USD risk capacity.",
+            action_path="/inbox/#cohort-1",
+            subject_type="PortfolioCohort",
+            subject_id="1",
+        )
+
+        self.assertTrue(deliver_one_email("mail-worker"))
+        message = OutboxMessage.objects.get(payload={"notification_id": notification.pk})
+        self.assertEqual(message.status, OutboxMessage.Status.SENT)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["owner@example.com"])
+        self.assertIn("https://research.example/inbox/#cohort-1", mail.outbox[0].body)
+        self.assertFalse(deliver_one_email("mail-worker"))
 
 
 class BudgetConcurrencyTests(TransactionTestCase):
