@@ -76,6 +76,10 @@ python3 deploy/scripts/render-deploy-iam-policy.py \
 python3 -m json.tool /tmp/trade-recommender-github-deploy.json >/dev/null
 ```
 
+If the deploy user and policy already exist, replace the customer-managed
+policy's JSON with the newly generated document before deploying a policy
+change. Committing the generator does not update IAM automatically.
+
 In the AWS console:
 
 1. Open **IAM → Policies → Create policy → JSON**, paste the generated JSON,
@@ -98,8 +102,11 @@ role created by Terraform can read that exact parameter.
 
 AWS does not support useful resource ARNs for several required control-plane
 operations. Consequently, `sts:GetCallerIdentity`, ECR authorization,
-EC2 `Describe*`, SSM managed-instance discovery/command-result polling, and the
-EC2 create/update/delete APIs use `Resource: "*"`. EC2 mutations are still
+Route 53 hosted-zone discovery, EC2 `Describe*`, SSM managed-instance
+discovery/command-result polling, and the EC2 create/update/delete APIs use
+`Resource: "*"`. Route 53's `ListHostedZones` API cannot be limited to the
+configured zone; record reads and writes remain restricted to its exact ARN.
+EC2 mutations are still
 restricted to `us-east-1`, and Terraform applies the `Application =
 trade-recommender`, `ManagedBy = Terraform`, and `Environment = research` tags.
 `RunInstances` and related VPC APIs must authorize several not-yet-created or

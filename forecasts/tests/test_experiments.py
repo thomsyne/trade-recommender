@@ -62,7 +62,9 @@ class ExperimentHealthTests(TestCase):
             [candle(reference_at)],
             {"test": "experiment-reference", "requests": []},
         )
-        self.started_at = timezone.now()
+        self.started_at = (timezone.now() + timedelta(days=1)).replace(
+            hour=12, minute=0, second=0, microsecond=0
+        )
         evidence(self.instrument, self.started_at)
         self.base = generate_recommendation(
             self.instrument,
@@ -187,10 +189,9 @@ class ExperimentHealthTests(TestCase):
             )
 
         assessed_at = self.started_at + timedelta(days=200)
+        reassessed_at = assessed_at + timedelta(hours=1)
         assessment = refresh_experiment_assessment(self.era, assessed_at=assessed_at)
-        repeated = refresh_experiment_assessment(
-            self.era, assessed_at=assessed_at + timedelta(hours=1)
-        )
+        repeated = refresh_experiment_assessment(self.era, assessed_at=reassessed_at)
 
         self.assertEqual(repeated, assessment)
         self.assertEqual(assessment.raw_sample_count, 50)

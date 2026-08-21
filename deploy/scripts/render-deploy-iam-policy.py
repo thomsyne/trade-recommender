@@ -23,6 +23,12 @@ def policy(account_id, zone_id):
                 "Resource": "*",
             },
             {
+                "Sid": "DiscoverRoute53HostedZones",
+                "Effect": "Allow",
+                "Action": "route53:ListHostedZones",
+                "Resource": "*",
+            },
+            {
                 "Sid": "DiscoverRegionalResourcesAndCommandStatus",
                 "Effect": "Allow",
                 "Action": [
