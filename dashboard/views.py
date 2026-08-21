@@ -12,15 +12,19 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from dashboard.auth import owner_required
+from forecasts.experiments import latest_champion_health, record_promotion_decision
 from forecasts.exposure import active_directional_recommendations, build_exposure_report
 from forecasts.interpretations import authorize_candidate_hypothesis
 from forecasts.models import (
     CandidateHypothesis,
     DeterministicReview,
+    ExperimentAssessment,
+    ExperimentEra,
     Forecast,
     LearningObservation,
     PaperTradeResult,
     PortfolioCohort,
+    PromotionRecord,
     Recommendation,
     RecommendationResolution,
     ReviewCohort,
@@ -571,6 +575,45 @@ def research(request):
 
 @owner_required
 def calibration(request):
+    experiment_era, experiment_assessment = latest_champion_health()
+    experiment_attempt = experiment_era.assessment_attempts.first() if experiment_era else None
+    experiment_refresh_failed = bool(
+        experiment_attempt and experiment_attempt.status == experiment_attempt.Status.FAILED
+    )
+    experiment_rows = []
+    for era in ExperimentEra.objects.select_related(
+        "method", "evaluation_policy", "authorization__hypothesis", "champion_era"
+    ).prefetch_related("promotion_records"):
+        latest_attempt = era.assessment_attempts.first()
+        assessment = ExperimentAssessment.objects.filter(attempt__era=era).first()
+        experiment_rows.append(
+            {
+                "era": era,
+                "assessment": assessment,
+                "latest_attempt": latest_attempt,
+                "refresh_failed": bool(
+                    latest_attempt and latest_attempt.status == latest_attempt.Status.FAILED
+                ),
+                "latest_decision": era.promotion_records.first(),
+            }
+        )
+    policy = experiment_era.evaluation_policy if experiment_era else None
+    health_status = (
+        experiment_assessment.status
+        if experiment_assessment
+        else ExperimentAssessment.Status.COLLECTING
+    )
+    health_status_label = (
+        "REFRESH FAILED"
+        if experiment_refresh_failed
+        else {
+            ExperimentAssessment.Status.COLLECTING: "COLLECTING",
+            ExperimentAssessment.Status.COVERAGE_LIMITED: "COVERAGE LIMITED",
+            ExperimentAssessment.Status.GUARDRAIL_FAILED: "GUARDRAIL FAILED",
+            ExperimentAssessment.Status.DESCRIPTIVE_READY: "DESCRIPTIVE READY",
+            ExperimentAssessment.Status.PROMOTION_ELIGIBLE: "OWNER REVIEW",
+        }[health_status]
+    )
     resolutions = list(
         RecommendationResolution.objects.select_related("recommendation__instrument")
     )
@@ -635,8 +678,20 @@ def calibration(request):
                 if resolutions
                 else None
             ),
-            "mature": len(resolutions) >= 30,
-            "remaining": max(0, 30 - len(resolutions)),
+            "experiment_era": experiment_era,
+            "experiment_assessment": experiment_assessment,
+            "experiment_attempt": experiment_attempt,
+            "experiment_refresh_failed": experiment_refresh_failed,
+            "experiment_rows": experiment_rows,
+            "experiment_policy": policy,
+            "health_status": health_status,
+            "health_status_label": health_status_label,
+            "health_ready": not experiment_refresh_failed
+            and health_status
+            in {
+                ExperimentAssessment.Status.DESCRIPTIVE_READY,
+                ExperimentAssessment.Status.PROMOTION_ELIGIBLE,
+            },
             "open_count": Recommendation.objects.filter(
                 contract_version__in=(2, 3), resolution__isnull=True
             ).count(),
@@ -650,6 +705,10 @@ def calibration(request):
 
 @owner_required
 def paper_trades(request):
+    experiment_era, experiment_assessment = latest_champion_health()
+    execution_health = (
+        experiment_assessment.metrics.get("execution", {}) if experiment_assessment else {}
+    )
     recommendations = list(
         Recommendation.objects.filter(
             contract_version__in=(2, 3),
@@ -716,10 +775,38 @@ def paper_trades(request):
             "conservative_net_pips": sum(
                 (assessment.conservative_net_pips for assessment in cost_assessments), start=0
             ),
-            "mature": len(executed_results) >= 30,
-            "remaining": max(0, 30 - len(executed_results)),
+            "experiment_era": experiment_era,
+            "execution_health": execution_health,
         },
     )
+
+
+@owner_required
+@require_POST
+def decide_experiment(request, era_id, assessment_id):
+    era = get_object_or_404(ExperimentEra, pk=era_id)
+    assessment = get_object_or_404(ExperimentAssessment, pk=assessment_id)
+    decision = request.POST.get("decision", "")
+    if decision not in PromotionRecord.Decision.values:
+        messages.error(request, "Unknown experiment decision.")
+        return redirect(f"{reverse('calibration')}#experiment-{era.pk}")
+    try:
+        record_promotion_decision(
+            era,
+            assessment,
+            actor=request.user,
+            decision=decision,
+            rationale=request.POST.get("rationale", "")[:500],
+            idempotency_key=f"experiment-decision:{era.pk}:{assessment.pk}:{decision}",
+        )
+    except ValidationError as error:
+        messages.error(request, str(error))
+    else:
+        messages.success(
+            request,
+            "Experiment decision recorded. No active method or policy was changed.",
+        )
+    return redirect(f"{reverse('calibration')}#experiment-{era.pk}")
 
 
 @owner_required

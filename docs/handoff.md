@@ -39,7 +39,7 @@ The Prospective Calibration slice is implemented: version 2 freezes an exact
 daily reference and neutral band, records up/neutral/down probabilities, resolves
 after five later completed daily sessions, and stores immutable multiclass Brier
 and directional hit outcomes. Version 1 is excluded rather than reinterpreted.
-The separate Calibration page suppresses conclusions until 30 outcomes exist.
+Raw outcome totals are descriptive and never unlock reportability by themselves.
 
 The Paper Execution slice is implemented: hourly OANDA bid/ask collection runs
 every hour, directional v2 setups transition through waiting, immutable entry,
@@ -124,6 +124,18 @@ appears after the same pattern spans five distinct issuance timestamps, and
 owner authorization records permission for a future challenger without
 activating any strategy change. Real interpretation is disabled by default.
 
+The Reproducible Experiment Health slice is implemented. Every recommendation
+method and evaluation policy has an immutable content identity; champion and
+owner-authorized challenger eras start prospectively and receive immutable
+issuance assignments. Daily append-only assessments retain unresolved outcomes
+in coverage denominators, balance scoring/calibration/sharpness/hit metrics by
+UTC weekly dependence cluster, compare aligned uniform/mechanical controls, and
+publish conservative intervals. Policy v1 requires 50 raw recommendations, 180
+days, 24 weekly clusters, 90% resolution coverage, calibrated probabilities,
+and a 95% Brier upper bound below uniform. Challenger promotion additionally
+requires paired superiority. Owner decisions are audited permission records and
+cannot activate a prompt, model, sizing, execution, or risk change.
+
 ## Verification gate
 
 Run:
@@ -137,15 +149,14 @@ make test
 make dev
 ```
 
-Then authenticate through the portal and review Today, USD/CAD H4/Daily,
+Then authenticate through the portal and review Today, Calibration, Paper,
 Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Implement Slice 5 from `docs/governed-learning-map.md`: immutable experiment
-eras, prospective challenger preregistration, dependence-aware sample health,
-baselines, intervals, calibration/sharpness/coverage, and explicit promotion
-records. Authorization from Slice 4 must not itself start a challenger.
+Implement Slice 6 from `docs/governed-learning-map.md`: production privacy and
+unattended AWS operation, including hardened owner authentication, deployment,
+independent monitoring, encrypted secrets, backup/restore drills, and rollback.
 
 ## Still OPEN
 

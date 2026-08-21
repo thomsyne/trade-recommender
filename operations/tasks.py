@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from django.conf import settings
 
+from forecasts.experiments import refresh_all_experiments
 from forecasts.interpretations import interpret_due_reviews
 from forecasts.paper import resolve_due_paper_trades
 from forecasts.recommendations import generate_all_recommendations, resolve_due_recommendations
@@ -53,6 +54,8 @@ def execute_task(task_name, parameters):
         if not settings.ANTHROPIC_API_KEY:
             raise ValueError("ANTHROPIC_API_KEY is not configured")
         return interpret_due_reviews()
+    if task_name == "forecast.refresh_experiment_health":
+        return refresh_all_experiments()
     raise ValueError(f"Unknown task: {task_name}")
 
 

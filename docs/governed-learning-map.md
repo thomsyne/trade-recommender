@@ -1,6 +1,6 @@
 # Governed Portfolio Learning — Four-Quadrant Map
 
-**Status:** Exploration complete; Slices 1–3 implemented
+**Status:** Exploration complete; Slices 1–5 implemented
 **Prepared:** 2026-08-20  
 **Scope:** Prospective portfolio admission, notifications, postmortems, and
 learning governance for the private FX research product
@@ -242,7 +242,7 @@ frozen outcomes + execution + costs
 | OANDA option B | **OPEN intentionally.** Obtain written permission, record governing terms and exact permitted fields/transforms/processor, then run the rights-gate tests. The product should recommend this review once operational maturity is demonstrated. |
 | Paid/restricted full text | **OPEN per source.** Licence must permit the exact automated access, retention, and external-model processing. A consumer subscription alone is insufficient. |
 | Production email deliverability | **OPEN until deployment.** Verify Gmail app password, sender/recipient, SPF/DMARC implications, rate limits, redaction, retries, and test delivery without exposing credentials. |
-| Effective-sample promotion thresholds | **OPEN by design.** Pre-register before a challenger begins; never select thresholds after viewing its results. |
+| Effective-sample promotion thresholds | **CLOSED for evaluation policy v1.** Pre-registered at 50 raw recommendations, 180 calendar days, 24 UTC weekly dependence clusters, 90% resolution coverage, calibration error at or below 0.15, and dependence-aware 95% Brier upper bound below the uniform baseline. A challenger additionally requires at least 50 paired recommendations across 24 clusters with its paired 95% Brier-delta upper bound below zero. Any change requires a new immutable policy version before evidence is viewed. |
 | Host-independent critical alert | **OPEN until AWS slice.** Configure and test SNS or equivalent independently of the app host. |
 
 ---
@@ -398,6 +398,13 @@ promotion records. Replace the current raw-30 `REPORTABLE` rule.
 
 **Gate:** 30 intentionally correlated fixtures remain non-reportable; method
 changes create a new era; failed challengers remain visible.
+
+**Implemented:** Policy and method identities, prospective era assignment,
+UTC-week dependence clusters, cluster-balanced Brier/calibration/sharpness/hit
+metrics, aligned baselines, conservative intervals, as-of daily append-only
+assessments, failed-attempt history, and owner-only continue/reject/promote
+records. Promotion is permission for a separate reviewed deployment; it never
+activates a method or policy by itself.
 
 ### Slice 6 — Production privacy and unattended operation
 

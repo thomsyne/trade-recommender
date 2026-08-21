@@ -84,3 +84,10 @@ model recommendations, and proper scoring fixtures now sit above market truth.
 Rights-aware, point-in-time official research sits beside them as a separate
 evidence ledger. See `docs/forecast-contract.md`,
 `docs/recommendation-contract.md`, and `docs/research-ingestion.md`.
+
+Experiment health is a separate prospective ledger. Immutable method and policy
+identities open champion or owner-authorized challenger eras before evidence is
+collected. Recommendations are assigned at issuance, outcomes remain subject to
+their original contracts, and daily assessments weight each UTC week as one
+dependence cluster. Promotion records authorize review only; they cannot change
+the active method, prompt, sizing, execution, or risk policy.

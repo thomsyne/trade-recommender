@@ -934,6 +934,35 @@ p {
 .hypothesis-list dd { font-size: 11px; line-height: 1.55; margin: 6px 0 0; }
 .hypothesis-list form { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px; }
 .hypothesis-list form small { color: var(--muted); font-size: 9px; }
+.experiment-health-panel,
+.experiment-registry { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); margin-bottom: 22px; padding: 24px; }
+.experiment-gates { border: 1px solid var(--line); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 18px; }
+.experiment-gates article { border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); min-width: 0; padding: 16px; }
+.experiment-gates article:nth-child(3n) { border-right: 0; }
+.experiment-gates article:nth-last-child(-n + 3) { border-bottom: 0; }
+.experiment-gates span,
+.experiment-baselines span,
+.experiment-era-list header > div > span { color: var(--muted); display: block; font-size: 9px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+.experiment-gates strong { display: block; font-family: "Manrope", sans-serif; font-size: 19px; margin: 7px 0 5px; }
+.experiment-gates small { color: var(--muted); display: block; font-size: 9px; line-height: 1.45; }
+.experiment-baselines { background: var(--dark); border-radius: 8px; color: white; display: grid; gap: 1px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 14px; }
+.experiment-baselines div { padding: 14px 16px; }
+.experiment-baselines span { color: #aebbb4; }
+.experiment-baselines strong { display: block; font-size: 11px; margin-top: 5px; overflow-wrap: anywhere; }
+.experiment-era-list { display: grid; gap: 12px; margin-top: 18px; }
+.experiment-era-list > article { background: #faf9f4; border: 1px solid var(--line); border-radius: 9px; padding: 18px; }
+.experiment-era-list header { align-items: flex-start; display: flex; gap: 16px; justify-content: space-between; }
+.experiment-era-list header strong,
+.experiment-era-list header small { display: block; }
+.experiment-era-list header strong { margin: 4px 0; }
+.experiment-era-list header small { color: var(--muted); font-size: 9px; }
+.experiment-era-list > article > p { color: var(--muted); line-height: 1.55; }
+.era-metrics { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
+.era-metrics span { background: var(--mint); border-radius: 999px; color: var(--green); font-size: 9px; font-weight: 700; padding: 5px 9px; }
+.authority-note { border-left: 2px solid #c99854; color: var(--muted); font-size: 10px; line-height: 1.5; padding-left: 10px; }
+.experiment-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.secondary-button { background: white; border: 1px solid var(--line); border-radius: 7px; color: var(--ink); cursor: pointer; font-weight: 600; padding: 11px 14px; }
+.secondary-button.danger { color: #8a3f2c; }
 .workspace-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
@@ -2085,4 +2114,20 @@ td small {
   .interpretation-claims { grid-template-columns: 1fr; }
   .hypothesis-list dl { grid-template-columns: 1fr; }
   .hypothesis-list dl div + div { border-left: 0; border-top: 1px solid var(--line); }
+  .experiment-gates { grid-template-columns: 1fr; }
+  .experiment-gates article,
+  .experiment-gates article:nth-child(3n),
+  .experiment-gates article:nth-last-child(-n + 3) { border-bottom: 1px solid var(--line); border-right: 0; }
+  .experiment-gates article:last-child { border-bottom: 0; }
+  .experiment-baselines { grid-template-columns: 1fr; }
+  .experiment-era-list header { display: block; }
+  .experiment-era-list header > .state { display: inline-block; margin-top: 9px; }
+  .experiment-health-panel .panel-head,
+  .experiment-registry .panel-head,
+  .calibration-breakdown .panel-head { align-items: flex-start; display: grid; gap: 8px; }
+  .experiment-health-panel .panel-head > span,
+  .experiment-registry .panel-head > span,
+  .calibration-breakdown .panel-head > span { font-size: 10px; }
+  .experiment-gates small,
+  .experiment-era-list header small { font-size: 10px; }
 }

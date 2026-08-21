@@ -177,12 +177,22 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
     )
 
     provider = provider or configured_provider()
+    from forecasts.experiments import (
+        assign_recommendation,
+        ensure_champion_era,
+        ensure_forecast_method,
+    )
+
+    era = ensure_champion_era(provider, starts_at=generated_at)
+    method = ensure_forecast_method(provider)
     key = (
         f"recommendation-v{CONTRACT_VERSION}:{provider.name}:{provider.model}:"
         f"{snapshot.sha256}:{reference_candle.pk}"
     )
     existing = Recommendation.objects.filter(idempotency_key=key).first()
     if existing:
+        if existing.generated_at >= era.starts_at:
+            assign_recommendation(existing, method)
         return existing
 
     input_payload, allowed_ids = _build_input(snapshot, outcome_contract)
@@ -295,6 +305,7 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
                 "setup_levels_owner": "deterministic-local-policy-v1",
             },
         )
+        assign_recommendation(recommendation, method)
     return recommendation
 
 

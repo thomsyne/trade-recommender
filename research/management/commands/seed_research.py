@@ -702,6 +702,16 @@ class Command(BaseCommand):
                 settings.POSTMORTEM_INTERPRETATION_ENABLED and bool(settings.ANTHROPIC_API_KEY)
             ),
         )
+        _upsert_job(
+            "Forecast experiments — dependence-aware health",
+            "forecast.refresh_experiment_health",
+            {},
+            86_400,
+        )
+        from forecasts.experiments import ensure_champion_era
+        from forecasts.recommendations import configured_provider
+
+        ensure_champion_era(configured_provider())
         ProviderEvaluation.objects.update_or_create(
             category="economic-calendar",
             provider="Official statistical agencies",

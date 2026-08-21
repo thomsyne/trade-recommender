@@ -1163,3 +1163,293 @@ class ChallengerAuthorization(ImmutableModel):
 
     class Meta:
         ordering = ("-authorized_at", "-id")
+
+
+class EvaluationPolicy(ImmutableModel):
+    policy_key = models.CharField(max_length=80)
+    policy_version = models.PositiveSmallIntegerField()
+    minimum_raw_samples = models.PositiveSmallIntegerField()
+    minimum_calendar_days = models.PositiveSmallIntegerField()
+    minimum_effective_clusters = models.PositiveSmallIntegerField()
+    minimum_resolution_coverage = models.DecimalField(max_digits=5, decimal_places=4)
+    maximum_calibration_error = models.DecimalField(max_digits=5, decimal_places=4)
+    confidence_level = models.DecimalField(max_digits=5, decimal_places=4)
+    cluster_method = models.CharField(max_length=120)
+    interval_method = models.CharField(max_length=120)
+    primary_metric = models.CharField(max_length=120)
+    baseline_contract = models.JSONField()
+    guardrails = models.JSONField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("policy_key", "policy_version"),
+                name="unique_evaluation_policy_version",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(minimum_raw_samples__gt=0)
+                & models.Q(minimum_calendar_days__gt=0)
+                & models.Q(minimum_effective_clusters__gt=0),
+                name="evaluation_policy_minimums_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    minimum_resolution_coverage__gt=0,
+                    minimum_resolution_coverage__lte=1,
+                    maximum_calibration_error__gte=0,
+                    maximum_calibration_error__lte=1,
+                    confidence_level__gt=0,
+                    confidence_level__lt=1,
+                ),
+                name="evaluation_policy_rates_valid",
+            ),
+        ]
+
+
+class ForecastMethodIdentity(ImmutableModel):
+    method_key = models.CharField(max_length=80)
+    method_version = models.PositiveSmallIntegerField()
+    provider = models.CharField(max_length=80)
+    requested_model = models.CharField(max_length=120)
+    contract_version = models.PositiveSmallIntegerField()
+    system_prompt_sha256 = models.CharField(max_length=64)
+    output_schema_sha256 = models.CharField(max_length=64)
+    input_contract_sha256 = models.CharField(max_length=64)
+    setup_policy_key = models.CharField(max_length=120)
+    max_output_tokens = models.PositiveIntegerField()
+    rights_manifest = models.JSONField()
+    identity_sha256 = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("method_key", "method_version"),
+                name="unique_forecast_method_version",
+            )
+        ]
+
+
+class ExperimentEra(ImmutableModel):
+    class Kind(models.TextChoices):
+        CHAMPION = "champion", "Champion monitoring"
+        CHALLENGER = "challenger", "Prospective challenger"
+
+    kind = models.CharField(max_length=12, choices=Kind)
+    method = models.ForeignKey(
+        ForecastMethodIdentity, on_delete=models.PROTECT, related_name="experiment_eras"
+    )
+    evaluation_policy = models.ForeignKey(
+        EvaluationPolicy, on_delete=models.PROTECT, related_name="experiment_eras"
+    )
+    authorization = models.OneToOneField(
+        ChallengerAuthorization,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="experiment_era",
+    )
+    champion_era = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="challenger_eras",
+    )
+    supersedes = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="superseded_by",
+    )
+    hypothesis_snapshot = models.JSONField(default=dict, blank=True)
+    registration_sha256 = models.CharField(max_length=64, unique=True)
+    starts_at = models.DateTimeField()
+    registered_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-starts_at", "-id")
+
+    def clean(self):
+        if self.kind == self.Kind.CHAMPION:
+            if self.authorization_id or self.champion_era_id:
+                raise ValidationError("A champion era cannot have challenger authorization")
+        elif not self.authorization_id or not self.champion_era_id:
+            raise ValidationError("A challenger era requires authorization and a champion era")
+        if self.champion_era_id and self.champion_era.kind != self.Kind.CHAMPION:
+            raise ValidationError("A challenger must reference a champion era")
+        if self.supersedes_id and self.supersedes.kind != self.kind:
+            raise ValidationError("An experiment era may only supersede the same kind")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class ExperimentSample(ImmutableModel):
+    era = models.ForeignKey(ExperimentEra, on_delete=models.PROTECT, related_name="samples")
+    recommendation = models.ForeignKey(
+        Recommendation, on_delete=models.PROTECT, related_name="experiment_samples"
+    )
+    issuance_cluster_key = models.CharField(max_length=120)
+    dependence_cluster_key = models.CharField(max_length=120)
+    factor_keys = models.JSONField()
+    assigned_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("recommendation__generated_at", "recommendation_id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("era", "recommendation"), name="unique_experiment_sample"
+            )
+        ]
+
+    def clean(self):
+        recommendation = self.recommendation
+        if recommendation.contract_version != self.era.method.contract_version:
+            raise ValidationError("Experiment sample contract does not match its method")
+        if (
+            recommendation.provider != self.era.method.provider
+            or recommendation.model != self.era.method.requested_model
+        ):
+            raise ValidationError("Experiment sample provider identity does not match its method")
+        if recommendation.generated_at < self.era.starts_at:
+            raise ValidationError("Experiment samples must be issued after the era starts")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class ExperimentAssessmentAttempt(ImmutableModel):
+    class Status(models.TextChoices):
+        SUCCEEDED = "succeeded", "Succeeded"
+        FAILED = "failed", "Failed"
+
+    era = models.ForeignKey(
+        ExperimentEra, on_delete=models.PROTECT, related_name="assessment_attempts"
+    )
+    idempotency_key = models.CharField(max_length=240, unique=True)
+    sample_set_sha256 = models.CharField(max_length=64)
+    status = models.CharField(max_length=12, choices=Status)
+    error_code = models.CharField(max_length=80, blank=True)
+    assessed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-assessed_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("era", "sample_set_sha256"),
+                condition=models.Q(status="succeeded"),
+                name="unique_successful_experiment_sample_set",
+            )
+        ]
+
+
+class ExperimentAssessment(ImmutableModel):
+    class Status(models.TextChoices):
+        COLLECTING = "collecting", "Collecting"
+        COVERAGE_LIMITED = "coverage_limited", "Coverage limited"
+        GUARDRAIL_FAILED = "guardrail_failed", "Guardrail failed"
+        DESCRIPTIVE_READY = "descriptive_ready", "Descriptive evidence ready"
+        PROMOTION_ELIGIBLE = "promotion_eligible", "Eligible for owner promotion review"
+
+    attempt = models.OneToOneField(
+        ExperimentAssessmentAttempt, on_delete=models.PROTECT, related_name="assessment"
+    )
+    supersedes = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="superseded_by",
+    )
+    status = models.CharField(max_length=24, choices=Status)
+    raw_sample_count = models.PositiveIntegerField()
+    resolved_sample_count = models.PositiveIntegerField()
+    effective_cluster_count = models.PositiveIntegerField()
+    observation_days = models.PositiveIntegerField()
+    resolution_coverage = models.DecimalField(max_digits=7, decimal_places=6)
+    mean_brier_score = models.DecimalField(max_digits=8, decimal_places=6, null=True, blank=True)
+    uniform_baseline_brier = models.DecimalField(
+        max_digits=8, decimal_places=6, null=True, blank=True
+    )
+    mechanical_baseline_brier = models.DecimalField(
+        max_digits=8, decimal_places=6, null=True, blank=True
+    )
+    directional_hit_rate = models.DecimalField(
+        max_digits=7, decimal_places=6, null=True, blank=True
+    )
+    calibration_error = models.DecimalField(max_digits=7, decimal_places=6, null=True, blank=True)
+    sharpness = models.DecimalField(max_digits=8, decimal_places=6, null=True, blank=True)
+    brier_interval_low = models.DecimalField(max_digits=8, decimal_places=6, null=True, blank=True)
+    brier_interval_high = models.DecimalField(max_digits=8, decimal_places=6, null=True, blank=True)
+    metrics = models.JSONField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+
+    def clean(self):
+        if self.supersedes_id and self.supersedes.attempt.era_id != self.attempt.era_id:
+            raise ValidationError("An assessment may only supersede one from the same era")
+        if self.resolved_sample_count > self.raw_sample_count:
+            raise ValidationError("Resolved experiment samples cannot exceed assigned samples")
+        if self.effective_cluster_count > self.resolved_sample_count:
+            raise ValidationError("Effective clusters cannot exceed resolved samples")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class PromotionRecord(ImmutableModel):
+    class Decision(models.TextChoices):
+        CONTINUE = "continue", "Continue collecting"
+        REJECT = "reject", "Reject challenger"
+        PROMOTE = "promote", "Promote challenger"
+
+    era = models.ForeignKey(
+        ExperimentEra, on_delete=models.PROTECT, related_name="promotion_records"
+    )
+    assessment = models.ForeignKey(
+        ExperimentAssessment, on_delete=models.PROTECT, related_name="promotion_records"
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="promotion_records"
+    )
+    decision = models.CharField(max_length=12, choices=Decision)
+    idempotency_key = models.CharField(max_length=240, unique=True)
+    rationale = models.TextField(blank=True)
+    active_policy_changed = models.BooleanField(default=False)
+    decided_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-decided_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(active_policy_changed=False),
+                name="promotion_record_does_not_mutate_active_policy",
+            )
+        ]
+
+    def clean(self):
+        if self.era.kind != ExperimentEra.Kind.CHALLENGER:
+            raise ValidationError("Promotion records apply only to challenger eras")
+        if self.assessment.attempt.era_id != self.era_id:
+            raise ValidationError("Promotion assessment must belong to its challenger era")
+        if (
+            self.decision == self.Decision.PROMOTE
+            and self.assessment.status != ExperimentAssessment.Status.PROMOTION_ELIGIBLE
+        ):
+            raise ValidationError("Only a promotion-eligible assessment may be promoted")
+        if not self.actor.is_superuser:
+            raise ValidationError("Only the owner may record a promotion decision")
+        if self.active_policy_changed:
+            raise ValidationError("A promotion record cannot mutate the active policy")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)

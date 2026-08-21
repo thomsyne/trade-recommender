@@ -11,6 +11,11 @@ urlpatterns = [
         name="select-cohort",
     ),
     path("calibration/", views.calibration, name="calibration"),
+    path(
+        "calibration/experiments/<int:era_id>/assessments/<int:assessment_id>/decide/",
+        views.decide_experiment,
+        name="decide-experiment",
+    ),
     path("exposure/", views.exposure, name="exposure"),
     path("paper/", views.paper_trades, name="paper-trades"),
     path("research/", views.research, name="research"),

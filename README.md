@@ -41,6 +41,9 @@ separate point-in-time evidence ledger.
 - optional rights-cleared Sonnet postmortems with immutable method/spend audit,
   cited non-authoritative interpretations, quarantined source proposals, and a
   five-independent-cohort gate before owner-authorized challenger design;
+- immutable champion/challenger experiment eras, frozen method and evaluation
+  identities, daily append-only health assessments, dependence-balanced proper
+  scores, uncertainty bounds, and owner-only non-activating promotion records;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
 - bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
   response-size protections;
@@ -103,6 +106,7 @@ SHA-256 fingerprint and is never rendered or logged. Review
 | `make recommend` | Generate governed recommendations from fresh pair evidence |
 | `.venv/bin/python manage.py build_postmortems` | Freeze terminal deterministic review cohorts |
 | `.venv/bin/python manage.py interpret_postmortems` | Interpret eligible contract-v3 postmortems when explicitly enabled |
+| `.venv/bin/python manage.py refresh_experiments` | Append dependence-aware health assessments for registered experiment eras |
 
 Docker Compose describes the eventual single-host process topology and can be
 used on a machine with Docker via `docker compose up --build`. It is a local
