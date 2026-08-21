@@ -14,7 +14,7 @@ check:
 	.venv/bin/python -m compileall -q config dashboard forecasts market operations research
 
 test:
-	.venv/bin/python manage.py test
+	POSTGRES_CONN_MAX_AGE=0 .venv/bin/python manage.py test
 
 dev:
 	amp orb services ensure

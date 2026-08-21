@@ -23,6 +23,7 @@ from forecasts.tests.test_recommendations import (
     FakeProvider,
     evidence,
     hourly_candle,
+    open_market_hours,
     output,
     rising_candle,
 )
@@ -80,9 +81,9 @@ class DeterministicReviewTests(TestCase):
         return resolve_recommendation(recommendation)
 
     def resolve_target(self, recommendation):
-        first = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
-            hours=1
-        )
+        first = open_market_hours(
+            recommendation.generated_at, recommendation.generated_at + timedelta(days=4)
+        )[0]
         store_ingestion(
             self.source,
             self.instrument,
