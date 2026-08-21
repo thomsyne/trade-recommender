@@ -96,6 +96,7 @@ jobs:
           aws s3api put-bucket-versioning --bucket "$state_bucket" --versioning-configuration Status=Enabled
           aws s3api put-public-access-block --bucket "$state_bucket" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
           bash deploy/scripts/install-terraform.sh "$TERRAFORM_VERSION" "$RUNNER_TEMP/bin"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
           python3 - <<'PY'
           import json, os
