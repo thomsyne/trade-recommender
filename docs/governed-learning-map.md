@@ -1,6 +1,6 @@
 # Governed Portfolio Learning — Four-Quadrant Map
 
-**Status:** Exploration complete; Slice 1 reliability kernel implemented  
+**Status:** Exploration complete; Slices 1–3 implemented
 **Prepared:** 2026-08-20  
 **Scope:** Prospective portfolio admission, notifications, postmortems, and
 learning governance for the private FX research product
@@ -355,7 +355,7 @@ canonical URL are configured.
 closed; trigger/expiry/new-batch closure is deterministic; confidence displays
 but never affects ordering or allocation.
 
-### Slice 3 — Deterministic postmortem notebook
+### Slice 3 — Deterministic postmortem notebook — complete
 
 Freeze review cohorts and implement separate thesis, execution, and
 reconciliation facts with explicit missing-data coverage and source lineage.
@@ -363,6 +363,12 @@ Render the notebook and chronological timeline without Claude first.
 
 **Gate:** rerunning a frozen cohort produces identical membership/facts;
 corrected data creates a superseding assessment; no causal language appears.
+
+Implemented with point-in-time cohort cutoffs, append-only PostgreSQL-enforced
+thesis/execution/reconciliation assessments, explicit missing denominators,
+source hashes and lineage, cutoff-aware eligibility, a read-only owner notebook,
+and pair timelines. Identical reassessments create no rows; changed source facts
+append assessments linked to the records they supersede.
 
 ### Slice 4 — Bounded Sonnet interpretation and learning queue
 

@@ -39,6 +39,7 @@ class DashboardTests(TestCase):
             "today",
             "inbox",
             "research",
+            "reviews",
             "operations",
             "calibration",
             "paper-trades",
@@ -80,6 +81,7 @@ class DashboardTests(TestCase):
         calibration = self.client.get(reverse("calibration"))
         paper = self.client.get(reverse("paper-trades"))
         exposure = self.client.get(reverse("exposure"))
+        reviews = self.client.get(reverse("reviews"))
 
         self.assertContains(pair, "LOCKED MECHANICAL CONTROL", html=False)
         self.assertContains(pair, "GOVERNED RECOMMENDATION", html=False)
@@ -103,6 +105,10 @@ class DashboardTests(TestCase):
         self.assertContains(exposure, "CAD risk &amp; currency exposure")
         self.assertContains(exposure, "No unresolved directional v2 setup exists")
         self.assertContains(exposure, "Fixed—not OANDA NAV")
+        self.assertContains(reviews, "DETERMINISTIC POSTMORTEMS", html=False)
+        self.assertContains(reviews, "No recommendation is ready for postmortem")
+        self.assertContains(reviews, "Facts before interpretation")
+        self.assertNotContains(reviews, "next slice")
 
     def test_research_surface_is_private_read_only_and_escapes_source_text(self):
         self.assertRedirects(

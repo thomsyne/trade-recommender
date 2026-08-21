@@ -4,7 +4,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import connection
-from django.db.models import F
+from django.db.models import F, Prefetch
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -13,11 +13,14 @@ from django.views.decorators.http import require_POST
 from dashboard.auth import owner_required
 from forecasts.exposure import active_directional_recommendations, build_exposure_report
 from forecasts.models import (
+    DeterministicReview,
     Forecast,
     PaperTradeResult,
     PortfolioCohort,
     Recommendation,
     RecommendationResolution,
+    ReviewCohort,
+    ReviewCohortMember,
 )
 from forecasts.portfolio import cohort_is_open, select_portfolio_cohort
 from market.models import (
@@ -128,12 +131,28 @@ def market_detail(request, code):
         )[:20]
     )
     recommendation = recommendations[0] if recommendations else None
+    completed_reviews = list(
+        DeterministicReview.objects.filter(
+            kind=DeterministicReview.Kind.RECONCILIATION,
+            superseded_by__isnull=True,
+            member__recommendation__instrument=instrument,
+        ).select_related("member__recommendation")[:20]
+    )
     timeline = sorted(
         [
             {"kind": "recommendation", "at": item.generated_at, "item": item}
             for item in recommendations
         ]
-        + [{"kind": "forecast", "at": item.issued_at, "item": item} for item in forecasts],
+        + [{"kind": "forecast", "at": item.issued_at, "item": item} for item in forecasts]
+        + [
+            {
+                "kind": "review",
+                "at": item.assessed_at,
+                "item": item,
+                "recommendation": item.member.recommendation,
+            }
+            for item in completed_reviews
+        ],
         key=lambda entry: entry["at"],
         reverse=True,
     )
@@ -191,6 +210,102 @@ def market_detail(request, code):
             "pair_macro": pair_macro,
             "fixture_mode": bool(candles)
             and candles[-1].ingestion_run.source.name == "Development fixtures",
+        },
+    )
+
+
+@owner_required
+def reviews(request):
+    selected_code = request.GET.get("instrument", "")
+    instruments = list(Instrument.objects.filter(active=True))
+    if selected_code and selected_code not in {item.code for item in instruments}:
+        selected_code = ""
+    members = ReviewCohortMember.objects.select_related(
+        "recommendation__instrument",
+        "recommendation__evidence_snapshot",
+    ).prefetch_related("reviews__supersedes")
+    cohorts_query = ReviewCohort.objects.all()
+    if selected_code:
+        members = members.filter(recommendation__instrument__code=selected_code)
+        cohorts_query = cohorts_query.filter(
+            members__recommendation__instrument__code=selected_code
+        ).distinct()
+    cohorts = []
+    timeline = []
+    complete_count = 0
+    missing_count = 0
+    correction_count = 0
+    for cohort in cohorts_query.prefetch_related(Prefetch("members", queryset=members))[:20]:
+        cohort_members = []
+        for member in cohort.members.all():
+            all_reviews = list(member.reviews.all())
+            current = {}
+            for review in all_reviews:
+                current.setdefault(review.kind, review)
+                timeline.append(
+                    {
+                        "review": review,
+                        "recommendation": member.recommendation,
+                        "label": review.get_kind_display(),
+                    }
+                )
+                correction_count += bool(review.supersedes_id)
+            for review in current.values():
+                if review.coverage == DeterministicReview.Coverage.MISSING:
+                    missing_count += 1
+                else:
+                    complete_count += 1
+            thesis = current.get(DeterministicReview.Kind.THESIS)
+            execution = current.get(DeterministicReview.Kind.EXECUTION)
+            reconciliation = current.get(DeterministicReview.Kind.RECONCILIATION)
+            lineage = thesis.source_lineage if thesis else {}
+            cohort_members.append(
+                {
+                    "member": member,
+                    "inclusion_label": member.inclusion_reason.replace("_", " ").title(),
+                    "thesis": thesis,
+                    "execution": execution,
+                    "reconciliation": reconciliation,
+                    "thesis_label": (
+                        thesis.facts["classification"].replace("_", " ").title()
+                        if thesis
+                        else "Unavailable"
+                    ),
+                    "execution_label": (
+                        execution.facts["readiness_reason"].replace("_", " ").title()
+                        if execution
+                        else "Unavailable"
+                    ),
+                    "execution_terminal_label": (
+                        (execution.facts.get("terminal_lifecycle_state") or "unobserved")
+                        .replace("_", " ")
+                        .title()
+                        if execution
+                        else "Unobserved"
+                    ),
+                    "reconciliation_label": (
+                        reconciliation.facts["classification"].replace("_", " ").title()
+                        if reconciliation
+                        else "Unavailable"
+                    ),
+                    "lineage_count": sum(
+                        len(value) for value in lineage.values() if isinstance(value, list)
+                    ),
+                }
+            )
+        cohorts.append({"cohort": cohort, "members": cohort_members})
+    timeline.sort(key=lambda item: (item["review"].assessed_at, item["review"].pk), reverse=True)
+    return render(
+        request,
+        "dashboard/reviews.html",
+        {
+            "cohorts": cohorts,
+            "timeline": timeline,
+            "instruments": instruments,
+            "selected_code": selected_code,
+            "complete_count": complete_count,
+            "missing_count": missing_count,
+            "correction_count": correction_count,
         },
     )
 

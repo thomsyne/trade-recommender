@@ -4,6 +4,7 @@ from django.conf import settings
 
 from forecasts.paper import resolve_due_paper_trades
 from forecasts.recommendations import generate_all_recommendations, resolve_due_recommendations
+from forecasts.reviews import build_due_review_cohort
 from forecasts.services import resolve_due_forecasts
 from market.models import IngestionRun, Instrument, SourceRegistry
 from market.oanda import OandaClient
@@ -66,6 +67,7 @@ def ingest_oanda(parameters):
         resolve_due_recommendations(instrument)
     if run.status == IngestionRun.Status.SUCCEEDED and granularity in {"H1", "D"}:
         resolve_due_paper_trades(instrument)
+        build_due_review_cohort(instrument=instrument)
     return run
 
 

@@ -71,11 +71,15 @@ future paper P&L.
 python manage.py issue_baselines
 python manage.py issue_baselines USD_CAD
 python manage.py resolve_forecasts
+python manage.py build_postmortems
 ```
 
 Baseline issuance is idempotent for one instrument, target version, and exact
 evidence hash. Daily OANDA ingestion automatically attempts resolution after a
-successful validated batch. It does not automatically issue a new baseline;
+successful validated batch. Resolution also attempts to freeze any newly
+eligible deterministic recommendation postmortems; the explicit postmortem
+command is idempotent and accepts `--instrument` or `--reassess-cohort` for a
+later correction assessment. It does not automatically issue a new baseline;
 forecast cadence and material-change issuance remain explicit policy.
 The command refuses development fixtures so an immutable test record cannot
 retain invented candles when the workspace transitions to OANDA. Fixture

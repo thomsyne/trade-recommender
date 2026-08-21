@@ -14,6 +14,7 @@ urlpatterns = [
     path("exposure/", views.exposure, name="exposure"),
     path("paper/", views.paper_trades, name="paper-trades"),
     path("research/", views.research, name="research"),
+    path("reviews/", views.reviews, name="reviews"),
     path("markets/<str:code>/", views.market_detail, name="market-detail"),
     path("operations/", views.operations, name="operations"),
 ]

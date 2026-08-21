@@ -35,6 +35,9 @@ separate point-in-time evidence ledger.
   automatic all-fit decisions, and owner selection for competing setups;
 - an owner-only research inbox plus optional Gmail notifications delivered from
   the durable outbox with authenticated in-app decisions;
+- immutable deterministic thesis, paper-execution, and reconciliation reviews
+  with frozen cohorts, explicit missing denominators, source lineage, and an
+  owner-only postmortem notebook;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
 - bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
   response-size protections;
@@ -95,6 +98,7 @@ SHA-256 fingerprint and is never rendered or logged. Review
 | `make baseline` | Lock one macro and tactical mechanical baseline per pair |
 | `make resolve` | Resolve every forecast whose later sessions are available |
 | `make recommend` | Generate governed recommendations from fresh pair evidence |
+| `.venv/bin/python manage.py build_postmortems` | Freeze terminal deterministic review cohorts |
 
 Docker Compose describes the eventual single-host process topology and can be
 used on a machine with Docker via `docker compose up --build`. It is a local

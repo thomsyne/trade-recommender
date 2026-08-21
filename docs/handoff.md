@@ -86,10 +86,10 @@ preexisting unresolved recommendations are marked legacy-unadjudicated.
 
 The operations queue now uses owned expiring leases, heartbeats, execution
 deadlines, stale-work recovery, safe error summaries, explicit missed-run
-policies, and timezone-aware daily wall-clock schedules. Transactional outbox
-and delivery-attempt records are ready for later Gmail delivery, and serialized
+policies, and timezone-aware daily wall-clock schedules. Transactional outbox,
+delivery attempts, and the controlled Gmail SMTP worker are implemented, and serialized
 provider-budget reservations prevent concurrent authorization from exceeding
-declared caps. No real email adapter is enabled.
+declared caps.
 
 Prospective portfolio admission is now implemented. A versioned activation
 timestamp keeps all earlier recommendations research-only. Complete new batches
@@ -97,9 +97,20 @@ are assessed under one serialized CAD-risk policy: all-fitting sets are admitted
 automatically, while competing sets create an owner-only inbox decision. Owner
 selections are append-only, idempotent, and may only be superseded before any
 cohort member's entry price triggers. Confidence is displayed as uncalibrated
-context and never ranks or allocates capacity. The Gmail SMTP adapter uses the
-transactional outbox and controlled templates but remains disabled until the
-settings in `docs/gmail-notifications.md` are supplied.
+context and never ranks or allocates capacity. The Gmail SMTP adapter activates
+only when the settings in `docs/gmail-notifications.md` are supplied and fails
+closed otherwise.
+
+The Deterministic Postmortem slice is implemented. Once both the prospective
+five-session recommendation outcome and terminal paper lifecycle are available,
+the system freezes a point-in-time review cohort and separate immutable thesis,
+execution, and reconciliation assessments. Missing execution remains an
+explicit denominator; source lineage and projection hashes are retained;
+corrections append superseding assessments without changing cohort membership.
+The owner-only Reviews notebook and pair timeline render these facts without
+Claude interpretation. Daily/hourly ingestion and `resolve_forecasts` attempt
+the idempotent review build; `build_postmortems` supports explicit operation and
+later correction reassessment.
 
 ## Verification gate
 
@@ -119,9 +130,10 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Implement Slice 3 from `docs/governed-learning-map.md`: frozen deterministic
-thesis, execution, and reconciliation postmortems with explicit missing-data
-coverage, source lineage, notebook presentation, and chronological timeline.
+Implement Slice 4 from `docs/governed-learning-map.md`: rights-cleared bounded
+Sonnet interpretation and a non-actionable governed learning queue. Deterministic
+review facts must remain authoritative and complete when model work is disabled,
+over budget, or rejected.
 
 ## Still OPEN
 

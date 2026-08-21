@@ -876,3 +876,79 @@ class PortfolioAdmissionEvent(ImmutableModel):
 
     class Meta:
         ordering = ("occurred_at", "id")
+
+
+class ReviewCohort(ImmutableModel):
+    idempotency_key = models.CharField(max_length=240, unique=True)
+    method_key = models.CharField(max_length=80)
+    method_version = models.PositiveSmallIntegerField()
+    cutoff_at = models.DateTimeField()
+    membership_sha256 = models.CharField(max_length=64, unique=True)
+    initial_coverage = models.JSONField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-cutoff_at", "-id")
+
+
+class ReviewCohortMember(ImmutableModel):
+    cohort = models.ForeignKey(ReviewCohort, on_delete=models.PROTECT, related_name="members")
+    recommendation = models.OneToOneField(
+        Recommendation, on_delete=models.PROTECT, related_name="review_membership"
+    )
+    inclusion_reason = models.CharField(max_length=80)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("recommendation__instrument__display_order", "recommendation_id")
+
+
+class DeterministicReview(ImmutableModel):
+    class Kind(models.TextChoices):
+        THESIS = "thesis", "Thesis review"
+        EXECUTION = "execution", "Execution review"
+        RECONCILIATION = "reconciliation", "Combined reconciliation"
+
+    class Coverage(models.TextChoices):
+        COMPLETE = "complete", "Complete"
+        NOT_APPLICABLE = "not_applicable", "Not applicable"
+        MISSING = "missing", "Missing data"
+
+    member = models.ForeignKey(ReviewCohortMember, on_delete=models.PROTECT, related_name="reviews")
+    kind = models.CharField(max_length=16, choices=Kind)
+    supersedes = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="superseded_by",
+    )
+    method_key = models.CharField(max_length=80)
+    method_version = models.PositiveSmallIntegerField()
+    input_sha256 = models.CharField(max_length=64)
+    coverage = models.CharField(max_length=16, choices=Coverage)
+    facts = models.JSONField()
+    source_lineage = models.JSONField()
+    assessed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-assessed_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("member", "kind", "input_sha256"),
+                name="unique_deterministic_review_input",
+            )
+        ]
+
+    def clean(self):
+        expected_schema = f"{self.kind}-review-v{self.method_version}"
+        if self.facts.get("schema") != expected_schema:
+            raise ValidationError("Deterministic review facts do not match their schema")
+        if self.supersedes_id and (
+            self.supersedes.member_id != self.member_id or self.supersedes.kind != self.kind
+        ):
+            raise ValidationError("A review may only supersede the same member and review kind")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)

@@ -22,10 +22,11 @@
         {% endfor %}
         <p class="nav-label">Laboratory</p>
         <a class="nav-link {% if request.resolver_match.url_name == 'research' %}active{% endif %}" href="{% url 'research' %}"><span>02</span>Research</a>
-        <a class="nav-link {% if request.resolver_match.url_name == 'operations' %}active{% endif %}" href="{% url 'operations' %}"><span>03</span>Operations</a>
-        <a class="nav-link {% if request.resolver_match.url_name == 'calibration' %}active{% endif %}" href="{% url 'calibration' %}"><span>04</span>Calibration</a>
-        <a class="nav-link {% if request.resolver_match.url_name == 'paper-trades' %}active{% endif %}" href="{% url 'paper-trades' %}"><span>05</span>Paper</a>
-        <a class="nav-link {% if request.resolver_match.url_name == 'exposure' %}active{% endif %}" href="{% url 'exposure' %}"><span>06</span>Exposure</a>
+        <a class="nav-link {% if request.resolver_match.url_name == 'reviews' %}active{% endif %}" href="{% url 'reviews' %}"><span>03</span>Reviews</a>
+        <a class="nav-link {% if request.resolver_match.url_name == 'operations' %}active{% endif %}" href="{% url 'operations' %}"><span>04</span>Operations</a>
+        <a class="nav-link {% if request.resolver_match.url_name == 'calibration' %}active{% endif %}" href="{% url 'calibration' %}"><span>05</span>Calibration</a>
+        <a class="nav-link {% if request.resolver_match.url_name == 'paper-trades' %}active{% endif %}" href="{% url 'paper-trades' %}"><span>06</span>Paper</a>
+        <a class="nav-link {% if request.resolver_match.url_name == 'exposure' %}active{% endif %}" href="{% url 'exposure' %}"><span>07</span>Exposure</a>
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot"></span> Local research environment
