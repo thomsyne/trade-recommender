@@ -31,6 +31,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "dashboard.middleware.TrustedPortalNullOriginMiddleware",
@@ -84,10 +85,20 @@ USE_I18N = True
 USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGIN_URL = "login"
 LOGIN_REDIRECT_URL = "today"
 LOGOUT_REDIRECT_URL = "login"
+LOGIN_THROTTLE_FAILURES = int(os.getenv("LOGIN_THROTTLE_FAILURES", "5"))
+LOGIN_THROTTLE_MINUTES = int(os.getenv("LOGIN_THROTTLE_MINUTES", "15"))
+READINESS_MIN_FREE_GB = float(os.getenv("READINESS_MIN_FREE_GB", "2"))
+READINESS_BACKUP_MAX_AGE_HOURS = int(os.getenv("READINESS_BACKUP_MAX_AGE_HOURS", "8"))
+READINESS_BACKUP_MARKER = os.getenv("READINESS_BACKUP_MARKER", "")
+READINESS_DISK_PATH = os.getenv("READINESS_DISK_PATH", str(BASE_DIR))
 
 OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "")

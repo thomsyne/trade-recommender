@@ -1,0 +1,86 @@
+services:
+  db:
+    image: postgres:15.14-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  web:
+    image: ${IMAGE_URI:?required}
+    restart: unless-stopped
+    env_file: ${APP_ENV_FILE:-.env}
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --access-logfile -
+    volumes:
+      - backup-state:/var/lib/trade-recommender
+      - /:/host-root:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/health/ready/"]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+
+  worker:
+    image: ${IMAGE_URI:?required}
+    restart: unless-stopped
+    env_file: ${APP_ENV_FILE:-.env}
+    command: python manage.py run_worker
+    depends_on:
+      db:
+        condition: service_healthy
+
+  scheduler:
+    image: ${IMAGE_URI:?required}
+    restart: unless-stopped
+    env_file: ${APP_ENV_FILE:-.env}
+    command: python manage.py run_scheduler
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backup:
+    image: ${IMAGE_URI:?required}
+    restart: unless-stopped
+    user: root
+    env_file: ${APP_ENV_FILE:-.env}
+    command: /app/deploy/scripts/backup.sh loop
+    volumes:
+      - backup-state:/var/lib/trade-recommender
+    depends_on:
+      db:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?required}
+      ACME_EMAIL: ${ACME_EMAIL:?required}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  backup-state:
+  caddy-data:
+  caddy-config:

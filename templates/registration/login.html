@@ -8,10 +8,11 @@
     <p class="eyebrow">OWNER ACCESS</p>
     <h1>Welcome back.</h1>
     <p class="lede">Review market truth, data freshness, and research foundations.</p>
-    {% if form.errors %}<div class="alert error">The username or password was not accepted.</div>{% endif %}
+    {% if form.errors %}<div class="alert error">The credentials or authentication code were not accepted.</div>{% endif %}
     <form method="post" class="auth-form">{% csrf_token %}
       <label>Username {{ form.username }}</label>
       <label>Password {{ form.password }}</label>
+      <label>Authentication or recovery code {{ form.otp_token }}</label>
       <button class="button primary" type="submit">Enter workspace</button>
     </form>
     {% if development_mode %}<p class="microcopy">Development account: <code>owner</code> / <code>orb-demo-only</code>. Never use this credential in deployment.</p>{% endif %}

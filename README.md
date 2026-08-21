@@ -45,6 +45,10 @@ separate point-in-time evidence ledger.
   identities, daily append-only health assessments, dependence-balanced proper
   scores, uncertainty bounds, and owner-only non-activating promotion records;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
+- fail-closed single-host AWS production deployment at
+  `fx-forecast.thomsyne.dev` with an EIP-backed Route 53 A record and HTTPS,
+  owner TOTP/recovery codes, throttled login, rollback readiness, and compressed
+  S3 PostgreSQL backups;
 - bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
   response-size protections;
 - immutable official release snapshots, policy-rate vintages, provenance,
@@ -52,8 +56,9 @@ separate point-in-time evidence ledger.
 - Today, Decision, Timeline, market workspace, Research, and Operations interfaces;
 - deterministic fixture data so every screen works before credentials exist.
 
-Article/full-text research, exact account-specific cash/CAD returns, paid
-providers, and AWS deployment are deliberately not implemented yet.
+Article/full-text research, exact account-specific cash/CAD returns, and paid
+providers remain deliberately out of scope. AWS deployment is private,
+paper/research-only, and documented in [deployment operations](docs/deployment.md).
 See the [project map](docs/project-map.md) for those boundaries.
 
 ## Fresh orb setup
@@ -110,7 +115,7 @@ SHA-256 fingerprint and is never rendered or logged. Review
 
 Docker Compose describes the eventual single-host process topology and can be
 used on a machine with Docker via `docker compose up --build`. It is a local
-development topology, not the hardened AWS deployment.
+development topology; the hardened topology is `deploy/compose.production.yaml`.
 
 Bounded postmortem interpretation is off by default. To opt in, configure
 `ANTHROPIC_API_KEY`, set `POSTMORTEM_INTERPRETATION_ENABLED=true`, and rerun
@@ -123,6 +128,7 @@ default cap and never replaces deterministic review facts.
 - [Project map and roadmap](docs/project-map.md)
 - [Current handoff](docs/handoff.md)
 - [Gmail owner notifications](docs/gmail-notifications.md)
+- [AWS deployment, backup, rollback, and restore](docs/deployment.md)
 - [OANDA provider contract](docs/providers/oanda.md)
 - [Forecast contract](docs/forecast-contract.md)
 - [Governed recommendation contract](docs/recommendation-contract.md)
