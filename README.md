@@ -38,6 +38,9 @@ separate point-in-time evidence ledger.
 - immutable deterministic thesis, paper-execution, and reconciliation reviews
   with frozen cohorts, explicit missing denominators, source lineage, and an
   owner-only postmortem notebook;
+- optional rights-cleared Sonnet postmortems with immutable method/spend audit,
+  cited non-authoritative interpretations, quarantined source proposals, and a
+  five-independent-cohort gate before owner-authorized challenger design;
 - idempotent PostgreSQL job queue, scheduler, worker, retries, and backoff;
 - bounded allowlisted RSS/API retrieval with SSRF, redirect, XML, type, and
   response-size protections;
@@ -99,10 +102,16 @@ SHA-256 fingerprint and is never rendered or logged. Review
 | `make resolve` | Resolve every forecast whose later sessions are available |
 | `make recommend` | Generate governed recommendations from fresh pair evidence |
 | `.venv/bin/python manage.py build_postmortems` | Freeze terminal deterministic review cohorts |
+| `.venv/bin/python manage.py interpret_postmortems` | Interpret eligible contract-v3 postmortems when explicitly enabled |
 
 Docker Compose describes the eventual single-host process topology and can be
 used on a machine with Docker via `docker compose up --build`. It is a local
 development topology, not the hardened AWS deployment.
+
+Bounded postmortem interpretation is off by default. To opt in, configure
+`ANTHROPIC_API_KEY`, set `POSTMORTEM_INTERPRETATION_ENABLED=true`, and rerun
+`seed_research` so the daily job is enabled. It has a separate US$20 monthly
+default cap and never replaces deterministic review facts.
 
 ## Documentation
 

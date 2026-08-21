@@ -15,6 +15,11 @@ urlpatterns = [
     path("paper/", views.paper_trades, name="paper-trades"),
     path("research/", views.research, name="research"),
     path("reviews/", views.reviews, name="reviews"),
+    path(
+        "reviews/hypotheses/<int:hypothesis_id>/authorize/",
+        views.authorize_challenger,
+        name="authorize-challenger",
+    ),
     path("markets/<str:code>/", views.market_detail, name="market-detail"),
     path("operations/", views.operations, name="operations"),
 ]

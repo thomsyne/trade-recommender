@@ -952,3 +952,214 @@ class DeterministicReview(ImmutableModel):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class InterpretationMethod(ImmutableModel):
+    method_key = models.CharField(max_length=80)
+    method_version = models.PositiveSmallIntegerField()
+    provider = models.CharField(max_length=80)
+    requested_model = models.CharField(max_length=120)
+    system_prompt_sha256 = models.CharField(max_length=64)
+    output_schema_sha256 = models.CharField(max_length=64)
+    pricing_version = models.CharField(max_length=80)
+    input_usd_per_mtok = models.DecimalField(max_digits=12, decimal_places=4)
+    output_usd_per_mtok = models.DecimalField(max_digits=12, decimal_places=4)
+    max_output_tokens = models.PositiveIntegerField()
+    rights_manifest = models.JSONField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("method_key", "method_version"),
+                name="unique_interpretation_method_version",
+            )
+        ]
+
+
+class InterpretationAttempt(ImmutableModel):
+    class Status(models.TextChoices):
+        ACCEPTED = "accepted", "Accepted"
+        REJECTED = "rejected", "Rejected output"
+        PROVIDER_FAILED = "provider_failed", "Provider failed"
+        BUDGET_BLOCKED = "budget_blocked", "Budget blocked"
+        RIGHTS_BLOCKED = "rights_blocked", "Rights blocked"
+
+    member = models.ForeignKey(
+        ReviewCohortMember, on_delete=models.PROTECT, related_name="interpretation_attempts"
+    )
+    method = models.ForeignKey(
+        InterpretationMethod, on_delete=models.PROTECT, related_name="attempts"
+    )
+    packet_sha256 = models.CharField(max_length=64)
+    status = models.CharField(max_length=20, choices=Status)
+    error_code = models.CharField(max_length=80, blank=True)
+    provider_response_id = models.CharField(max_length=160, blank=True)
+    returned_model = models.CharField(max_length=120, blank=True)
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    cost_usd = models.DecimalField(max_digits=12, decimal_places=6, default=0)
+    budget_reservation = models.ForeignKey(
+        "operations.ProviderBudgetReservation",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="interpretation_attempts",
+    )
+    attempted_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-attempted_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("member", "method", "packet_sha256"),
+                name="unique_interpretation_attempt",
+            )
+        ]
+
+
+class ReviewInterpretation(ImmutableModel):
+    attempt = models.OneToOneField(
+        InterpretationAttempt, on_delete=models.PROTECT, related_name="interpretation"
+    )
+    thesis_review = models.ForeignKey(
+        DeterministicReview, on_delete=models.PROTECT, related_name="thesis_interpretations"
+    )
+    execution_review = models.ForeignKey(
+        DeterministicReview, on_delete=models.PROTECT, related_name="execution_interpretations"
+    )
+    reconciliation_review = models.ForeignKey(
+        DeterministicReview, on_delete=models.PROTECT, related_name="reconciliation_interpretations"
+    )
+    request_sha256 = models.CharField(max_length=64, unique=True)
+    output = models.JSONField()
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+
+    def clean(self):
+        reviews = (self.thesis_review, self.execution_review, self.reconciliation_review)
+        if any(review.member_id != self.attempt.member_id for review in reviews):
+            raise ValidationError("Interpretation reviews must belong to the attempted member")
+        if tuple(review.kind for review in reviews) != (
+            DeterministicReview.Kind.THESIS,
+            DeterministicReview.Kind.EXECUTION,
+            DeterministicReview.Kind.RECONCILIATION,
+        ):
+            raise ValidationError("Interpretation review kinds are invalid")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class LearningObservation(ImmutableModel):
+    interpretation = models.OneToOneField(
+        ReviewInterpretation, on_delete=models.PROTECT, related_name="observation"
+    )
+    issuance_cluster_key = models.CharField(max_length=120)
+    pattern_key = models.SlugField(max_length=120)
+    title = models.CharField(max_length=200)
+    statement = models.TextField()
+    evidence_ids = models.JSONField(default=list)
+    proposed_change = models.TextField()
+    evaluation_plan = models.TextField()
+    non_actionable = models.BooleanField(default=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(non_actionable=True),
+                name="learning_observation_non_actionable",
+            )
+        ]
+
+    def clean(self):
+        if not self.non_actionable:
+            raise ValidationError("Learning observations are always non-actionable")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class CandidateHypothesis(ImmutableModel):
+    pattern_key = models.SlugField(max_length=120, unique=True)
+    title = models.CharField(max_length=200)
+    statement = models.TextField()
+    proposed_change = models.TextField()
+    evaluation_plan = models.TextField()
+    issuance_cluster_keys = models.JSONField()
+    evidence_sha256 = models.CharField(max_length=64, unique=True)
+    observations = models.ManyToManyField(
+        LearningObservation,
+        through="CandidateHypothesisObservation",
+        related_name="candidate_hypotheses",
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+
+
+class CandidateHypothesisObservation(ImmutableModel):
+    hypothesis = models.ForeignKey(
+        CandidateHypothesis, on_delete=models.PROTECT, related_name="observation_links"
+    )
+    observation = models.ForeignKey(
+        LearningObservation, on_delete=models.PROTECT, related_name="hypothesis_links"
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("hypothesis", "observation"),
+                name="unique_candidate_hypothesis_observation",
+            )
+        ]
+
+
+class SourceProposal(ImmutableModel):
+    class State(models.TextChoices):
+        QUARANTINED = "quarantined", "Quarantined"
+
+    interpretation = models.ForeignKey(
+        ReviewInterpretation, on_delete=models.PROTECT, related_name="source_proposals"
+    )
+    name = models.CharField(max_length=160)
+    category = models.CharField(max_length=120)
+    use_case = models.TextField()
+    state = models.CharField(max_length=16, choices=State, default=State.QUARANTINED)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("interpretation", "name", "category"),
+                name="unique_interpretation_source_proposal",
+            )
+        ]
+
+
+class ChallengerAuthorization(ImmutableModel):
+    class State(models.TextChoices):
+        AUTHORIZED_NOT_STARTED = "authorized_not_started", "Authorized; not started"
+
+    hypothesis = models.OneToOneField(
+        CandidateHypothesis, on_delete=models.PROTECT, related_name="authorization"
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="challenger_authorizations",
+    )
+    idempotency_key = models.CharField(max_length=200, unique=True)
+    state = models.CharField(max_length=24, choices=State, default=State.AUTHORIZED_NOT_STARTED)
+    authorized_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("-authorized_at", "-id")

@@ -7,14 +7,18 @@ from django.db import connection
 from django.db.models import F, Prefetch
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from dashboard.auth import owner_required
 from forecasts.exposure import active_directional_recommendations, build_exposure_report
+from forecasts.interpretations import authorize_candidate_hypothesis
 from forecasts.models import (
+    CandidateHypothesis,
     DeterministicReview,
     Forecast,
+    LearningObservation,
     PaperTradeResult,
     PortfolioCohort,
     Recommendation,
@@ -223,7 +227,10 @@ def reviews(request):
     members = ReviewCohortMember.objects.select_related(
         "recommendation__instrument",
         "recommendation__evidence_snapshot",
-    ).prefetch_related("reviews__supersedes")
+    ).prefetch_related(
+        "reviews__supersedes",
+        "interpretation_attempts__interpretation__source_proposals",
+    )
     cohorts_query = ReviewCohort.objects.all()
     if selected_code:
         members = members.filter(recommendation__instrument__code=selected_code)
@@ -235,6 +242,8 @@ def reviews(request):
     complete_count = 0
     missing_count = 0
     correction_count = 0
+    interpreted_count = 0
+    blocked_count = 0
     for cohort in cohorts_query.prefetch_related(Prefetch("members", queryset=members))[:20]:
         cohort_members = []
         for member in cohort.members.all():
@@ -258,6 +267,21 @@ def reviews(request):
             thesis = current.get(DeterministicReview.Kind.THESIS)
             execution = current.get(DeterministicReview.Kind.EXECUTION)
             reconciliation = current.get(DeterministicReview.Kind.RECONCILIATION)
+            interpretation = None
+            latest_attempt = member.interpretation_attempts.first()
+            for attempt in member.interpretation_attempts.all():
+                candidate = getattr(attempt, "interpretation", None)
+                if (
+                    candidate
+                    and reconciliation
+                    and candidate.reconciliation_review_id == reconciliation.pk
+                ):
+                    interpretation = candidate
+                    break
+            if interpretation:
+                interpreted_count += 1
+            elif latest_attempt:
+                blocked_count += 1
             lineage = thesis.source_lineage if thesis else {}
             cohort_members.append(
                 {
@@ -266,6 +290,11 @@ def reviews(request):
                     "thesis": thesis,
                     "execution": execution,
                     "reconciliation": reconciliation,
+                    "interpretation": interpretation,
+                    "latest_attempt": latest_attempt,
+                    "source_proposals": (
+                        list(interpretation.source_proposals.all()) if interpretation else []
+                    ),
                     "thesis_label": (
                         thesis.facts["classification"].replace("_", " ").title()
                         if thesis
@@ -295,6 +324,25 @@ def reviews(request):
             )
         cohorts.append({"cohort": cohort, "members": cohort_members})
     timeline.sort(key=lambda item: (item["review"].assessed_at, item["review"].pk), reverse=True)
+    observations = LearningObservation.objects.select_related(
+        "interpretation__attempt__member__recommendation__instrument"
+    )
+    if selected_code:
+        observations = observations.filter(
+            interpretation__attempt__member__recommendation__instrument__code=selected_code
+        )
+    observation_rows = []
+    for observation in observations[:50]:
+        cluster_count = (
+            LearningObservation.objects.filter(pattern_key=observation.pattern_key)
+            .values("issuance_cluster_key")
+            .distinct()
+            .count()
+        )
+        observation_rows.append({"observation": observation, "cluster_count": cluster_count})
+    hypotheses = CandidateHypothesis.objects.prefetch_related(
+        "observations",
+    ).select_related("authorization")
     return render(
         request,
         "dashboard/reviews.html",
@@ -306,8 +354,33 @@ def reviews(request):
             "complete_count": complete_count,
             "missing_count": missing_count,
             "correction_count": correction_count,
+            "interpreted_count": interpreted_count,
+            "blocked_count": blocked_count,
+            "observation_rows": observation_rows,
+            "hypotheses": hypotheses,
+            "minimum_hypothesis_clusters": 5,
         },
     )
+
+
+@owner_required
+@require_POST
+def authorize_challenger(request, hypothesis_id):
+    hypothesis = get_object_or_404(CandidateHypothesis, pk=hypothesis_id)
+    try:
+        authorize_candidate_hypothesis(
+            hypothesis,
+            actor=request.user,
+            idempotency_key=f"candidate-hypothesis:{hypothesis.pk}:{hypothesis.evidence_sha256}",
+        )
+    except ValidationError as error:
+        messages.error(request, str(error))
+    else:
+        messages.success(
+            request,
+            "Challenger authorized for prospective design only; no active policy changed.",
+        )
+    return redirect(f"{reverse('reviews')}#hypothesis-{hypothesis.pk}")
 
 
 @owner_required

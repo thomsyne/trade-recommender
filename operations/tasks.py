@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from django.conf import settings
 
+from forecasts.interpretations import interpret_due_reviews
 from forecasts.paper import resolve_due_paper_trades
 from forecasts.recommendations import generate_all_recommendations, resolve_due_recommendations
 from forecasts.reviews import build_due_review_cohort
@@ -46,6 +47,12 @@ def execute_task(task_name, parameters):
         if not settings.ANTHROPIC_API_KEY:
             raise ValueError("ANTHROPIC_API_KEY is not configured")
         return generate_all_recommendations()
+    if task_name == "forecast.interpret_postmortems":
+        if not settings.POSTMORTEM_INTERPRETATION_ENABLED:
+            raise ValueError("Postmortem interpretation is disabled")
+        if not settings.ANTHROPIC_API_KEY:
+            raise ValueError("ANTHROPIC_API_KEY is not configured")
+        return interpret_due_reviews()
     raise ValueError(f"Unknown task: {task_name}")
 
 

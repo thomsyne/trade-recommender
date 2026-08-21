@@ -693,6 +693,15 @@ class Command(BaseCommand):
             14_400,
             enabled=(settings.RECOMMENDATION_SCHEDULE_ENABLED and bool(settings.ANTHROPIC_API_KEY)),
         )
+        _upsert_job(
+            "Forecast postmortems — bounded interpretation",
+            "forecast.interpret_postmortems",
+            {},
+            86_400,
+            enabled=(
+                settings.POSTMORTEM_INTERPRETATION_ENABLED and bool(settings.ANTHROPIC_API_KEY)
+            ),
+        )
         ProviderEvaluation.objects.update_or_create(
             category="economic-calendar",
             provider="Official statistical agencies",

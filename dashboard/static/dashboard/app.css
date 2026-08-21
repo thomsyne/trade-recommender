@@ -895,6 +895,45 @@ p {
 .coverage.complete { color: var(--green); }
 .coverage.missing { color: #9d5d2e; }
 .coverage.not_applicable { color: var(--muted); }
+.interpretation-notebook { background: #f5f1e8; border-top: 1px solid var(--line); padding: 18px 16px; }
+.interpretation-notebook > header { align-items: flex-start; display: flex; gap: 12px; justify-content: space-between; }
+.interpretation-notebook > header span,
+.interpretation-notebook > header strong { display: block; }
+.interpretation-notebook > header span { color: #7b5c31; font-size: 9px; font-weight: 700; letter-spacing: .08em; }
+.interpretation-notebook > header small { color: var(--muted); font-size: 9px; text-align: right; }
+.interpretation-summary { font-family: "Manrope", sans-serif; line-height: 1.55; margin: 14px 0; }
+.interpretation-claims { display: grid; gap: 1px; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); background: var(--line); border: 1px solid var(--line); }
+.interpretation-claims article { background: var(--panel); padding: 14px; }
+.interpretation-claims span { color: #7b5c31; font-size: 8px; font-weight: 700; letter-spacing: .07em; }
+.interpretation-claims p { font-size: 11px; line-height: 1.55; margin: 7px 0; }
+.interpretation-claims small { color: var(--muted); font-size: 8px; overflow-wrap: anywhere; }
+.source-proposal-strip { border-top: 1px solid var(--line); display: grid; font-size: 10px; gap: 5px; margin-top: 14px; padding-top: 12px; }
+.source-proposal-strip strong { color: #7b5c31; font-size: 8px; letter-spacing: .07em; }
+.interpretation-boundary,
+.interpretation-unavailable { align-items: flex-start; background: #ece8dc; display: flex; flex-wrap: wrap; font-size: 9px; gap: 6px 12px; margin-top: 14px; padding: 10px 12px; }
+.interpretation-unavailable { border-top: 1px solid var(--line); margin: 0; padding: 14px 16px; }
+.interpretation-boundary span,
+.interpretation-unavailable span,
+.interpretation-unavailable small { color: var(--muted); }
+.learning-queue,
+.hypothesis-panel { background: var(--panel); border: 1px solid var(--line); margin-top: 18px; padding: 25px; }
+.learning-list article { align-items: flex-start; border-top: 1px solid var(--line); display: flex; gap: 16px; justify-content: space-between; padding: 16px 0; }
+.learning-list p { color: var(--muted); font-size: 11px; line-height: 1.55; margin: 5px 0; }
+.learning-list small { color: var(--muted); font-size: 9px; }
+.hypothesis-list { display: grid; gap: 16px; margin-top: 18px; }
+.hypothesis-list > article { border: 1px solid var(--line); padding: 18px; }
+.hypothesis-list header { align-items: flex-start; display: flex; gap: 12px; justify-content: space-between; }
+.hypothesis-list header strong,
+.hypothesis-list header small { display: block; }
+.hypothesis-list header small { color: var(--muted); font-size: 9px; margin-top: 4px; }
+.hypothesis-list > article > p { line-height: 1.6; }
+.hypothesis-list dl { border: 1px solid var(--line); display: grid; grid-template-columns: repeat(2, 1fr); }
+.hypothesis-list dl div { padding: 14px; }
+.hypothesis-list dl div + div { border-left: 1px solid var(--line); }
+.hypothesis-list dt { color: var(--muted); font-size: 9px; text-transform: uppercase; }
+.hypothesis-list dd { font-size: 11px; line-height: 1.55; margin: 6px 0 0; }
+.hypothesis-list form { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px; }
+.hypothesis-list form small { color: var(--muted); font-size: 9px; }
 .workspace-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 300px;
@@ -2041,4 +2080,9 @@ td small {
   .review-dimensions { grid-template-columns: 1fr; }
   .review-dimensions section { border-bottom: 1px solid var(--line); border-right: 0; }
   .review-dimensions section:last-child { border-bottom: 0; }
+  .interpretation-notebook > header { display: block; }
+  .interpretation-notebook > header small { display: block; margin-top: 6px; text-align: left; }
+  .interpretation-claims { grid-template-columns: 1fr; }
+  .hypothesis-list dl { grid-template-columns: 1fr; }
+  .hypothesis-list dl div + div { border-left: 0; border-top: 1px solid var(--line); }
 }

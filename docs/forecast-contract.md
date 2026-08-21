@@ -72,6 +72,7 @@ python manage.py issue_baselines
 python manage.py issue_baselines USD_CAD
 python manage.py resolve_forecasts
 python manage.py build_postmortems
+python manage.py interpret_postmortems
 ```
 
 Baseline issuance is idempotent for one instrument, target version, and exact
@@ -81,6 +82,10 @@ eligible deterministic recommendation postmortems; the explicit postmortem
 command is idempotent and accepts `--instrument` or `--reassess-cohort` for a
 later correction assessment. It does not automatically issue a new baseline;
 forecast cadence and material-change issuance remain explicit policy.
-The command refuses development fixtures so an immutable test record cannot
+The optional interpretation command fails closed unless explicitly enabled and
+configured. It accepts only recommendation contract v3, sends a rights-cleared
+projection rather than broker prices or technical levels, and cannot modify the
+deterministic assessment or active strategy.
+Baseline issuance refuses development fixtures so an immutable test record cannot
 retain invented candles when the workspace transitions to OANDA. Fixture
 forecast rendering is covered through an explicit test-only override.

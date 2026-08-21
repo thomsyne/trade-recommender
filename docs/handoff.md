@@ -112,6 +112,18 @@ Claude interpretation. Daily/hourly ingestion and `resolve_forecasts` attempt
 the idempotent review build; `build_postmortems` supports explicit operation and
 later correction reassessment.
 
+The Bounded Interpretation slice is implemented. Contract-v3 postmortems can be
+projected into a narrowly allowlisted packet that excludes links, raw content,
+technical context, and numeric OANDA-derived values. Optional Sonnet output is
+schema-validated, citation-checked, screened for causal and instruction-like
+claims, and stored beside—not over—the immutable deterministic facts. Provider
+failures and the separate US$20 monthly budget fail closed without blocking the
+postmortem notebook. Observations are database-constrained as non-actionable;
+source discoveries remain quarantined and notify the owner. A candidate only
+appears after the same pattern spans five distinct issuance timestamps, and
+owner authorization records permission for a future challenger without
+activating any strategy change. Real interpretation is disabled by default.
+
 ## Verification gate
 
 Run:
@@ -130,10 +142,10 @@ Research, and Operations at desktop and narrow viewport widths.
 
 ## Next pickup
 
-Implement Slice 4 from `docs/governed-learning-map.md`: rights-cleared bounded
-Sonnet interpretation and a non-actionable governed learning queue. Deterministic
-review facts must remain authoritative and complete when model work is disabled,
-over budget, or rejected.
+Implement Slice 5 from `docs/governed-learning-map.md`: immutable experiment
+eras, prospective challenger preregistration, dependence-aware sample health,
+baselines, intervals, calibration/sharpness/coverage, and explicit promotion
+records. Authorization from Slice 4 must not itself start a challenger.
 
 ## Still OPEN
 

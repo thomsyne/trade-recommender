@@ -370,7 +370,7 @@ source hashes and lineage, cutoff-aware eligibility, a read-only owner notebook,
 and pair timelines. Identical reassessments create no rows; changed source facts
 append assessments linked to the records they supersede.
 
-### Slice 4 — Bounded Sonnet interpretation and learning queue
+### Slice 4 — Bounded Sonnet interpretation and learning queue — complete
 
 Add rights-cleared packet projection, full method identity, structured cited
 interpretation, US$20 monthly reservation, observations, five-cohort hypothesis
@@ -379,6 +379,16 @@ gate, source proposals, and owner-authorized challenger creation.
 **Gate:** deterministic review survives provider/budget failure; OANDA-derived
 values and restricted fields cannot enter requests; injection/unsupported
 claims fail; agents cannot alter active policy.
+
+Implemented with a contract-v3-only rights projection, immutable prompt/schema/
+model/pricing identity, structured cited output, separate daily/monthly budget
+reservations, fail-closed provider attempts, non-actionable observations,
+quarantined source proposals with owner notification, and a five-distinct-
+issuance-cohort hypothesis gate. Owner authorization is an append-only audited
+permission to design a future challenger; it cannot start an experiment or
+change the champion, recommendation prompt, confidence, sizing, or risk policy.
+The feature and its daily scheduled job remain disabled unless both the
+postmortem feature flag and Anthropic credential are configured.
 
 ### Slice 5 — Reproducible experiment health
 
