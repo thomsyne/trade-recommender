@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, close_old_connections, transaction
+from django.db import DatabaseError, close_old_connections, connections, transaction
 from django.test import Client, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -198,7 +198,7 @@ class PortfolioAdmissionTests(TransactionTestCase):
                     actor=get_user_model().objects.get(pk=self.owner.pk),
                 ).pk
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             selection_ids = list(executor.map(choose, (eur.pk, gbp.pk)))

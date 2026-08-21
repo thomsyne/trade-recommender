@@ -4,7 +4,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from django.core import mail
-from django.db import close_old_connections
+from django.db import close_old_connections, connections
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
@@ -234,7 +234,7 @@ class BudgetConcurrencyTests(TransactionTestCase):
                 )
                 return row is not None
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(reserve, ("concurrent:1", "concurrent:2")))

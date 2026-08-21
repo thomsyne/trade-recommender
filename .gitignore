@@ -8,3 +8,8 @@ __pycache__/
 htmlcov/
 staticfiles/
 *.sqlite3
+.terraform/
+*.tfstate
+*.tfstate.*
+*.auto.tfvars
+*.auto.tfvars.json

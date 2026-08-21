@@ -1,0 +1,13 @@
+# Optional. SSM Session Manager remains available even when SSH is disabled.
+ssh_public_key = "ssh-ed25519 AAAA... owner@example"
+
+# Prefer narrow current locations. Explicitly use 0.0.0.0/0 only if travel makes
+# it unavoidable; password and root SSH remain disabled, but Internet-wide SSH
+# still increases exposure.
+ssh_cidrs = ["203.0.113.10/32"]
+
+# Required: use the ID of the existing public hosted zone for thomsyne.dev.
+route53_zone_id = "Z0123456789EXAMPLE"
+
+# This is the default and can normally be omitted.
+public_hostname = "fx-forecast.thomsyne.dev"

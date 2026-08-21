@@ -331,7 +331,7 @@ def _has_coverage(recommendation, through, candles):
     ).exists()
     if not manifest_covers_range or not candles:
         return False
-    if candles[0].timestamp > _next_market_hour(recommendation.generated_at):
+    if candles[0].timestamp != _next_market_hour(recommendation.generated_at):
         return False
     if candles[-1].timestamp + timedelta(hours=1) < through:
         return False
@@ -344,8 +344,7 @@ def _has_coverage(recommendation, through, candles):
 
 def _next_market_hour(value):
     local = value.astimezone(NEW_YORK)
-    if local.minute or local.second or local.microsecond:
-        local = local.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    local = local.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     if local.weekday() == 4 and local.hour >= 17:
         local = (local + timedelta(days=2)).replace(hour=17, minute=0, second=0, microsecond=0)
     elif local.weekday() == 5:

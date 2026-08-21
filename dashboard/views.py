@@ -1,10 +1,13 @@
+import shutil
 from datetime import timedelta
+from pathlib import Path
 
 from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import connection
-from django.db.models import F, Prefetch
+from django.db.migrations.executor import MigrationExecutor
+from django.db.models import F, Prefetch, Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -58,6 +61,45 @@ def health(request):
         cursor.execute("SELECT 1")
         database = cursor.fetchone()[0] == 1
     return JsonResponse({"status": "ok", "database": database})
+
+
+def live(request):
+    return JsonResponse({"status": "ok"})
+
+
+def ready(request):
+    failures = []
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        executor = MigrationExecutor(connection)
+        if executor.migration_plan(executor.loader.graph.leaf_nodes()):
+            failures.append("migrations")
+        stale_before = timezone.now() - timedelta(minutes=10)
+        if (
+            JobOccurrence.objects.filter(status=JobOccurrence.Status.RUNNING)
+            .filter(Q(heartbeat_at__isnull=True) | Q(heartbeat_at__lt=stale_before))
+            .exists()
+        ):
+            failures.append("stale_jobs")
+    except Exception:
+        failures.append("database")
+    try:
+        free_gb = shutil.disk_usage(settings.READINESS_DISK_PATH).free / (1024**3)
+        if free_gb < settings.READINESS_MIN_FREE_GB:
+            failures.append("disk")
+    except OSError:
+        failures.append("disk")
+    if settings.READINESS_BACKUP_MARKER:
+        marker = Path(settings.READINESS_BACKUP_MARKER)
+        if not marker.exists() or timezone.now().timestamp() - marker.stat().st_mtime > (
+            settings.READINESS_BACKUP_MAX_AGE_HOURS * 3600
+        ):
+            failures.append("backup")
+    status = 503 if failures else 200
+    return JsonResponse(
+        {"status": "unhealthy" if failures else "ok", "checks": failures}, status=status
+    )
 
 
 @owner_required

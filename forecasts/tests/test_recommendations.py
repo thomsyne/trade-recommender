@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, close_old_connections, transaction
+from django.db import DatabaseError, close_old_connections, connections, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
@@ -363,9 +363,9 @@ class RecommendationTests(TestCase):
             generated_at=self.now + timedelta(seconds=1),
         )
         self.admit(recommendation)
-        first = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
-            hours=1
-        )
+        first = open_market_hours(
+            recommendation.generated_at, recommendation.generated_at + timedelta(days=4)
+        )[0]
         candles = [
             hourly_candle(
                 first,
@@ -421,9 +421,9 @@ class RecommendationTests(TestCase):
             generated_at=self.now + timedelta(seconds=1),
         )
         self.admit(recommendation)
-        first = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
-            hours=1
-        )
+        first = open_market_hours(
+            recommendation.generated_at, recommendation.generated_at + timedelta(days=4)
+        )[0]
         store_ingestion(
             self.source,
             self.instrument,
@@ -453,15 +453,22 @@ class RecommendationTests(TestCase):
         self.assertEqual(result.gross_pips, Decimal("-100.000"))
 
     def test_paper_trade_waits_when_hourly_coverage_does_not_start_after_generation(self):
+        local_now = self.now.astimezone(ZoneInfo("America/New_York"))
+        days_until_friday = (4 - local_now.weekday()) % 7
+        generated_at = (local_now + timedelta(days=days_until_friday)).replace(
+            hour=18, minute=30, second=0, microsecond=0
+        )
+        if generated_at <= local_now:
+            generated_at += timedelta(days=7)
+        generated_at = generated_at.astimezone(self.now.tzinfo)
+        evidence(self.instrument, generated_at)
         recommendation = generate_recommendation(
             self.instrument,
             provider=FakeProvider(),
-            generated_at=self.now + timedelta(seconds=1),
+            generated_at=generated_at,
         )
         self.admit(recommendation)
-        late = recommendation.generated_at.replace(minute=0, second=0, microsecond=0) + timedelta(
-            hours=3
-        )
+        late = recommendation.generated_at + timedelta(hours=2)
         store_ingestion(
             self.source,
             self.instrument,
@@ -470,6 +477,35 @@ class RecommendationTests(TestCase):
             late + timedelta(hours=1),
             [hourly_candle(late)],
             {"test": "paper-incomplete-coverage", "requests": []},
+        )
+
+        self.assertIsNone(resolve_paper_trade(recommendation))
+        self.assertFalse(PaperTradeEntry.objects.exists())
+
+    def test_paper_trade_ignores_interval_starting_exactly_at_generation(self):
+        local_now = self.now.astimezone(ZoneInfo("America/New_York"))
+        days_until_monday = (7 - local_now.weekday()) % 7
+        generated_at = (local_now + timedelta(days=days_until_monday)).replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
+        if generated_at <= local_now:
+            generated_at += timedelta(days=7)
+        generated_at = generated_at.astimezone(self.now.tzinfo)
+        evidence(self.instrument, generated_at)
+        recommendation = generate_recommendation(
+            self.instrument,
+            provider=FakeProvider(),
+            generated_at=generated_at,
+        )
+        self.admit(recommendation)
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "H1",
+            generated_at - timedelta(hours=1),
+            generated_at + timedelta(hours=1),
+            [hourly_candle(generated_at)],
+            {"test": "paper-generation-boundary", "requests": []},
         )
 
         self.assertIsNone(resolve_paper_trade(recommendation))
@@ -605,7 +641,7 @@ class RecommendationDatabaseTests(TransactionTestCase):
             try:
                 return size_recommendation(recommendation, sized_at=recommendation.generated_at).pk
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             sizing_ids = list(executor.map(size_once, range(2)))
@@ -622,9 +658,9 @@ class RecommendationDatabaseTests(TransactionTestCase):
         recommendation.refresh_from_db()
         self.assertEqual(recommendation.confidence_percent, 62)
 
-        first_hour = recommendation.generated_at.replace(
-            minute=0, second=0, microsecond=0
-        ) + timedelta(hours=1)
+        first_hour = open_market_hours(
+            recommendation.generated_at, recommendation.generated_at + timedelta(days=4)
+        )[0]
         store_ingestion(
             source,
             instrument,

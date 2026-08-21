@@ -1,0 +1,173 @@
+name: Check and deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Deploy the selected commit or roll back to an existing image SHA
+        type: choice
+        options: [deploy, rollback]
+        default: deploy
+      image_sha:
+        description: Existing ECR image tag for rollback (required for rollback)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  PUBLIC_HOSTNAME: fx-forecast.thomsyne.dev
+  TERRAFORM_VERSION: 1.13.3
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_DB: trade_recommender
+          POSTGRES_USER: trade_recommender
+          POSTGRES_PASSWORD: ci-only-database-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trade_recommender"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install Python dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --disable-pip-version-check -r requirements.txt -r requirements-dev.txt
+      - name: Lint, migration, and test
+        env:
+          POSTGRES_PASSWORD: ci-only-database-password
+          DJANGO_SECRET_KEY: ci-only-not-used-in-production
+        run: |
+          make check
+          make test
+      - name: Exercise fail-closed production settings
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings_production
+          DJANGO_SECRET_KEY: ci-production-check-only-000000000000000000000000000000
+          PUBLIC_URL: https://fx-forecast.thomsyne.dev
+          POSTGRES_PASSWORD: ci-only-database-password
+        run: .venv/bin/python manage.py check --deploy
+      - name: Validate production Compose rendering
+        run: APP_ENV_FILE=production.env.example docker compose --env-file deploy/production.env.example -f deploy/compose.production.yaml config --quiet
+      - name: Check Terraform formatting
+        run: |
+          bash deploy/scripts/install-terraform.sh "$TERRAFORM_VERSION" "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/terraform" fmt -check -recursive infra
+
+  deploy:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy')
+    needs: checks
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: trade-recommender-production
+      cancel-in-progress: false
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+      ROUTE53_ZONE_ID: ${{ vars.ROUTE53_ZONE_ID }}
+      SSH_PUBLIC_KEY: ${{ vars.SSH_PUBLIC_KEY }}
+      SSH_CIDRS_JSON: ${{ vars.SSH_CIDRS_JSON }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install Terraform and initialize encrypted remote state
+        id: bootstrap
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          state_bucket="trade-recommender-${account_id}-tfstate"
+          if ! aws s3api head-bucket --bucket "$state_bucket" 2>/dev/null; then
+            aws s3api create-bucket --bucket "$state_bucket" --region "$AWS_REGION"
+          fi
+          aws s3api put-bucket-encryption --bucket "$state_bucket" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+          aws s3api put-bucket-versioning --bucket "$state_bucket" --versioning-configuration Status=Enabled
+          aws s3api put-public-access-block --bucket "$state_bucket" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+          bash deploy/scripts/install-terraform.sh "$TERRAFORM_VERSION" "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          python3 - <<'PY'
+          import json, os
+          cidrs = json.loads(os.environ.get("SSH_CIDRS_JSON") or "[]")
+          zone_id = os.environ.get("ROUTE53_ZONE_ID", "").strip()
+          if not zone_id:
+              raise SystemExit("ROUTE53_ZONE_ID repository variable is required")
+          with open("infra/owner.auto.tfvars.json", "w") as stream:
+              json.dump({"route53_zone_id": zone_id, "public_hostname": os.environ["PUBLIC_HOSTNAME"], "ssh_public_key": os.environ.get("SSH_PUBLIC_KEY", ""), "ssh_cidrs": cidrs}, stream)
+          PY
+          terraform -chdir=infra init -input=false \
+            -backend-config="bucket=${state_bucket}" -backend-config="key=production/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" -backend-config="encrypt=true" -backend-config="use_lockfile=true"
+      - name: Create ECR first, build once, and push immutable commit image
+        run: |
+          set -euo pipefail
+          terraform -chdir=infra apply -input=false -auto-approve -target=aws_ecr_repository.app
+          repository="$(terraform -chdir=infra output -raw ecr_repository_url)"
+          registry="${repository%%/*}"
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$registry"
+          docker run --privileged --rm tonistiigi/binfmt:qemu-v8.1.5 --install arm64
+          docker buildx create --use
+          docker buildx build --platform linux/arm64 --tag "${repository}:${GITHUB_SHA}" --push .
+      - name: Apply infrastructure
+        id: apply
+        run: |
+          terraform -chdir=infra apply -input=false -auto-approve
+          echo "repository=$(terraform -chdir=infra output -raw ecr_repository_url)" >> "$GITHUB_OUTPUT"
+          echo "instance=$(terraform -chdir=infra output -raw instance_id)" >> "$GITHUB_OUTPUT"
+          echo "host=$(terraform -chdir=infra output -raw public_hostname)" >> "$GITHUB_OUTPUT"
+          echo "ip=$(terraform -chdir=infra output -raw elastic_ip)" >> "$GITHUB_OUTPUT"
+          echo "bucket=$(terraform -chdir=infra output -raw backup_bucket)" >> "$GITHUB_OUTPUT"
+          echo "parameter=$(terraform -chdir=infra output -raw production_env_parameter)" >> "$GITHUB_OUTPUT"
+      - name: Store production environment without logging it
+        env:
+          PARAMETER: ${{ steps.apply.outputs.parameter }}
+          PRODUCTION_ENV: ${{ secrets.PRODUCTION_ENV }}
+        run: |
+          set +x
+          python3 - <<'PY'
+          import json, os
+          if len(os.environ["PRODUCTION_ENV"].encode()) > 4096:
+              raise SystemExit("PRODUCTION_ENV exceeds the 4096-byte SecureString limit")
+          with open("parameter.json", "w") as stream:
+              json.dump({"Name": os.environ["PARAMETER"], "Type": "SecureString", "Overwrite": True, "Value": os.environ["PRODUCTION_ENV"]}, stream)
+          PY
+          aws ssm put-parameter --cli-input-json file://parameter.json --region "$AWS_REGION" >/dev/null
+          rm -f parameter.json
+      - name: Upload deployment manifests and deploy exact image through SSM
+        env:
+          INSTANCE_ID: ${{ steps.apply.outputs.instance }}
+          PUBLIC_HOST: ${{ steps.apply.outputs.host }}
+          EXPECTED_IP: ${{ steps.apply.outputs.ip }}
+          BACKUP_BUCKET: ${{ steps.apply.outputs.bucket }}
+          ENV_PARAMETER: ${{ steps.apply.outputs.parameter }}
+          IMAGE_URI: ${{ steps.apply.outputs.repository }}:${{ github.sha }}
+        run: deploy/scripts/send-deployment.sh
+
+  rollback:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'rollback'
+    needs: checks
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: trade-recommender-production
+      cancel-in-progress: false
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Roll back through SSM
+        env:
+          ROLLBACK_SHA: ${{ inputs.image_sha }}
+        run: deploy/scripts/manual-rollback.sh
