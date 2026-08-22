@@ -43,7 +43,9 @@ docker pull "$IMAGE_URI"
 previous="$(cat current-image 2>/dev/null || true)"
 docker compose --env-file .env -f compose.production.yaml up -d db
 docker compose --env-file .env -f compose.production.yaml run --rm backup /app/deploy/scripts/backup.sh once
+docker compose --env-file .env -f compose.production.yaml stop worker scheduler
 docker compose --env-file .env -f compose.production.yaml run --rm web python manage.py migrate --noinput
+docker compose --env-file .env -f compose.production.yaml run --rm web python manage.py seed_canonical
 docker compose --env-file .env -f compose.production.yaml up -d --remove-orphans
 
 healthy=false
