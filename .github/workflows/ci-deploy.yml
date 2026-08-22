@@ -52,6 +52,7 @@ jobs:
           make check
           .venv/bin/python deploy/scripts/check-deploy-iam-policy.py
           bash deploy/scripts/test-bootstrap-host.sh
+          bash deploy/scripts/test-remote-deploy.sh
           make test
       - name: Exercise fail-closed production settings
         env:
