@@ -26,7 +26,18 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/health/ready/"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "--silent",
+          "--header",
+          "Host: ${PUBLIC_HOST:?required}",
+          "--header",
+          "X-Forwarded-Proto: https",
+          "http://localhost:8000/health/ready/",
+        ]
       interval: 20s
       timeout: 5s
       retries: 6

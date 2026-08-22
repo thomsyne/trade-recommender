@@ -61,7 +61,7 @@ jobs:
           POSTGRES_PASSWORD: ci-only-database-password
         run: .venv/bin/python manage.py check --deploy
       - name: Validate production Compose rendering
-        run: APP_ENV_FILE=production.env.example docker compose --env-file deploy/production.env.example -f deploy/compose.production.yaml config --quiet
+        run: bash deploy/scripts/test-production-compose.sh
       - name: Check Terraform formatting
         run: |
           bash deploy/scripts/install-terraform.sh "$TERRAFORM_VERSION" "$RUNNER_TEMP/bin"
