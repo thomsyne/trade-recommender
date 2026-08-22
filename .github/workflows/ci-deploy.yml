@@ -50,6 +50,7 @@ jobs:
           DJANGO_SECRET_KEY: ci-only-not-used-in-production
         run: |
           make check
+          .venv/bin/python deploy/scripts/check-deploy-iam-policy.py
           make test
       - name: Exercise fail-closed production settings
         env:
@@ -110,6 +111,8 @@ jobs:
           terraform -chdir=infra init -input=false \
             -backend-config="bucket=${state_bucket}" -backend-config="key=production/terraform.tfstate" \
             -backend-config="region=${AWS_REGION}" -backend-config="encrypt=true" -backend-config="use_lockfile=true"
+          BACKUP_BUCKET="trade-recommender-${account_id}-backups" \
+            bash deploy/scripts/recover-terraform-state.sh
       - name: Create ECR first, build once, and push immutable commit image
         run: |
           set -euo pipefail
