@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+POLICY_LIMIT = 6144
+
 
 def policy(account_id, zone_id):
     region = "us-east-1"
@@ -33,6 +35,7 @@ def policy(account_id, zone_id):
                 "Effect": "Allow",
                 "Action": [
                     "ec2:Describe*",
+                    "ec2:GetInstanceUefiData",
                     "ssm:DescribeInstanceInformation",
                     "ssm:GetCommandInvocation",
                 ],
@@ -45,18 +48,11 @@ def policy(account_id, zone_id):
                 "Action": [
                     "s3:CreateBucket",
                     "s3:DeleteBucket",
-                    "s3:GetBucket*",
-                    "s3:ListBucket",
-                    "s3:ListBucketVersions",
-                    "s3:PutBucketVersioning",
-                    "s3:GetEncryptionConfiguration",
+                    "s3:Get*",
+                    "s3:ListBucket*",
+                    "s3:PutBucket*",
                     "s3:PutEncryptionConfiguration",
-                    "s3:PutBucketPublicAccessBlock",
-                    "s3:GetLifecycleConfiguration",
                     "s3:PutLifecycleConfiguration",
-                    "s3:DeleteLifecycleConfiguration",
-                    "s3:PutBucketTagging",
-                    "s3:DeleteBucketTagging",
                 ],
                 "Resource": [state_bucket, backup_bucket],
             },
@@ -127,7 +123,9 @@ def policy(account_id, zone_id):
                     "ec2:AssociateRouteTable",
                     "ec2:DisassociateRouteTable",
                     "ec2:CreateRoute",
+                    "ec2:ReplaceRoute",
                     "ec2:DeleteRoute",
+                    "ec2:ReplaceRouteTableAssociation",
                     "ec2:CreateSecurityGroup",
                     "ec2:DeleteSecurityGroup",
                     "ec2:AuthorizeSecurityGroupIngress",
@@ -140,6 +138,12 @@ def policy(account_id, zone_id):
                     "ec2:ReleaseAddress",
                     "ec2:ImportKeyPair",
                     "ec2:DeleteKeyPair",
+                    "ec2:CreateVolume",
+                    "ec2:ModifyVolume",
+                    "ec2:CreateNetworkInterface",
+                    "ec2:AttachNetworkInterface",
+                    "ec2:DetachNetworkInterface",
+                    "ec2:DeleteNetworkInterface",
                     "ec2:RunInstances",
                     "ec2:TerminateInstances",
                     "ec2:StartInstances",
@@ -167,7 +171,9 @@ def policy(account_id, zone_id):
                     "iam:GetRolePolicy",
                     "iam:DeleteRolePolicy",
                     "iam:ListRolePolicies",
+                    "iam:ListRoleTags",
                     "iam:ListInstanceProfilesForRole",
+                    "iam:UpdateRoleDescription",
                     "iam:AttachRolePolicy",
                     "iam:DetachRolePolicy",
                     "iam:ListAttachedRolePolicies",
@@ -183,6 +189,7 @@ def policy(account_id, zone_id):
                     "iam:GetInstanceProfile",
                     "iam:TagInstanceProfile",
                     "iam:UntagInstanceProfile",
+                    "iam:ListInstanceProfileTags",
                     "iam:AddRoleToInstanceProfile",
                     "iam:RemoveRoleFromInstanceProfile",
                 ],
@@ -263,11 +270,13 @@ def main():
     arguments = parser.parse_args()
     if not re.fullmatch(r"[0-9]{12}", arguments.account_id):
         parser.error("--account-id must be exactly 12 digits")
-    if not re.fullmatch(r"Z[A-Z0-9]+", arguments.route53_zone_id):
-        parser.error(
-            "--route53-zone-id must begin with Z and contain only uppercase letters/digits"
-        )
-    rendered = json.dumps(policy(arguments.account_id, arguments.route53_zone_id), indent=2) + "\n"
+    if not re.fullmatch(r"Z[A-Z0-9]{1,31}", arguments.route53_zone_id):
+        parser.error("--route53-zone-id must be 2-32 uppercase letters/digits beginning with Z")
+    generated = policy(arguments.account_id, arguments.route53_zone_id)
+    compact = json.dumps(generated, separators=(",", ":"))
+    if len(compact) > POLICY_LIMIT:
+        parser.error(f"generated policy exceeds the {POLICY_LIMIT}-character IAM quota")
+    rendered = json.dumps(generated, indent=2) + "\n"
     json.loads(rendered)
     if arguments.output:
         arguments.output.write_text(rendered)

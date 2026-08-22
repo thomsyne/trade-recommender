@@ -115,6 +115,19 @@ make the bootstrap unreliable. S3, ECR, IAM, the parameter, SSM command target,
 and Route 53 permissions are resource-scoped wherever AWS supports it. Review
 the generated policy whenever infrastructure names or workflow AWS calls change.
 
+S3 control-plane reads use `s3:Get*` only on the exact state and backup bucket
+ARNs. This covers provider refresh calls whose IAM names do not share a stable
+prefix, including `GetAccelerateConfiguration`, `GetReplicationConfiguration`,
+and `GetEncryptionConfiguration`. It does not grant object reads: those require
+object ARNs, and the policy lists only the exact Terraform state/lock and
+deployment-manifest objects separately. Bucket configuration writes/deletes are
+similarly covered by write permissions restricted to the two bucket ARNs. S3's
+delete-encryption, delete-lifecycle, and delete-public-access-block APIs are
+authorized by their corresponding `Put*` IAM actions. The CI policy audit
+exercises representative implicit reads and waiters for every configured
+Terraform resource class; it is a static guard, not a substitute for an AWS IAM
+policy simulation or a live deployment.
+
 ## First deployment
 
 1. Confirm the existing **public** `thomsyne.dev` hosted zone is delegated by
@@ -157,6 +170,15 @@ the generated policy whenever infrastructure names or workflow AWS calls change.
 The instance and backup bucket have Terraform `prevent_destroy`; deliberate
 teardown requires reviewing/removing those guards first. The state bucket is
 outside Terraform by design so state cannot destroy itself.
+
+If an interrupted first apply creates the exact backup bucket but its
+read-after-create fails, Terraform may persist the resource as tainted; a hard
+interruption can instead leave it absent from state. Bootstrap checks the
+initialized remote state: it non-destructively clears partial-create taint from
+an existing tracked bucket or imports an existing untracked bucket. It does
+nothing when the bucket is absent and fails closed on authorization or other
+unexpected `HeadBucket` errors. Completed resources remain in remote state and
+are refreshed normally on the next apply.
 
 ## Deployment and rollback behavior
 
