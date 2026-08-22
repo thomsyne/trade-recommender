@@ -3,6 +3,15 @@ set -Eeuo pipefail
 umask 077
 
 : "${IMAGE_URI:?}" "${PUBLIC_HOST:?}" "${EXPECTED_IP:?}" "${ACME_EMAIL:?}" "${BACKUP_BUCKET:?}" "${ENV_PARAMETER:?}" "${AWS_REGION:?}"
+for prerequisite in aws curl docker; do
+  command -v "$prerequisite" >/dev/null || {
+    echo "missing host prerequisite: $prerequisite" >&2
+    exit 1
+  }
+done
+docker info >/dev/null
+docker compose version >/dev/null
+
 install -d -m 700 /opt/trade-recommender
 cd /opt/trade-recommender
 aws s3 cp "s3://${BACKUP_BUCKET}/deployment/compose.production.yaml" . --region "$AWS_REGION" --only-show-errors
@@ -27,7 +36,9 @@ EOF
 mv .env.next .env
 
 registry="${IMAGE_URI%%/*}"
-aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$registry"
+registry_password="$(aws ecr get-login-password --region "$AWS_REGION")"
+docker login --username AWS --password-stdin "$registry" <<<"$registry_password"
+unset registry_password
 docker pull "$IMAGE_URI"
 previous="$(cat current-image 2>/dev/null || true)"
 docker compose --env-file .env -f compose.production.yaml up -d db

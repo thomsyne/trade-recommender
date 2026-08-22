@@ -210,8 +210,9 @@ resource "aws_instance" "app" {
   iam_instance_profile        = aws_iam_instance_profile.instance.name
   key_name                    = var.ssh_public_key == "" ? null : aws_key_pair.owner[0].key_name
   associate_public_ip_address = true
-  user_data_replace_on_change = true
-  user_data                   = file("${path.module}/user-data.sh")
+  user_data = templatefile("${path.module}/user-data.sh", {
+    bootstrap_script_base64 = base64encode(file("${path.module}/../deploy/scripts/bootstrap-host.sh"))
+  })
 
   metadata_options {
     http_endpoint               = "enabled"
@@ -228,7 +229,8 @@ resource "aws_instance" "app" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [ami]
+    # Existing hosts are repaired through SSM; user-data is only for new instances.
+    ignore_changes = [ami, user_data]
   }
 }
 

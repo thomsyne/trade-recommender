@@ -25,15 +25,30 @@ done
 [ "${ping:-}" = "Online" ] || { echo "instance did not become available in SSM" >&2; exit 1; }
 
 python3 - <<'PY'
-import json, os, shlex
+import base64, json, os, shlex
+from pathlib import Path
+
 values = {key: os.environ[key] for key in ("IMAGE_URI", "PUBLIC_HOST", "EXPECTED_IP", "ACME_EMAIL", "BACKUP_BUCKET", "ENV_PARAMETER", "AWS_REGION")}
 exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
-command = f"aws s3 cp s3://{values['BACKUP_BUCKET']}/deployment/remote-deploy.sh /tmp/remote-deploy.sh --region {values['AWS_REGION']} --only-show-errors && chmod 700 /tmp/remote-deploy.sh && {exports} /tmp/remote-deploy.sh"
+bootstrap = base64.b64encode(Path("deploy/scripts/bootstrap-host.sh").read_bytes()).decode()
+commands = [
+    "set -e",
+    f"printf %s {shlex.quote(bootstrap)} | base64 --decode > /tmp/bootstrap-host.sh",
+    "chmod 700 /tmp/bootstrap-host.sh",
+    "/tmp/bootstrap-host.sh",
+    f"aws s3 cp s3://{values['BACKUP_BUCKET']}/deployment/remote-deploy.sh /tmp/remote-deploy.sh --region {values['AWS_REGION']} --only-show-errors",
+    "chmod 700 /tmp/remote-deploy.sh",
+    f"{exports} /tmp/remote-deploy.sh",
+]
+command = " && ".join(commands)
+if len(command.encode()) > 24000:
+    raise SystemExit("generated SSM command exceeds the 24,000-byte limit")
 with open("ssm-command.json", "w") as stream:
     json.dump({"DocumentName": "AWS-RunShellScript", "InstanceIds": [os.environ["INSTANCE_ID"]], "Parameters": {"commands": [command]}, "TimeoutSeconds": 900}, stream)
 PY
 command_id="$(aws ssm send-command --cli-input-json file://ssm-command.json --region "$AWS_REGION" --query Command.CommandId --output text)"
 rm -f ssm-command.json
+status=""
 for _ in $(seq 1 90); do
   status="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" --region "$AWS_REGION" --query Status --output text 2>/dev/null || true)"
   case "$status" in

@@ -184,13 +184,23 @@ are refreshed normally on the next apply.
 
 The workflow uploads only non-secret deployment manifests to the private backup
 bucket, updates the one SSM SecureString, and invokes the host through SSM. The
-host pulls the exact SHA image using its instance role, starts PostgreSQL, makes
-and uploads a compressed pre-migration dump, migrates, restarts services, and
-waits for the Route 53 A record to converge before allowing Caddy to request or
-renew a trusted certificate, then checks HTTPS directly against the EIP using
-the custom hostname for TLS validation. If readiness fails, it restores
-the previously recorded image and exits unsuccessfully. Database migrations are
-not automatically reversed, so migrations must remain backward compatible.
+same versioned, idempotent host bootstrap is embedded in first-boot user-data
+and every SSM deployment. SSM waits for cloud-init to finish, emits bounded
+cloud-final diagnostics when it failed, and repairs the existing instance in
+place before deployment. It verifies the AL2023 host, Docker daemon, pinned ARM
+Compose plugin, AWS CLI, SSM Agent, SSH hardening, and application directories.
+User-data changes are ignored for an existing protected instance so a bootstrap
+fix does not force replacement; SSM is the update path, while newly created
+instances receive the latest bootstrap automatically.
+
+After host readiness, the host pulls the exact SHA image using its instance
+role, starts PostgreSQL, makes and uploads a compressed pre-migration dump,
+migrates, restarts services, and waits for the Route 53 A record to converge
+before allowing Caddy to request or renew a trusted certificate, then checks
+HTTPS directly against the EIP using the custom hostname for TLS validation. If
+readiness fails, it restores the previously recorded image and exits
+unsuccessfully. Database migrations are not automatically reversed, so
+migrations must remain backward compatible.
 
 For an explicit rollback, run the workflow with `operation=rollback` and a full
 40-character commit SHA that still exists in ECR. It also takes a pre-migration
