@@ -5,6 +5,45 @@ bootstrap="$(cd "$(dirname "$0")" && pwd)/bootstrap-host.sh"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT INT TERM
 
+fail() {
+  echo "bootstrap test assertion failed: $*" >&2
+  if [ -n "${CASE_ROOT:-}" ]; then
+    for artifact in output error calls; do
+      if [ -s "$CASE_ROOT/$artifact" ]; then
+        echo "--- $artifact ---" >&2
+        cat "$CASE_ROOT/$artifact" >&2
+      fi
+    done
+  fi
+  exit 1
+}
+
+assert_contains() {
+  needle="$1"
+  file="$2"
+  grep -Fq -- "$needle" "$file" || fail "expected '$needle' in $file"
+}
+
+assert_not_contains() {
+  needle="$1"
+  file="$2"
+  if grep -Fq -- "$needle" "$file"; then
+    fail "did not expect '$needle' in $file"
+  fi
+}
+
+assert_line() {
+  expected="$1"
+  file="$2"
+  grep -Fxq -- "$expected" "$file" || fail "expected exact line '$expected' in $file"
+}
+
+toolbox="$temporary/toolbox"
+mkdir -p "$toolbox"
+for command in basename cat chmod cp dirname grep install mktemp mv rm; do
+  ln -s "$(command -v "$command")" "$toolbox/$command"
+done
+
 write_stub() {
   name="$1"
   shift
@@ -66,6 +105,11 @@ EOF
 cat >/dev/null
 exit 0
 EOF
+  write_stub timeout <<'EOF'
+#!/bin/bash
+shift
+"$@"
+EOF
 
   export DOCKER_STUB="$CASE_ROOT/docker-stub"
   cat >"$DOCKER_STUB" <<'EOF'
@@ -81,32 +125,33 @@ EOF
 }
 
 run_case() {
-  PATH="$MOCK_BIN:/usr/bin:/bin" BOOTSTRAP_ROOT="$CASE_ROOT" \
-    BOOTSTRAP_FROM_CLOUD_INIT=1 bash "$bootstrap" >"$CASE_ROOT/output"
-  grep -Fq 'host bootstrap 2026-08-22.1 ready' "$CASE_ROOT/output"
-  grep -Fq 'systemctl enable --now docker amazon-ssm-agent' "$CALLS"
-  grep -Fq 'docker info' "$CALLS"
+  if ! PATH="$MOCK_BIN:$toolbox" BOOTSTRAP_ROOT="$CASE_ROOT" \
+    BOOTSTRAP_FROM_CLOUD_INIT=1 /bin/bash "$bootstrap" >"$CASE_ROOT/output" 2>"$CASE_ROOT/error"; then
+    fail "bootstrap execution failed for $(basename "$CASE_ROOT")"
+  fi
+  assert_contains 'host bootstrap 2026-08-22.1 ready' "$CASE_ROOT/output"
+  assert_contains 'systemctl enable --now docker amazon-ssm-agent' "$CALLS"
+  assert_contains 'docker info' "$CALLS"
 }
 
 prepare_case missing-docker
 run_case
-grep -Fq 'dnf install -y docker' "$CALLS"
-grep -Fq 'curl --fail --location --silent --show-error' "$CALLS"
-! grep -Fq ' curl ' < <(grep '^dnf ' "$CALLS")
+assert_line 'dnf install -y docker' "$CALLS"
+assert_contains 'curl --fail --location --silent --show-error' "$CALLS"
 
 prepare_case partial
 cp "$DOCKER_STUB" "$MOCK_BIN/docker"
 run_case
-! grep -q '^dnf ' "$CALLS"
-grep -Fq 'curl --fail --location --silent --show-error' "$CALLS"
+assert_not_contains 'dnf ' "$CALLS"
+assert_contains 'curl --fail --location --silent --show-error' "$CALLS"
 
 prepare_case ready
 cp "$DOCKER_STUB" "$MOCK_BIN/docker"
 mkdir -p "$CASE_ROOT/usr/local/lib/docker/cli-plugins"
 cp "$DOCKER_STUB" "$CASE_ROOT/usr/local/lib/docker/cli-plugins/docker-compose"
 run_case
-! grep -q '^dnf ' "$CALLS"
-! grep -q '^curl ' "$CALLS"
+assert_not_contains 'dnf ' "$CALLS"
+assert_not_contains 'curl ' "$CALLS"
 
 prepare_case cloud-init-failed
 cp "$DOCKER_STUB" "$MOCK_BIN/docker"
@@ -117,11 +162,13 @@ write_stub cloud-init <<'EOF'
 echo 'status: error'
 exit 2
 EOF
-PATH="$MOCK_BIN:/usr/bin:/bin" BOOTSTRAP_ROOT="$CASE_ROOT" \
-  bash "$bootstrap" >"$CASE_ROOT/output" 2>"$CASE_ROOT/error"
-grep -Fq 'cloud-init did not complete cleanly' "$CASE_ROOT/error"
-grep -Fq 'called journalctl --no-pager -u cloud-final.service -n 60' "$CALLS"
-grep -Fq 'host bootstrap 2026-08-22.1 ready' "$CASE_ROOT/output"
+if ! PATH="$MOCK_BIN:$toolbox" BOOTSTRAP_ROOT="$CASE_ROOT" \
+  /bin/bash "$bootstrap" >"$CASE_ROOT/output" 2>"$CASE_ROOT/error"; then
+  fail "bootstrap did not repair after completed cloud-init failure"
+fi
+assert_contains 'cloud-init did not complete cleanly' "$CASE_ROOT/error"
+assert_contains 'called journalctl --no-pager -u cloud-final.service -n 60' "$CALLS"
+assert_contains 'host bootstrap 2026-08-22.1 ready' "$CASE_ROOT/output"
 
 prepare_case cloud-init-running
 write_stub cloud-init <<'EOF'
@@ -132,19 +179,20 @@ write_stub timeout <<'EOF'
 #!/bin/bash
 exit 124
 EOF
-if PATH="$MOCK_BIN:/usr/bin:/bin" BOOTSTRAP_ROOT="$CASE_ROOT" \
-  bash "$bootstrap" >"$CASE_ROOT/output" 2>"$CASE_ROOT/error"; then
-  echo "bootstrap unexpectedly repaired while cloud-init was still running" >&2
-  exit 1
+if PATH="$MOCK_BIN:$toolbox" BOOTSTRAP_ROOT="$CASE_ROOT" \
+  /bin/bash "$bootstrap" >"$CASE_ROOT/output" 2>"$CASE_ROOT/error"; then
+  fail "bootstrap unexpectedly repaired while cloud-init was still running"
 fi
-grep -Fq 'cloud-init was still running after five minutes' "$CASE_ROOT/error"
-! grep -q '^dnf ' "$CALLS"
+assert_contains 'cloud-init was still running after five minutes' "$CASE_ROOT/error"
+assert_not_contains 'dnf ' "$CALLS"
 
 scripts="$(dirname "$bootstrap")"
-grep -Fq 'docker compose version >/dev/null' "$scripts/remote-deploy.sh"
-grep -Fq 'registry_password="$(aws ecr get-login-password' "$scripts/remote-deploy.sh"
-! grep -Eq 'get-login-password.*\|[[:space:]]*docker' "$scripts/remote-deploy.sh"
-grep -Fq '"/tmp/bootstrap-host.sh"' "$scripts/send-deployment.sh"
-grep -Fq 'generated SSM command exceeds the 24,000-byte limit' "$scripts/send-deployment.sh"
+assert_contains 'docker compose version >/dev/null' "$scripts/remote-deploy.sh"
+assert_contains 'registry_password="$(aws ecr get-login-password' "$scripts/remote-deploy.sh"
+if grep -Eq 'get-login-password.*\|[[:space:]]*docker' "$scripts/remote-deploy.sh"; then
+  fail "remote deploy still pipes ECR credentials into docker"
+fi
+assert_contains '"/tmp/bootstrap-host.sh"' "$scripts/send-deployment.sh"
+assert_contains 'generated SSM command exceeds the 24,000-byte limit' "$scripts/send-deployment.sh"
 
 echo "host bootstrap simulations passed"
