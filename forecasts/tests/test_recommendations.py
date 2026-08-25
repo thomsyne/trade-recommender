@@ -521,6 +521,8 @@ class RecommendationTests(TestCase):
         first_daily = (recommendation.reference_candle.timestamp + timedelta(days=1)).replace(
             minute=0, second=0, microsecond=0
         )
+        new_york = ZoneInfo("America/New_York")
+        first_daily += timedelta(days=-first_daily.astimezone(new_york).weekday() % 7)
         future_daily = [rising_candle(first_daily + timedelta(days=index)) for index in range(5)]
         store_ingestion(
             self.source,
@@ -532,7 +534,8 @@ class RecommendationTests(TestCase):
             {"test": "paper-expiry-daily", "requests": []},
         )
         horizon = future_daily[-1].timestamp
-        local_horizon = horizon.astimezone(ZoneInfo("America/New_York"))
+        local_horizon = horizon.astimezone(new_york)
+        self.assertEqual(local_horizon.weekday(), 4)
         expiry = (local_horizon + timedelta(days=1)).astimezone(horizon.tzinfo)
         hours = open_market_hours(recommendation.generated_at, expiry)
         no_touch = [

@@ -333,7 +333,7 @@ def _has_coverage(recommendation, through, candles):
         return False
     if candles[0].timestamp != _next_market_hour(recommendation.generated_at):
         return False
-    if candles[-1].timestamp + timedelta(hours=1) < through:
+    if _next_market_hour(candles[-1].timestamp) < through:
         return False
     return all(
         current.timestamp - previous.timestamp == timedelta(hours=1)
