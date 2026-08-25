@@ -8,7 +8,7 @@ separate point-in-time evidence ledger.
 > Development fixtures are invented and visibly labelled. Nothing in this
 > repository is trading advice or a live-order system.
 
-## What works now
+## What works now.
 
 - PostgreSQL-backed Django application with owner authentication;
 - canonical USD/CAD, GBP/USD, EUR/GBP, and EUR/USD instruments;
