@@ -18,6 +18,7 @@ from market.tests.factories import candle
 from research.failed_break_services import (
     COMBINED_BOOK,
     books_for_setup,
+    derive_expected_entry_timestamp,
     persist_analysis,
     persist_confirmation,
     persist_entry_evaluation,
@@ -262,7 +263,7 @@ class StrategyPersistenceTests(TestCase):
             ),
         )
         for index, values in enumerate(invalid):
-            with self.assertRaises(IntegrityError), transaction.atomic():
+            with self.assertRaises(DatabaseError), transaction.atomic():
                 EntryEligibilityEvaluation.objects.create(
                     setup=self.setup,
                     book_identity=f"book-{index}",
@@ -479,7 +480,7 @@ class StrategyPersistenceTests(TestCase):
             ).pk,
             transition.pk,
         )
-        opening = EntryOpen(self.at + timedelta(hours=3), Decimal("1.1"), Decimal("1.1001"))
+        opening = EntryOpen(self.at + timedelta(hours=2), Decimal("1.1"), Decimal("1.1001"))
         target_level = Level.objects.create(
             family=Level.Family.WEEKLY,
             role=Level.Role.RESISTANCE,
@@ -726,13 +727,125 @@ class StrategyPersistenceTests(TestCase):
                 setup=self.setup,
                 book_identity=book,
                 result=blocked,
-                opening=EntryOpen(self.at + timedelta(hours=2), Decimal("1.1"), Decimal("1.1001")),
+                opening=EntryOpen(self.at + timedelta(hours=1), Decimal("1.1"), Decimal("1.1001")),
                 target_level=None,
                 evidence={"book": book},
                 required_ranges=self.required_ranges,
                 as_of=self.as_of,
             )
         self.assertEqual(self.setup.setuptransition_set.filter(from_state="CONFIRMED").count(), 2)
+
+    def test_entry_boundary_is_derived_and_early_late_or_direct_bypasses_are_rejected(self):
+        SetupLevelAttribution.objects.create(setup=self.setup, level=self.level)
+        confirmation_at = self.at + timedelta(hours=1)
+        persist_confirmation(
+            setup=self.setup,
+            confirmation=Confirmation("CONFIRMED", confirmation_at),
+            evidence={},
+            required_ranges=self.required_ranges,
+            as_of=self.as_of,
+        )
+        self.assertEqual(derive_expected_entry_timestamp(self.setup), confirmation_at)
+        blocked = EntryResult("MISSED_FILL", "NO_DEFENSIBLE_H1_OPEN")
+        for supplied in (self.at, self.at + timedelta(hours=2)):
+            with self.assertRaisesMessage(ValueError, "first registered H1 open"):
+                persist_entry_evaluation(
+                    setup=self.setup,
+                    book_identity=COMBINED_BOOK,
+                    result=blocked,
+                    opening=EntryOpen(supplied, Decimal("1.1"), Decimal("1.1001")),
+                    target_level=None,
+                    evidence={},
+                    required_ranges=self.required_ranges,
+                    as_of=self.as_of,
+                )
+        evaluation = persist_entry_evaluation(
+            setup=self.setup,
+            book_identity=COMBINED_BOOK,
+            result=blocked,
+            opening=None,
+            target_level=None,
+            evidence={},
+            required_ranges=self.required_ranges,
+            as_of=self.as_of,
+            expected_entry_timestamp=confirmation_at,
+        )
+        self.assertIsNone(evaluation.entry_timestamp)
+        transition = self.setup.setuptransition_set.get(from_state="CONFIRMED")
+        self.assertEqual(transition.effective_at, confirmation_at)
+
+        if connection.vendor != "postgresql":
+            return
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            SetupTransition.objects.create(
+                setup=self.setup,
+                book_identity="failed-break-weekly-extreme-v1",
+                from_state=SetupTransition.State.CONFIRMED,
+                to_state=SetupTransition.State.NO_TARGET,
+                effective_at=confirmation_at + timedelta(hours=1),
+                reason="NO_ACTIVE_OPPOSING_LEVEL",
+                evidence_hash="1" * 64,
+                strategy_version=self.strategy,
+                dataset_version=self.dataset,
+                execution_identity=self.strategy.execution_identity,
+            )
+
+    def test_friday_confirmation_derives_sunday_new_york_entry_even_across_dst(self):
+        friday = datetime(2026, 3, 6, 22, tzinfo=UTC)
+        setup = SetupEvent.objects.create(
+            instrument=self.instrument,
+            direction=SetupEvent.Direction.LONG,
+            sweep_h1_timestamp=friday - timedelta(hours=1),
+            detector_version=self.strategy.detector_version,
+            dataset_version=self.dataset,
+            strategy_version=self.strategy,
+            sweep_evidence={},
+            bias_evidence={},
+            provisional_swing_evidence={},
+            threshold_evidence={},
+            evidence_hash="2" * 64,
+        )
+        SetupTransition.objects.create(
+            setup=setup,
+            from_state=SetupTransition.State.TRIGGER_PENDING,
+            to_state=SetupTransition.State.CONFIRMED,
+            effective_at=friday,
+            evidence_hash="3" * 64,
+            strategy_version=self.strategy,
+            dataset_version=self.dataset,
+            execution_identity=self.strategy.execution_identity,
+        )
+        self.assertEqual(
+            derive_expected_entry_timestamp(setup),
+            datetime(2026, 3, 8, 21, tzinfo=UTC),
+        )
+        if connection.vendor != "postgresql":
+            return
+        SetupTransition.objects.create(
+            setup=setup,
+            book_identity="dst-correct",
+            from_state=SetupTransition.State.CONFIRMED,
+            to_state=SetupTransition.State.NO_TARGET,
+            effective_at=datetime(2026, 3, 8, 21, tzinfo=UTC),
+            reason="NO_ACTIVE_OPPOSING_LEVEL",
+            evidence_hash="4" * 64,
+            strategy_version=self.strategy,
+            dataset_version=self.dataset,
+            execution_identity=self.strategy.execution_identity,
+        )
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            SetupTransition.objects.create(
+                setup=setup,
+                book_identity="dst-wrong-48-hours",
+                from_state=SetupTransition.State.CONFIRMED,
+                to_state=SetupTransition.State.NO_TARGET,
+                effective_at=datetime(2026, 3, 8, 22, tzinfo=UTC),
+                reason="NO_ACTIVE_OPPOSING_LEVEL",
+                evidence_hash="5" * 64,
+                strategy_version=self.strategy,
+                dataset_version=self.dataset,
+                execution_identity=self.strategy.execution_identity,
+            )
 
     def test_dataset_incident_blocks_analysis_and_detector_identity_is_idempotent(self):
         first = persist_analysis(

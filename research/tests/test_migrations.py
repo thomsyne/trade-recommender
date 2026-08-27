@@ -9,7 +9,7 @@ from django.test import TransactionTestCase
 class Phase2ADataMigrationTests(TransactionTestCase):
     migrate_from = [("research", "0010_phase_2a_append_only_triggers")]
     prepared = [("research", "0011_phase_2a_review_corrections")]
-    migrate_to = [("research", "0013_finalize_phase_2a_lineage")]
+    migrate_to = [("research", "0014_enforce_entry_boundary")]
 
     def setUp(self):
         super().setUp()
@@ -84,6 +84,14 @@ class Phase2ADataMigrationTests(TransactionTestCase):
         setup = self._setup()
         self.Transition.objects.create(
             setup=setup,
+            from_state="TRIGGER_PENDING",
+            to_state="CONFIRMED",
+            effective_at=self.at,
+            evidence={},
+            evidence_hash="4" * 64,
+        )
+        self.Transition.objects.create(
+            setup=setup,
             from_state="CONFIRMED",
             to_state="NO_TARGET",
             effective_at=self.at,
@@ -156,7 +164,7 @@ class Phase2ADataMigrationTests(TransactionTestCase):
                 rewrite(apps, schema_editor, inject_failure=True)
 
         Transition = apps.get_model("research", "SetupTransition")
-        stored = Transition.objects.get(setup_id=setup.pk)
+        stored = Transition.objects.get(setup_id=setup.pk, from_state="CONFIRMED")
         self.assertEqual(stored.book_identity, "")
         self.assertIsNone(stored.strategy_version_id)
         with connection.cursor() as cursor:

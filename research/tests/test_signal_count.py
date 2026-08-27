@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
@@ -10,6 +11,7 @@ from market.models import DatasetVersion, Instrument, SourceRegistry, dataset_ma
 from market.services import DatasetQualityError, RequiredCandleRange, store_ingestion
 from market.tests.factories import candle
 from research.models import (
+    AnalysisRun,
     EntryEligibilityEvaluation,
     JobRun,
     Level,
@@ -27,6 +29,9 @@ from research.signal_count import (
     SIGNAL_COUNT_IDENTITY,
     ReturnBlindViolation,
     SignalCountOutput,
+    _analysis_data_incomplete_count,
+    _maximum_horizon_end,
+    _next_registered_h1_open,
     _s1_evaluation_queryset,
     _validate_s1_contract,
     _validated_s0_job,
@@ -39,6 +44,24 @@ from research.signal_count import (
 
 
 class SignalCountBoundaryTests(SimpleTestCase):
+    def test_partition_boundary_purge_uses_new_york_confirmation_and_weekend_alignment(self):
+        new_york = ZoneInfo("America/New_York")
+        retained_confirmation = datetime(2018, 12, 14, 17, tzinfo=new_york)
+        purged_confirmation = datetime(2018, 12, 28, 17, tzinfo=new_york)
+
+        retained_entry = _next_registered_h1_open(retained_confirmation)
+        purged_entry = _next_registered_h1_open(purged_confirmation)
+        self.assertEqual(retained_entry, datetime(2018, 12, 16, 17, tzinfo=new_york))
+        self.assertEqual(purged_entry, datetime(2018, 12, 30, 17, tzinfo=new_york))
+        self.assertLess(
+            _maximum_horizon_end(retained_entry),
+            datetime(2019, 1, 1, tzinfo=new_york),
+        )
+        self.assertGreaterEqual(
+            _maximum_horizon_end(purged_entry),
+            datetime(2019, 1, 1, tzinfo=new_york),
+        )
+
     def test_s1_contract_rejects_missing_frozen_instrument(self):
         strategy = SimpleNamespace(
             content_hash=PHASE1_MANIFEST_SHA256,
@@ -314,7 +337,7 @@ class SignalCountFunctionalTests(TestCase):
             setup=setup,
             from_state=SetupTransition.State.TRIGGER_PENDING,
             to_state=SetupTransition.State.CONFIRMED,
-            effective_at=entry_at - timedelta(hours=1),
+            effective_at=entry_at,
             evidence_hash="5" * 64,
             strategy_version=strategy,
             dataset_version=dataset,
@@ -383,6 +406,40 @@ class SignalCountFunctionalTests(TestCase):
             terminal_reason="NO_ACTIVE_OPPOSING_LEVEL",
             evidence_hash="9" * 64,
         )
+        for index, terminal in enumerate(
+            (
+                SetupTransition.State.INVALIDATED,
+                SetupTransition.State.EXPIRED,
+                SetupTransition.State.CANCELLED_DATA_QUALITY,
+            ),
+            start=1,
+        ):
+            terminal_setup = SetupEvent.objects.create(
+                instrument=instrument,
+                direction=SetupEvent.Direction.LONG,
+                sweep_h1_timestamp=entry_at - timedelta(days=index, hours=2),
+                detector_version=strategy.detector_version,
+                dataset_version=dataset,
+                strategy_version=strategy,
+                sweep_evidence={},
+                bias_evidence={},
+                provisional_swing_evidence={},
+                threshold_evidence={},
+                attribution_keys=[level.stable_key],
+                evidence_hash=str(index + 3) * 64,
+            )
+            SetupLevelAttribution.objects.create(setup=terminal_setup, level=level)
+            SetupTransition.objects.create(
+                setup=terminal_setup,
+                from_state=SetupTransition.State.TRIGGER_PENDING,
+                to_state=terminal,
+                effective_at=entry_at - timedelta(days=index, hours=1),
+                reason=terminal,
+                evidence_hash=str(index + 4) * 64,
+                strategy_version=strategy,
+                dataset_version=dataset,
+                execution_identity=strategy.execution_identity,
+            )
         for index, (sweep_at, confirmed_at) in enumerate(
             (
                 (
@@ -424,15 +481,24 @@ class SignalCountFunctionalTests(TestCase):
                 dataset_id=dataset.pk,
                 strategy_version_id=strategy.pk,
                 s0_job_id=s0_job.pk,
+                detector_job_id=0,
                 maximum_setups=1,
                 as_of=as_of,
             )
 
-        with patch("research.signal_count.assert_dataset_window_usable"):
+        detector = type("Detector", (), {"pk": 17})()
+        with (
+            patch("research.signal_count.assert_dataset_window_usable"),
+            patch(
+                "research.signal_count._validate_detector_coverage",
+                return_value=(detector, "d" * 64),
+            ),
+        ):
             output = run_s1(
                 dataset_id=dataset.pk,
                 strategy_version_id=strategy.pk,
                 s0_job_id=s0_job.pk,
+                detector_job_id=detector.pk,
                 maximum_setups=1,
                 as_of=as_of,
             )
@@ -440,21 +506,51 @@ class SignalCountFunctionalTests(TestCase):
                 dataset_id=dataset.pk,
                 strategy_version_id=strategy.pk,
                 s0_job_id=s0_job.pk,
+                detector_job_id=detector.pk,
                 maximum_setups=1,
                 as_of=as_of,
             )
 
         self.assertEqual(output.counts["physical_setups_processed"], 1)
+        self.assertEqual(output.counts["sweeps"], 4)
+        self.assertEqual(output.counts["confirmations"], 1)
+        self.assertEqual(output.counts["attributions"], 4)
+        self.assertEqual(output.counts["setup_invalidated"], 1)
+        self.assertEqual(output.counts["setup_expired"], 1)
+        self.assertEqual(output.counts["setup_cancelled_data_quality"], 1)
         self.assertEqual(output.counts["eligibility_evaluations_processed"], 2)
         self.assertEqual(output.counts["entry_eligible"], 1)
         self.assertEqual(output.coverage["by_confirmation_year"], {"2018": 1})
         self.assertEqual(output.coverage["entry_projections_read"], 1)
         self.assertEqual(output.coverage["by_pair"], {"EUR_USD": 1})
+        self.assertEqual(output.coverage["data_quality_coverage"]["analysis_data_incomplete"], 0)
         self.assertTrue(output.coverage["complete"])
         self.assertEqual(replay.report_sha256, output.report_sha256)
         job = JobRun.objects.get(job_name="failed-break-signal-count-s1")
         self.assertEqual(job.evidence["report"]["report_sha256"], output.report_sha256)
         self.assertEqual(JobRun.objects.filter(job_name="failed-break-signal-count-s1").count(), 1)
+
+        sibling_strategy = StrategyVersion.objects.create(
+            definition=definition,
+            version="sibling-detector-consumer",
+            detector_version=strategy.detector_version,
+            data_identity="data",
+            event_identity="sibling-event",
+            execution_identity="execution-h1-stop-first-v1",
+            cost_identity="cost",
+            portfolio_identity="portfolio",
+            content_hash="f" * 64,
+        )
+        AnalysisRun.objects.create(
+            instrument=instrument,
+            completed_h1_timestamp=entry_at - timedelta(days=4),
+            detector_version=strategy.detector_version,
+            strategy_version=sibling_strategy,
+            dataset_version=dataset,
+            result=AnalysisRun.Result.DATA_INCOMPLETE,
+            evidence_hash="e" * 64,
+        )
+        self.assertEqual(_analysis_data_incomplete_count(dataset, strategy), 1)
 
         second = SetupEvent.objects.create(
             instrument=instrument,
@@ -475,7 +571,7 @@ class SignalCountFunctionalTests(TestCase):
             setup=second,
             from_state=SetupTransition.State.TRIGGER_PENDING,
             to_state=SetupTransition.State.CONFIRMED,
-            effective_at=entry_at + timedelta(days=1, hours=-1),
+            effective_at=entry_at + timedelta(days=1),
             evidence_hash="c" * 64,
             strategy_version=strategy,
             dataset_version=dataset,
@@ -505,12 +601,17 @@ class SignalCountFunctionalTests(TestCase):
             )
         with (
             patch("research.signal_count.assert_dataset_window_usable"),
+            patch(
+                "research.signal_count._validate_detector_coverage",
+                return_value=(detector, "d" * 64),
+            ),
             self.assertRaisesMessage(ReturnBlindViolation, "would truncate"),
         ):
             run_s1(
                 dataset_id=dataset.pk,
                 strategy_version_id=strategy.pk,
                 s0_job_id=s0_job.pk,
+                detector_job_id=detector.pk,
                 maximum_setups=1,
                 as_of=as_of,
             )
@@ -542,12 +643,17 @@ class SignalCountFunctionalTests(TestCase):
         )
         with (
             patch("research.signal_count.assert_dataset_window_usable"),
+            patch(
+                "research.signal_count._validate_detector_coverage",
+                return_value=(detector, "d" * 64),
+            ),
             self.assertRaisesMessage(ReturnBlindViolation, "lifecycle is incomplete"),
         ):
             run_s1(
                 dataset_id=dataset.pk,
                 strategy_version_id=strategy.pk,
                 s0_job_id=s0_job.pk,
+                detector_job_id=detector.pk,
                 maximum_setups=10,
                 as_of=as_of,
             )

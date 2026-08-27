@@ -3,6 +3,7 @@ import json
 from django.core.management.base import BaseCommand, CommandError
 from django.utils.dateparse import parse_datetime
 
+from research.failed_break_detector import run_s1_detector
 from research.signal_count import run_s1
 
 
@@ -21,10 +22,17 @@ class Command(BaseCommand):
             as_of = parse_datetime(options["as_of"])
             if as_of is None:
                 raise ValueError("--as-of must be an ISO-8601 timestamp")
+            detector_job = run_s1_detector(
+                dataset_id=options["dataset_id"],
+                strategy_version_id=options["strategy_version_id"],
+                s0_job_id=options["s0_job_id"],
+                as_of=as_of,
+            )
             output = run_s1(
                 dataset_id=options["dataset_id"],
                 strategy_version_id=options["strategy_version_id"],
                 s0_job_id=options["s0_job_id"],
+                detector_job_id=detector_job.pk,
                 maximum_setups=options["max_setups"],
                 as_of=as_of,
             )

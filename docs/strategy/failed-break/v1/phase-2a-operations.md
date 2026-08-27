@@ -36,5 +36,10 @@ python manage.py signal_count_s1 \
   --max-setups MAXIMUM
 ```
 
-S1 likewise fails rather than registering an incomplete or truncated audit. These commands must
-not be run against complete historical data until that run is separately authorized.
+S1 first runs the bounded chronological detector, records one detector-scoped `AnalysisRun` for
+every registered development H1 decision point, and registers an immutable detector `JobRun`.
+The final return-blind report verifies that detector job and exact analysis coverage before it is
+registered. Raw sweep and attribution diagnostics retain partition-boundary-purged confirmations;
+confirmation, eligibility, and later populations exclude them. S1 fails rather than registering an
+incomplete or truncated audit. These commands must not be run against complete historical data
+until that run is separately authorized.

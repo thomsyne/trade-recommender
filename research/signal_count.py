@@ -44,6 +44,7 @@ from research.models import (
 
 SIGNAL_COUNT_IDENTITY = "failed-break-signal-count-v1"
 S0_JOB_NAME = "failed-break-signal-count-s0"
+S1_DETECTOR_JOB_NAME = "failed-break-signal-count-s1-detector"
 PHASE1_MANIFEST_SHA256 = "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
 FROZEN_INSTRUMENTS = frozenset({"EUR_USD", "GBP_USD", "EUR_GBP", "USD_CAD", "USD_JPY", "AUD_USD"})
 S1_GRANULARITIES = frozenset({"W", "D", "H1"})
@@ -130,6 +131,8 @@ S1_COVERAGE_FIELDS = frozenset(
         "dataset_id",
         "strategy_version_id",
         "s0_report_sha256",
+        "detector_job_id",
+        "detector_report_sha256",
         "as_of",
         "bounded",
         "complete",
@@ -646,6 +649,104 @@ def _validate_s1_contract(dataset, strategy, as_of, s0_job_id):
     return grouped, s0_output
 
 
+def expected_analysis_keys(ranges_by_instrument):
+    keys = []
+    development_start = DEVELOPMENT_START.astimezone(UTC)
+    development_end = DEVELOPMENT_END.astimezone(UTC)
+    for code, ranges in sorted(ranges_by_instrument.items()):
+        h1_range = next(required for required in ranges if required.granularity == "H1")
+        keys.extend(
+            (code, registered_candle_completion(timestamp, "H1").isoformat())
+            for timestamp in expected_candle_timestamps(
+                h1_range.start, h1_range.end, h1_range.granularity
+            )
+            if development_start <= registered_candle_completion(timestamp, "H1") < development_end
+        )
+    return tuple(keys)
+
+
+def _validate_detector_coverage(
+    *,
+    detector_job_id,
+    dataset,
+    strategy,
+    ranges_by_instrument,
+    s0_job_id,
+    s0_report_sha256,
+    as_of,
+):
+    expected = expected_analysis_keys(ranges_by_instrument)
+    expected_hash = stable_hash(expected)
+    job = JobRun.objects.filter(
+        pk=detector_job_id,
+        job_name=S1_DETECTOR_JOB_NAME,
+        strategy_version=strategy,
+        dataset_version=dataset,
+        status=JobRun.Status.SUCCEEDED,
+    ).first()
+    if not job or set(job.evidence) != {"configuration", "report"}:
+        raise ReturnBlindViolation("S1 requires its registered detector JobRun")
+    configuration = job.evidence["configuration"]
+    report = job.evidence["report"]
+    report_body = {key: value for key, value in report.items() if key != "report_sha256"}
+    if (
+        set(configuration)
+        != {
+            "identity",
+            "dataset_id",
+            "dataset_manifest_sha256",
+            "strategy_version_id",
+            "strategy_content_hash",
+            "detector_version",
+            "s0_job_id",
+            "s0_report_sha256",
+            "as_of",
+        }
+        or configuration.get("identity") != S1_DETECTOR_JOB_NAME
+        or configuration.get("dataset_id") != dataset.pk
+        or configuration.get("dataset_manifest_sha256") != dataset.manifest_sha256
+        or configuration.get("strategy_version_id") != strategy.pk
+        or configuration.get("strategy_content_hash") != strategy.content_hash
+        or configuration.get("detector_version") != strategy.detector_version
+        or configuration.get("s0_job_id") != s0_job_id
+        or configuration.get("s0_report_sha256") != s0_report_sha256
+        or configuration.get("as_of") != as_of.isoformat()
+        or configuration.get("as_of") != job.as_of.isoformat()
+        or stable_hash(configuration) != job.config_hash
+        or set(report)
+        != {
+            "report_sha256",
+            "expected_analysis_count",
+            "expected_analysis_sha256",
+            "observed_analysis_count",
+            "observed_analysis_sha256",
+        }
+        or report.get("report_sha256") != stable_hash(report_body)
+        or report.get("expected_analysis_count") != len(expected)
+        or report.get("expected_analysis_sha256") != expected_hash
+    ):
+        raise ReturnBlindViolation("S1 detector audit hashes or identities do not verify")
+
+    observed_rows = list(
+        AnalysisRun.objects.filter(
+            dataset_version=dataset,
+            detector_version=strategy.detector_version,
+            instrument__code__in=FROZEN_INSTRUMENTS,
+            completed_h1_timestamp__gte=DEVELOPMENT_START.astimezone(UTC),
+            completed_h1_timestamp__lt=DEVELOPMENT_END.astimezone(UTC),
+        ).values_list("instrument__code", "completed_h1_timestamp", "result")
+    )
+    observed = tuple(sorted((code, timestamp.isoformat()) for code, timestamp, _ in observed_rows))
+    if (
+        observed != expected
+        or report.get("observed_analysis_count") != len(observed)
+        or report.get("observed_analysis_sha256") != stable_hash(observed)
+        or any(result == AnalysisRun.Result.DATA_INCOMPLETE for _, _, result in observed_rows)
+    ):
+        raise ReturnBlindViolation("S1 detector analysis coverage is incomplete or unresolved")
+    return job, report["report_sha256"]
+
+
 def _s1_evaluation_queryset(setup_ids):
     return (
         EntryEligibilityEvaluation.objects.filter(setup_id__in=setup_ids)
@@ -698,8 +799,25 @@ def _maximum_concurrency(entries):
     return {"entry_requests": len(entries), "peak_requests": peak}
 
 
+def _analysis_data_incomplete_count(dataset, strategy):
+    return AnalysisRun.objects.filter(
+        dataset_version=dataset,
+        detector_version=strategy.detector_version,
+        instrument__code__in=FROZEN_INSTRUMENTS,
+        completed_h1_timestamp__gte=DEVELOPMENT_START.astimezone(UTC),
+        completed_h1_timestamp__lt=DEVELOPMENT_END.astimezone(UTC),
+        result=AnalysisRun.Result.DATA_INCOMPLETE,
+    ).count()
+
+
 def run_s1(
-    *, dataset_id: int, strategy_version_id: int, s0_job_id: int, maximum_setups: int, as_of
+    *,
+    dataset_id: int,
+    strategy_version_id: int,
+    s0_job_id: int,
+    detector_job_id: int,
+    maximum_setups: int,
+    as_of,
 ) -> SignalCountOutput:
     """Count bounded persisted eligibility facts without importing post-entry execution code."""
     if maximum_setups < 1:
@@ -718,6 +836,15 @@ def run_s1(
         raise ReturnBlindViolation("dataset required_ranges references an unknown instrument")
     for code, ranges in ranges_by_instrument.items():
         assert_dataset_window_usable(dataset, instruments_by_code[code], ranges, as_of)
+    detector_job, detector_report_sha256 = _validate_detector_coverage(
+        detector_job_id=detector_job_id,
+        dataset=dataset,
+        strategy=strategy,
+        ranges_by_instrument=ranges_by_instrument,
+        s0_job_id=s0_job_id,
+        s0_report_sha256=s0_report_sha256,
+        as_of=as_of,
+    )
     ranges_by_instrument_id = {
         instruments_by_code[code].pk: ranges for code, ranges in ranges_by_instrument.items()
     }
@@ -767,6 +894,14 @@ def run_s1(
                 "S1 maximum_setups would truncate the complete development report"
             )
     setup_ids = [row["setup_id"] for row in confirmations]
+    development_setup_ids = list(
+        SetupEvent.objects.filter(
+            dataset_version=dataset,
+            strategy_version=strategy,
+            sweep_h1_timestamp__gte=development_start,
+            sweep_h1_timestamp__lt=development_end,
+        ).values_list("pk", flat=True)
+    )
     confirmation_by_setup = {row["setup_id"]: row["effective_at"] for row in confirmations}
     setups = {
         row["pk"]: row
@@ -784,6 +919,9 @@ def run_s1(
             "setup_id", "level_id", "level__family"
         )
     )
+    raw_attribution_count = SetupLevelAttribution.objects.filter(
+        setup_id__in=development_setup_ids
+    ).count()
     attributions_by_setup = {setup_id: [] for setup_id in setup_ids}
     for attribution in attribution_rows:
         attributions_by_setup[attribution["setup_id"]].append(attribution)
@@ -815,10 +953,10 @@ def run_s1(
 
     counts = {field: 0 for field in S1_COUNT_FIELDS}
     counts["physical_setups_processed"] = len(setup_ids)
-    counts["sweeps"] = len(setup_ids)
+    counts["sweeps"] = len(development_setup_ids)
     counts["confirmations"] = len(setup_ids)
     counts["partition_boundary_purged"] = purged
-    counts["attributions"] = len(attribution_rows)
+    counts["attributions"] = raw_attribution_count
     projections_read = 0
     projected_entries = set()
     decision_fields = {
@@ -969,8 +1107,8 @@ def run_s1(
             setup__dataset_version=dataset,
             setup__strategy_version=strategy,
             book_identity="",
-            effective_at__gte=development_start,
-            effective_at__lt=development_end,
+            setup__sweep_h1_timestamp__gte=development_start,
+            setup__sweep_h1_timestamp__lt=development_end,
         ).values_list("to_state", flat=True)
     )
     counts["setup_invalidated"] = setup_terminal[SetupTransition.State.INVALIDATED]
@@ -980,13 +1118,7 @@ def run_s1(
     ]
     counts["still_trigger_pending"] = 0
 
-    analysis_data_incomplete = AnalysisRun.objects.filter(
-        dataset_version=dataset,
-        strategy_version=strategy,
-        completed_h1_timestamp__gte=development_start,
-        completed_h1_timestamp__lt=development_end,
-        result=AnalysisRun.Result.DATA_INCOMPLETE,
-    ).count()
+    analysis_data_incomplete = _analysis_data_incomplete_count(dataset, strategy)
     spread_checks = (
         len(evaluations)
         - counts["cancelled_data_quality"]
@@ -1001,6 +1133,8 @@ def run_s1(
         "strategy_content_hash": strategy.content_hash,
         "s0_job_id": s0_job_id,
         "s0_report_sha256": s0_report_sha256,
+        "detector_job_id": detector_job.pk,
+        "detector_report_sha256": detector_report_sha256,
         "maximum_setups": maximum_setups,
         "as_of": as_of.isoformat(),
     }
@@ -1012,6 +1146,8 @@ def run_s1(
             "dataset_id": dataset.pk,
             "strategy_version_id": strategy.pk,
             "s0_report_sha256": s0_report_sha256,
+            "detector_job_id": detector_job.pk,
+            "detector_report_sha256": detector_report_sha256,
             "as_of": as_of.isoformat(),
             "bounded": True,
             "complete": True,

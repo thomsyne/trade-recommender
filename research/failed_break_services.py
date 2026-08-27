@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict
+from datetime import time, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 
@@ -30,6 +33,11 @@ FAMILY_BOOKS = {
     Level.Family.DAILY_SWING: "failed-break-daily-swing-v1",
     Level.Family.BREAKOUT: "failed-break-breakout-flip-v1",
 }
+DB_DECIMAL_QUANTUM = Decimal("0.0000000001")
+
+
+def _stored_decimal(value):
+    return value.quantize(DB_DECIMAL_QUANTUM) if value is not None else None
 
 
 def evidence_hash(value) -> str:
@@ -96,10 +104,12 @@ def _derive_history(
             )
         selected = eligible[-minimum:]
         required_timestamp = required_timestamps.get(granularity)
-        if required_timestamp is not None and required_timestamp not in selected:
-            raise DatasetQualityError(
-                f"{granularity} history does not contain the required evidence candle"
-            )
+        if required_timestamp is not None:
+            if required_timestamp not in eligible:
+                raise DatasetQualityError(
+                    f"{granularity} history does not contain the required evidence candle"
+                )
+            selected = eligible[min(eligible.index(required_timestamp), len(eligible) - minimum) :]
         derived.append(
             RequiredCandleRange(
                 granularity,
@@ -126,11 +136,12 @@ def persist_level(
         else {"D": 14}
     )
     source_granularity = "W" if spec.family == Level.Family.WEEKLY else "D"
+    activation_granularity = "D" if ":flip:" in spec.key else source_granularity
     required_ranges = _derive_history(
         required_ranges,
         minimum_history,
         spec.activated_at,
-        exact_completion={source_granularity: spec.activated_at},
+        exact_completion={activation_granularity: spec.activated_at},
         required_timestamps={source_granularity: spec.source_at},
     )
     assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
@@ -142,10 +153,10 @@ def persist_level(
         "dataset_version": dataset_version,
         "source_timeframe": "W" if spec.family == Level.Family.WEEKLY else "D",
         "source_candle_timestamp": spec.source_at,
-        "central_price": spec.central_price,
-        "zone_lower": spec.zone_lower,
-        "zone_upper": spec.zone_upper,
-        "atr_at_activation": spec.atr_at_activation,
+        "central_price": _stored_decimal(spec.central_price),
+        "zone_lower": _stored_decimal(spec.zone_lower),
+        "zone_upper": _stored_decimal(spec.zone_upper),
+        "atr_at_activation": _stored_decimal(spec.atr_at_activation),
         "activated_at": spec.activated_at,
         "expires_at": spec.expires_at,
     }
@@ -158,8 +169,11 @@ def persist_level(
         }
     )
     stored, created = Level.objects.get_or_create(stable_key=stable_key, defaults=values)
-    if not created and any(getattr(stored, field) != value for field, value in values.items()):
-        raise ValueError("stable level key resolved to different immutable content")
+    mismatches = [field for field, value in values.items() if getattr(stored, field) != value]
+    if not created and mismatches:
+        raise ValueError(
+            f"stable level key resolved to different immutable content: {', '.join(mismatches)}"
+        )
     return stored
 
 
@@ -279,6 +293,19 @@ def books_for_setup(setup: SetupEvent) -> tuple[str, ...]:
     return tuple(sorted({COMBINED_BOOK, *(FAMILY_BOOKS[family] for family in families)}))
 
 
+def derive_expected_entry_timestamp(setup: SetupEvent):
+    confirmation = setup.setuptransition_set.get(
+        from_state=SetupTransition.State.TRIGGER_PENDING,
+        to_state=SetupTransition.State.CONFIRMED,
+        book_identity="",
+    )
+    timestamp = confirmation.effective_at
+    local = timestamp.astimezone(ZoneInfo("America/New_York"))
+    if local.weekday() == 4 and local.time() == time(17):
+        return (local + timedelta(days=2)).replace(hour=17).astimezone(timestamp.tzinfo)
+    return timestamp
+
+
 def current_setup_state(setup: SetupEvent) -> str:
     transition = setup.setuptransition_set.filter(book_identity="").first()
     return transition.to_state if transition else setup.initial_state
@@ -393,9 +420,13 @@ def persist_entry_evaluation(
     expected_entry_timestamp=None,
 ) -> EntryEligibilityEvaluation:
     setup = SetupEvent.objects.select_for_update().get(pk=setup.pk)
-    entry_timestamp = opening.timestamp if opening else expected_entry_timestamp
-    if entry_timestamp is None:
-        raise ValueError("expected entry timestamp is required when no H1 open exists")
+    derived_entry_timestamp = derive_expected_entry_timestamp(setup)
+    supplied_entry_timestamp = opening.timestamp if opening else expected_entry_timestamp
+    if supplied_entry_timestamp is not None and supplied_entry_timestamp != derived_entry_timestamp:
+        raise ValueError(
+            "entry timestamp does not match the first registered H1 open after confirmation"
+        )
+    entry_timestamp = derived_entry_timestamp
     try:
         entry_completion = registered_candle_completion(entry_timestamp, "H1")
         required_ranges = _derive_history(
@@ -444,15 +475,17 @@ def persist_entry_evaluation(
         "decision": result.decision,
         "terminal_reason": result.reason,
         "entry_timestamp": opening.timestamp if permitted and opening else None,
-        "entry_price": result.entry if permitted else None,
-        "stop_price": result.stop if permitted else None,
-        "target_price": result.target if permitted else None,
-        "reward_risk": result.reward_risk if permitted else None,
-        "risk_per_unit_quote": result.risk_per_unit_quote if permitted else None,
-        "conversion_rate_to_cad": result.conversion_rate_to_cad if permitted else None,
+        "entry_price": _stored_decimal(result.entry) if permitted else None,
+        "stop_price": _stored_decimal(result.stop) if permitted else None,
+        "target_price": _stored_decimal(result.target) if permitted else None,
+        "reward_risk": _stored_decimal(result.reward_risk) if permitted else None,
+        "risk_per_unit_quote": _stored_decimal(result.risk_per_unit_quote) if permitted else None,
+        "conversion_rate_to_cad": (
+            _stored_decimal(result.conversion_rate_to_cad) if permitted else None
+        ),
         "conversion_effective_at": result.conversion_effective_at if permitted else None,
         "conversion_identity": result.conversion_identity if permitted else "",
-        "risk_per_unit_cad": result.risk_per_unit_cad if permitted else None,
+        "risk_per_unit_cad": _stored_decimal(result.risk_per_unit_cad) if permitted else None,
         "target_level": target_level if permitted else None,
         "target_stable_key": result.target_key if permitted else "",
         "evidence": evidence,
@@ -468,7 +501,7 @@ def persist_entry_evaluation(
     values = _transition_values(
         setup,
         to_state=result.decision,
-        effective_at=opening.timestamp if opening else expected_entry_timestamp,
+        effective_at=entry_timestamp,
         evidence=evidence,
         reason=result.reason,
         job_run=job_run,
