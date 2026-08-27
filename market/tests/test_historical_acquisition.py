@@ -1,26 +1,33 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from django.core.exceptions import ValidationError
 from django.core.management import CommandError, call_command
-from django.db import DatabaseError, close_old_connections, transaction
+from django.db import DatabaseError, close_old_connections, connection, transaction
 from django.test import TestCase, TransactionTestCase
 
 from market.historical_acquisition import (
     INSTRUMENTS,
+    PHASE1_MANIFEST_SHA256,
+    PHASE1_SPEC_SHA256,
     begin_historical_attempt,
     create_historical_dataset_plan,
     register_historical_dataset,
+    resolve_stale_historical_attempt,
     run_historical_chunk,
+    stable_hash,
 )
 from market.models import (
+    AuditEvent,
     Candle,
     DatasetRegistration,
     HistoricalDatasetPlan,
     HistoricalIngestionAttempt,
+    HistoricalIngestionChunk,
     IngestionRun,
     Instrument,
     SourceRegistry,
@@ -32,10 +39,11 @@ from research.models import (
     StrategyParameterManifest,
     StrategyVersion,
 )
+from research.signal_count import _validate_dataset_contract
 
 
 class FakeClient:
-    def fetch_candles(self, instrument, granularity, start, end):
+    def fetch_historical_chunk(self, instrument, granularity, start, end):
         return [candle(start)], {
             "instrument": instrument,
             "granularity": granularity,
@@ -46,18 +54,19 @@ class FakeClient:
             "alignmentTimezone": "America/New_York",
             "dailyAlignment": 17,
             "weeklyAlignment": "Friday",
+            "includeFirst": True,
             "requests": [{"status": 200}],
         }
 
 
 class FailingClient:
-    def fetch_candles(self, instrument, granularity, start, end):
+    def fetch_historical_chunk(self, instrument, granularity, start, end):
         raise RuntimeError("synthetic provider failure")
 
 
 class WrongRangeClient(FakeClient):
-    def fetch_candles(self, instrument, granularity, start, end):
-        candles, manifest = super().fetch_candles(instrument, granularity, start, end)
+    def fetch_historical_chunk(self, instrument, granularity, start, end):
+        candles, manifest = super().fetch_historical_chunk(instrument, granularity, start, end)
         manifest["price"] = "M"
         return candles, manifest
 
@@ -98,29 +107,39 @@ class HistoricalFixtureMixin:
             execution_identity="execution-h1-stop-first-v1",
             cost_identity="cost-observed-spread-only-v1",
             portfolio_identity="portfolio-common-fraction-025-100-050-v1",
-            content_hash="1" * 64,
+            pair_metadata={
+                "instruments": [
+                    "EUR_USD",
+                    "GBP_USD",
+                    "EUR_GBP",
+                    "USD_CAD",
+                    "USD_JPY",
+                    "AUD_USD",
+                ]
+            },
+            content_hash=PHASE1_MANIFEST_SHA256,
         )
         StrategyParameterManifest.objects.create(
             strategy_version=self.strategy,
             payload={},
-            sha256="2" * 64,
-            phase1_spec_hash="3" * 64,
-            phase1_manifest_hash="4" * 64,
+            sha256=PHASE1_MANIFEST_SHA256,
+            phase1_spec_hash=PHASE1_SPEC_SHA256,
+            phase1_manifest_hash=PHASE1_MANIFEST_SHA256,
         )
 
     def payload(self, *, ranges=None):
         ranges = ranges or {
             "H1": {
-                "from": datetime(2010, 1, 4, 0, tzinfo=self.new_york).isoformat(),
-                "to": datetime(2010, 1, 4, 1, tzinfo=self.new_york).isoformat(),
+                "from": datetime(2018, 12, 31, 22, tzinfo=self.new_york).isoformat(),
+                "to": datetime(2018, 12, 31, 23, tzinfo=self.new_york).isoformat(),
             },
             "D": {
-                "from": datetime(2010, 1, 3, 17, tzinfo=self.new_york).isoformat(),
-                "to": datetime(2010, 1, 4, 17, tzinfo=self.new_york).isoformat(),
+                "from": datetime(2018, 12, 30, 17, tzinfo=self.new_york).isoformat(),
+                "to": datetime(2018, 12, 31, 17, tzinfo=self.new_york).isoformat(),
             },
             "W": {
-                "from": datetime(2010, 1, 1, 17, tzinfo=self.new_york).isoformat(),
-                "to": datetime(2010, 1, 8, 17, tzinfo=self.new_york).isoformat(),
+                "from": datetime(2018, 12, 21, 17, tzinfo=self.new_york).isoformat(),
+                "to": datetime(2018, 12, 28, 17, tzinfo=self.new_york).isoformat(),
             },
         }
         return {
@@ -159,6 +178,30 @@ class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
             self.assertEqual(chunk.canonical_request["price_component"], "COMBINED_BID_ASK")
             self.assertLess(chunk.requested_to, datetime(2019, 1, 1, 5, tzinfo=UTC))
 
+    def test_generated_manifest_is_accepted_by_existing_return_blind_validator(self):
+        ranges = {
+            "H1": {
+                "from": datetime(2009, 12, 30, 10, tzinfo=self.new_york).isoformat(),
+                "to": datetime(2018, 12, 31, 23, tzinfo=self.new_york).isoformat(),
+            },
+            "D": {
+                "from": datetime(2009, 2, 22, 17, tzinfo=self.new_york).isoformat(),
+                "to": datetime(2018, 12, 31, 17, tzinfo=self.new_york).isoformat(),
+            },
+            "W": {
+                "from": datetime(2009, 12, 18, 17, tzinfo=self.new_york).isoformat(),
+                "to": datetime(2018, 12, 28, 17, tzinfo=self.new_york).isoformat(),
+            },
+        }
+        _, dataset = create_historical_dataset_plan(self.payload(ranges=ranges))
+
+        grouped = _validate_dataset_contract(
+            dataset, self.strategy, datetime(2019, 1, 1, tzinfo=self.new_york)
+        )
+
+        self.assertEqual(set(grouped), set(INSTRUMENTS))
+        self.assertEqual(len(dataset.manifest["required_ranges"]), 18)
+
     def test_boundary_completing_h1_and_post_boundary_daily_weekly_are_rejected(self):
         for granularity, start, end in (
             (
@@ -181,7 +224,7 @@ class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
             ranges[granularity] = {"from": start.isoformat(), "to": end.isoformat()}
             with (
                 self.subTest(granularity=granularity),
-                self.assertRaisesMessage(ValueError, "completing at/after development end"),
+                self.assertRaisesRegex(ValueError, "final development completion|completing"),
             ):
                 create_historical_dataset_plan(self.payload(ranges=ranges))
 
@@ -213,6 +256,30 @@ class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
         self.assertEqual(attempts[0].ingestion_run.status, IngestionRun.Status.FAILED)
         self.assertEqual(second.ingestion_run.status, IngestionRun.Status.SUCCEEDED)
         self.assertEqual(Candle.objects.count(), 1)
+
+    def test_stale_attempt_requires_explicit_threshold_and_allows_separate_retry(self):
+        plan, _ = self.plan()
+        chunk = plan.chunks.first()
+        attempt, _ = begin_historical_attempt(chunk.logical_key)
+
+        with patch(
+            "market.historical_acquisition.timezone.now",
+            return_value=attempt.ingestion_run.started_at + timedelta(hours=3),
+        ):
+            resolved = resolve_stale_historical_attempt(
+                attempt.pk, timedelta(hours=2), "worker lease was manually verified absent"
+            )
+        retry, created = begin_historical_attempt(chunk.logical_key)
+
+        self.assertEqual(resolved.ingestion_run.status, IngestionRun.Status.FAILED)
+        self.assertTrue(created)
+        self.assertEqual(retry.attempt_number, 2)
+        event = AuditEvent.objects.get(event_type="market.historical_attempt_stale_failed")
+        self.assertEqual(event.payload["attempt_id"], attempt.pk)
+        with self.assertRaisesMessage(DatasetQualityError, "RUNNING"):
+            resolve_stale_historical_attempt(
+                attempt.pk, timedelta(hours=2), "must not transition twice"
+            )
 
     def test_provider_response_must_match_logical_chunk_before_storage(self):
         plan, _ = self.plan()
@@ -290,6 +357,17 @@ class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
 class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTestCase):
     reset_sequences = True
 
+    def test_pgcrypto_canonical_hash_support_matches_application_hash(self):
+        payload = {"z": [True, 2, {"text": "spaces stay"}], "a": "value"}
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT to_regprocedure('digest(bytea,text)'), market_sha256(%s::jsonb)",
+                [json.dumps(payload)],
+            )
+            digest_function, database_hash = cursor.fetchone()
+        self.assertIsNotNone(digest_function)
+        self.assertEqual(database_hash, stable_hash(payload))
+
     def test_database_rejects_duplicate_attempt_number_and_terminal_run_mutation(self):
         plan, _ = self.plan()
         chunk = plan.chunks.first()
@@ -352,22 +430,86 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
             HistoricalDatasetPlan.objects.filter(pk=plan.pk).update(identity="changed")
 
         wrong_instrument = Instrument.objects.exclude(pk=chunk.instrument_id).first()
-        run = IngestionRun.objects.create(
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            IngestionRun.objects.create(
+                source=plan.source,
+                dataset_version=dataset,
+                instrument=wrong_instrument,
+                granularity=chunk.granularity,
+                requested_from=chunk.requested_from,
+                requested_to=chunk.requested_to,
+                parameters=chunk.canonical_request,
+                request_manifest_hash="e" * 64,
+            )
+
+    def test_database_rejects_bulk_plan_chunk_hash_and_logical_key_tampering(self):
+        plan, dataset = self.plan()
+        with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE market_historicaldatasetplan SET identity=%s WHERE id=%s",
+                ["raw-sql-tamper", plan.pk],
+            )
+        tampered_plan = HistoricalDatasetPlan(
+            identity=plan.identity,
             source=plan.source,
+            strategy_version=plan.strategy_version,
+            instruments=plan.instruments[:-1],
+            granularities=plan.granularities,
+            ranges=plan.ranges,
+            alignment=plan.alignment,
+            chunk_size=plan.chunk_size,
+            phase1_spec_hash=plan.phase1_spec_hash,
+            phase1_manifest_hash=plan.phase1_manifest_hash,
+            payload=plan.payload,
+            sha256="0" * 64,
+        )
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            HistoricalDatasetPlan.objects.bulk_create([tampered_plan])
+
+        chunk = plan.chunks.first()
+        tampered_chunk = HistoricalIngestionChunk(
+            plan=plan,
             dataset_version=dataset,
-            instrument=wrong_instrument,
+            instrument=chunk.instrument,
             granularity=chunk.granularity,
             requested_from=chunk.requested_from,
             requested_to=chunk.requested_to,
-            parameters=chunk.canonical_request,
-            request_manifest_hash="e" * 64,
+            canonical_request=chunk.canonical_request,
+            canonical_request_sha256="0" * 64,
+            logical_key="1" * 64,
         )
         with self.assertRaises(DatabaseError), transaction.atomic():
-            HistoricalIngestionAttempt.objects.create(
-                chunk=chunk,
-                ingestion_run=run,
-                attempt_number=1,
-                idempotency_key=f"failed-break-ingestion-attempt:{chunk.logical_key}:1",
+            HistoricalIngestionChunk.objects.bulk_create([tampered_chunk])
+
+    def test_database_rejects_success_without_manifest_and_false_registration(self):
+        plan, dataset = self.plan()
+        attempt, _ = begin_historical_attempt(plan.chunks.first().logical_key)
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            IngestionRun.objects.filter(pk=attempt.ingestion_run_id).update(
+                status=IngestionRun.Status.SUCCEEDED,
+                finished_at=datetime.now(UTC),
+            )
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            DatasetRegistration.objects.bulk_create(
+                [
+                    DatasetRegistration(
+                        dataset_version=dataset,
+                        plan=plan,
+                        series_manifest=[],
+                        row_counts={},
+                        first_last_timestamps={},
+                        missingness={},
+                        conflict_count=0,
+                        incident_count=0,
+                        logical_chunk_set_hash="0" * 64,
+                        successful_attempt_set_hash="0" * 64,
+                        ingestion_manifest_set_hash="0" * 64,
+                        candle_key_hash="0" * 64,
+                        candle_payload_hash="0" * 64,
+                        configuration_sha256="0" * 64,
+                        report_sha256="0" * 64,
+                    )
+                ]
             )
 
     def test_database_seals_registered_dataset(self):

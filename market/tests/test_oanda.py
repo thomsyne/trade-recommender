@@ -1,9 +1,19 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from types import SimpleNamespace
 
 import httpx
 from django.test import SimpleTestCase
 
+from market.historical_acquisition import _validate_chunk_response
 from market.oanda import OandaClient, OandaError
+from market.quality import (
+    expected_candle_timestamps,
+    registered_candle_completion,
+    registered_successor,
+)
+from market.services import DatasetQualityError
+from market.tests.factories import candle
 
 
 class OandaClientTests(SimpleTestCase):
@@ -84,6 +94,88 @@ class OandaClientTests(SimpleTestCase):
 
         self.assertEqual(candles, [])
         self.assertEqual(manifest["weeklyAlignment"], "Friday")
+
+    def test_historical_4999_market_candle_chunk_is_one_exact_request(self):
+        start = datetime(2017, 12, 3, 22, tzinfo=UTC)
+        timestamps = [start]
+        while len(timestamps) < 4999:
+            timestamps.append(registered_successor(timestamps[-1], "H1"))
+        timestamps = tuple(timestamps)
+        end = registered_candle_completion(timestamps[-1], "H1")
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            self.assertEqual(request.url.params["from"], start.isoformat().replace("+00:00", "Z"))
+            self.assertEqual(request.url.params["to"], end.isoformat().replace("+00:00", "Z"))
+            self.assertEqual(request.url.params["includeFirst"], "true")
+            self.assertEqual(request.url.params["price"], "BA")
+            self.assertEqual(request.url.params["smooth"], "false")
+            self.assertEqual(request.url.params["dailyAlignment"], "17")
+            self.assertEqual(request.url.params["alignmentTimezone"], "America/New_York")
+            self.assertEqual(request.url.params["weeklyAlignment"], "Friday")
+            return httpx.Response(
+                200,
+                json={
+                    "candles": [
+                        _payload(timestamp.isoformat().replace("+00:00", "Z"), complete=True)
+                        for timestamp in timestamps
+                    ]
+                },
+            )
+
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        candles, manifest = client.fetch_historical_chunk("EUR_USD", "H1", start, end)
+        chunk = SimpleNamespace(
+            instrument=SimpleNamespace(code="EUR_USD"),
+            granularity="H1",
+            requested_from=start,
+            requested_to=end,
+        )
+        _validate_chunk_response(chunk, candles, manifest)
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(len(candles), 4999)
+        self.assertEqual(candles[0].timestamp, start)
+        self.assertEqual(candles[-1].timestamp, timestamps[-1])
+        self.assertEqual(len({item.timestamp for item in candles}), 4999)
+
+    def test_historical_response_rejects_missing_duplicate_incomplete_crossed_and_misaligned(self):
+        start = datetime(2018, 12, 30, 22, tzinfo=UTC)
+        end = start + timedelta(hours=2)
+        expected = expected_candle_timestamps(start, end, "H1")
+        manifest = {
+            "instrument": "EUR_USD",
+            "granularity": "H1",
+            "from": start.isoformat(),
+            "to": end.isoformat(),
+            "price": "BA",
+            "smooth": False,
+            "alignmentTimezone": "America/New_York",
+            "dailyAlignment": 17,
+            "weeklyAlignment": "Friday",
+            "includeFirst": True,
+        }
+        chunk = SimpleNamespace(
+            instrument=SimpleNamespace(code="EUR_USD"),
+            granularity="H1",
+            requested_from=start,
+            requested_to=end,
+        )
+        valid = [candle(timestamp) for timestamp in expected]
+        cases = {
+            "missing": valid[:1],
+            "duplicate": [valid[0], valid[0]],
+            "incomplete": [valid[0], candle(expected[1], complete=False)],
+            "crossed": [
+                valid[0],
+                candle(expected[1], bid_open=Decimal("2"), ask_open=Decimal("1")),
+            ],
+            "misaligned": [candle(start + timedelta(minutes=1)), valid[1]],
+        }
+        for name, candles in cases.items():
+            with self.subTest(name=name), self.assertRaises(DatasetQualityError):
+                _validate_chunk_response(chunk, candles, manifest)
 
     def test_fetches_account_terms_without_account_id_in_manifest(self):
         def handler(request):

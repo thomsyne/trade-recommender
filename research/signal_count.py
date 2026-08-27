@@ -27,7 +27,11 @@ from market.models import (
     Instrument,
     dataset_manifest_sha256,
 )
-from market.quality import expected_candle_timestamps, registered_candle_completion
+from market.quality import (
+    expected_candle_timestamps,
+    final_registered_completion_before,
+    registered_candle_completion,
+)
 from market.services import RequiredCandleRange, assert_dataset_window_usable
 from research.models import (
     AnalysisRun,
@@ -351,7 +355,6 @@ def _validate_dataset_contract(dataset, strategy, as_of):
     if set(grouped) != FROZEN_INSTRUMENTS:
         raise ReturnBlindViolation("S1 required_ranges must contain all six instruments")
     development_start = DEVELOPMENT_START.astimezone(DEVELOPMENT_START.tzinfo)
-    development_end = DEVELOPMENT_END.astimezone(DEVELOPMENT_END.tzinfo)
     for instrument, ranges in grouped.items():
         if (
             len(ranges) != len(S1_GRANULARITIES)
@@ -371,7 +374,8 @@ def _validate_dataset_contract(dataset, strategy, as_of):
                 registered_candle_completion(timestamp, required.granularity) <= development_start
                 for timestamp in expected
             )
-            if warmup < WARMUP_CANDLES[required.granularity] or required.end < development_end:
+            legal_end = final_registered_completion_before(DEVELOPMENT_END, required.granularity)
+            if warmup < WARMUP_CANDLES[required.granularity] or required.end != legal_end:
                 raise ReturnBlindViolation(
                     f"{instrument} {required.granularity} range lacks development or warm-up coverage"
                 )

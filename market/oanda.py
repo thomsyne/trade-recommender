@@ -111,6 +111,43 @@ class OandaClient:
         }
         return candles, manifest
 
+    def fetch_historical_chunk(self, instrument, granularity, start, end):
+        """Fetch one pre-registered logical chunk without prospective pagination semantics."""
+        if start.tzinfo is None or end.tzinfo is None or start >= end:
+            raise ValueError("historical chunk requires an aware increasing range")
+        start, end = start.astimezone(UTC), end.astimezone(UTC)
+        params = {
+            "price": "BA",
+            "granularity": granularity,
+            "from": _iso(start),
+            "to": _iso(end),
+            "smooth": "false",
+            "dailyAlignment": "17",
+            "alignmentTimezone": "America/New_York",
+            "weeklyAlignment": "Friday",
+            "includeFirst": "true",
+        }
+        response = self.client.get(f"/instruments/{instrument}/candles", params=params)
+        payload = _response_json(response)
+        try:
+            candles = [_parse_candle(item) for item in payload["candles"]]
+        except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+            raise OandaError("OANDA historical response contains a malformed candle") from error
+        manifest = {
+            "instrument": instrument,
+            "granularity": granularity,
+            "from": _iso(start),
+            "to": _iso(end),
+            "price": "BA",
+            "smooth": False,
+            "alignmentTimezone": "America/New_York",
+            "dailyAlignment": 17,
+            "weeklyAlignment": "Friday",
+            "includeFirst": True,
+            "requests": [{"url": str(response.request.url), "status": response.status_code}],
+        }
+        return candles, manifest
+
     def fetch_account_terms(self, account_id, instruments):
         if not account_id:
             raise ValueError("OANDA_ACCOUNT_ID is required")
