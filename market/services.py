@@ -28,6 +28,11 @@ def assert_dataset_usable(dataset_version) -> None:
     """Fail closed for any immutable conflict, incident, or unadmitted candle lineage."""
     if dataset_version.conflicts.exists() or dataset_version.incidents.exists():
         raise DatasetQualityError("dataset has unresolved conflict or data-quality incident")
+    runs = dataset_version.ingestion_runs.all()
+    if runs.exclude(status=IngestionRun.Status.SUCCEEDED).exists():
+        raise DatasetQualityError("dataset has an unsuccessful or unfinished ingestion manifest")
+    if runs.filter(ingestion_manifest__isnull=True).exists():
+        raise DatasetQualityError("dataset ingestion run has no governed manifest")
     candles = dataset_version.candles.all()
     if candles.exclude(ingestion_run__status=IngestionRun.Status.SUCCEEDED).exists():
         raise DatasetQualityError("dataset contains candles from an unsuccessful ingestion")

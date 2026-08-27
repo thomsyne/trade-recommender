@@ -302,6 +302,20 @@ class SetupTests(TestCase):
         self.assertEqual(missing_level.state, "CANCELLED_DATA_QUALITY")
         self.assertEqual(gap.state, "CANCELLED_DATA_QUALITY")
 
+    def test_confirmation_fails_closed_when_an_expected_completed_h1_is_absent(self):
+        event = SweepEvent(START, Side.LONG, ("a",), D("11"), D("9"), Bias.BULLISH, D("8"))
+        result = confirm_sweep(
+            event,
+            [],
+            [],
+            context(START + timedelta(hours=1)),
+            attributed_level_inactive_at={"a": None},
+        )
+        self.assertEqual(
+            (result.state, result.at),
+            ("CANCELLED_DATA_QUALITY", START + timedelta(hours=1)),
+        )
+
 
 class EntryTests(TestCase):
     def event(self, side=Side.LONG):

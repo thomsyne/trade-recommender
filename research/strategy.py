@@ -597,13 +597,24 @@ def confirm_sweep(
 ) -> Confirmation:
     if set(attributed_level_inactive_at) != set(event.level_keys):
         return Confirmation("CANCELLED_DATA_QUALITY", context.as_of)
-    following = [
-        candle for candle in completed_candles(h1, context) if candle.completed_at > event.at
-    ][:3]
+    available_h1: dict[datetime, list[Candle]] = {}
+    for candle in completed_candles(h1, context):
+        if candle.completed_at > event.at:
+            available_h1.setdefault(candle.opened_at, []).append(candle)
+    following = []
+    missing_h1_at = None
     previous_completion = event.at
-    for candle in following:
-        if not _is_registered_h1_successor(previous_completion, candle):
-            return Confirmation("CANCELLED_DATA_QUALITY", candle.opened_at)
+    for _ in range(3):
+        expected_open = _next_registered_h1_open(previous_completion)
+        expected_completion = expected_open + timedelta(hours=1)
+        if expected_completion > context.as_of:
+            break
+        matches = available_h1.get(expected_open, [])
+        if len(matches) != 1 or not _is_registered_h1_successor(previous_completion, matches[0]):
+            missing_h1_at = expected_completion
+            break
+        candle = matches[0]
+        following.append(candle)
         previous_completion = candle.completed_at
     daily_after_sweep = [
         candle for candle in completed_candles(daily, context) if candle.completed_at > event.at
@@ -663,6 +674,8 @@ def confirm_sweep(
             return Confirmation(
                 "CONFIRMED", candle.completed_at, latest_valid_support(candle.completed_at)
             )
+    if missing_h1_at is not None:
+        return Confirmation("CANCELLED_DATA_QUALITY", missing_h1_at)
     window_end = following[-1].completed_at if len(following) == 3 else context.as_of
     remaining_invalidations = [
         candle
@@ -695,6 +708,13 @@ def _is_registered_h1_successor(previous_completion: datetime, candle: Candle) -
         and opened_local.time() == time(17)
         and candle.opened_at - previous_completion <= timedelta(days=3)
     )
+
+
+def _next_registered_h1_open(previous_completion: datetime) -> datetime:
+    local = previous_completion.astimezone(ZoneInfo("America/New_York"))
+    if local.weekday() == 4 and local.time() == time(17):
+        return (local + timedelta(days=2)).replace(hour=17).astimezone(previous_completion.tzinfo)
+    return previous_completion
 
 
 def in_entry_session(timestamp) -> bool:
