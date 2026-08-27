@@ -4,10 +4,12 @@ from django.db import models
 
 class Instrument(models.Model):
     class Code(models.TextChoices):
+        AUD_USD = "AUD_USD", "AUD/USD"
         USD_CAD = "USD_CAD", "USD/CAD"
         GBP_USD = "GBP_USD", "GBP/USD"
         EUR_GBP = "EUR_GBP", "EUR/GBP"
         EUR_USD = "EUR_USD", "EUR/USD"
+        USD_JPY = "USD_JPY", "USD/JPY"
 
     code = models.CharField(max_length=7, choices=Code, unique=True)
     base_currency = models.CharField(max_length=3)
@@ -47,7 +49,36 @@ class SourceRegistry(models.Model):
         return self.name
 
 
-GRANULARITIES = (("D", "Daily"), ("H4", "Four-hour"), ("H1", "Hourly"))
+GRANULARITIES = (("W", "Weekly"), ("D", "Daily"), ("H4", "Four-hour"), ("H1", "Hourly"))
+
+
+class ImmutableModel(models.Model):
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError(f"{type(self).__name__} records are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError(f"{type(self).__name__} records are immutable")
+
+
+class DatasetVersion(ImmutableModel):
+    name = models.CharField(max_length=120)
+    version = models.CharField(max_length=80)
+    parent = models.ForeignKey("self", on_delete=models.PROTECT, null=True, blank=True)
+    source = models.ForeignKey(SourceRegistry, on_delete=models.PROTECT, null=True, blank=True)
+    description = models.TextField(blank=True)
+    manifest = models.JSONField(default=dict)
+    manifest_sha256 = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("name", "version"), name="unique_dataset_version")
+        ]
 
 
 class IngestionRun(models.Model):
@@ -55,14 +86,22 @@ class IngestionRun(models.Model):
         RUNNING = "running", "Running"
         SUCCEEDED = "succeeded", "Succeeded"
         FAILED = "failed", "Failed"
+        QUARANTINED = "quarantined", "Quarantined"
 
     source = models.ForeignKey(SourceRegistry, on_delete=models.PROTECT)
+    dataset_version = models.ForeignKey(
+        DatasetVersion,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="ingestion_runs",
+    )
     instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
     granularity = models.CharField(max_length=3, choices=GRANULARITIES)
     requested_from = models.DateTimeField()
     requested_to = models.DateTimeField()
     parameters = models.JSONField()
-    request_manifest_hash = models.CharField(max_length=64, unique=True)
+    request_manifest_hash = models.CharField(max_length=64)
     status = models.CharField(max_length=12, choices=Status, default=Status.RUNNING)
     fetched_count = models.PositiveIntegerField(default=0)
     stored_count = models.PositiveIntegerField(default=0)
@@ -73,12 +112,27 @@ class IngestionRun(models.Model):
 
     class Meta:
         ordering = ("-started_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=("dataset_version", "request_manifest_hash"),
+                condition=models.Q(dataset_version__isnull=False),
+                name="unique_dataset_ingestion_manifest_hash",
+            ),
+            models.UniqueConstraint(
+                fields=("request_manifest_hash",),
+                condition=models.Q(dataset_version__isnull=True),
+                name="unique_legacy_ingestion_manifest_hash",
+            ),
+        ]
 
 
 class Candle(models.Model):
     instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
     ingestion_run = models.ForeignKey(
         IngestionRun, on_delete=models.PROTECT, related_name="candles"
+    )
+    dataset_version = models.ForeignKey(
+        DatasetVersion, on_delete=models.PROTECT, null=True, blank=True, related_name="candles"
     )
     granularity = models.CharField(max_length=3, choices=GRANULARITIES)
     timestamp = models.DateTimeField(help_text="UTC interval-start timestamp")
@@ -97,7 +151,14 @@ class Candle(models.Model):
         ordering = ("timestamp",)
         constraints = [
             models.UniqueConstraint(
-                fields=("instrument", "granularity", "timestamp"), name="unique_market_candle"
+                fields=("dataset_version", "instrument", "granularity", "timestamp"),
+                name="unique_dataset_market_candle",
+                condition=models.Q(dataset_version__isnull=False),
+            ),
+            models.UniqueConstraint(
+                fields=("instrument", "granularity", "timestamp"),
+                name="unique_legacy_market_candle",
+                condition=models.Q(dataset_version__isnull=True),
             ),
             models.CheckConstraint(
                 condition=models.Q(complete=True), name="stored_candles_complete"
@@ -134,6 +195,95 @@ class Candle(models.Model):
     @property
     def midpoint_close(self):
         return (self.bid_close + self.ask_close) / 2
+
+    @property
+    def midpoint_open(self):
+        return (self.bid_open + self.ask_open) / 2
+
+    @property
+    def midpoint_high(self):
+        return (self.bid_high + self.ask_high) / 2
+
+    @property
+    def midpoint_low(self):
+        return (self.bid_low + self.ask_low) / 2
+
+    def save(self, *args, **kwargs):
+        if self.pk and self.dataset_version_id:
+            raise ValidationError("governed dataset candles are immutable")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.dataset_version_id:
+            raise ValidationError("governed dataset candles are immutable")
+        return super().delete(*args, **kwargs)
+
+
+class IngestionManifest(ImmutableModel):
+    ingestion_run = models.OneToOneField(
+        IngestionRun, on_delete=models.PROTECT, related_name="ingestion_manifest"
+    )
+    dataset_version = models.ForeignKey(
+        DatasetVersion, on_delete=models.PROTECT, related_name="manifests"
+    )
+    payload = models.JSONField()
+    sha256 = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("dataset_version", "sha256"), name="unique_dataset_manifest_hash"
+            )
+        ]
+
+
+class CandleConflict(ImmutableModel):
+    dataset_version = models.ForeignKey(
+        DatasetVersion, on_delete=models.PROTECT, related_name="conflicts"
+    )
+    ingestion_manifest = models.ForeignKey(
+        IngestionManifest, on_delete=models.PROTECT, related_name="conflicts"
+    )
+    existing_candle = models.ForeignKey(Candle, on_delete=models.PROTECT, related_name="conflicts")
+    existing_payload_sha256 = models.CharField(max_length=64)
+    incoming_payload_sha256 = models.CharField(max_length=64)
+    differing_fields = models.JSONField()
+    incoming_payload = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("ingestion_manifest", "existing_candle", "incoming_payload_sha256"),
+                name="unique_candle_conflict_payload",
+            )
+        ]
+
+
+class DataQualityIncident(ImmutableModel):
+    dataset_version = models.ForeignKey(
+        DatasetVersion, on_delete=models.PROTECT, null=True, blank=True, related_name="incidents"
+    )
+    ingestion_run = models.ForeignKey(
+        IngestionRun,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="quality_incidents",
+    )
+    code = models.CharField(max_length=80)
+    details = models.JSONField(default=dict)
+    evidence_sha256 = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("dataset_version", "code", "evidence_sha256"),
+                name="unique_dataset_quality_incident",
+            )
+        ]
 
 
 class TechnicalSnapshot(models.Model):

@@ -14,6 +14,7 @@ def validate_candles(candles, granularity):
     seen = set()
     previous = None
     expected_step = {
+        "W": timedelta(weeks=1),
         "H1": timedelta(hours=1),
         "H4": timedelta(hours=4),
         "D": timedelta(days=1),
@@ -52,6 +53,8 @@ def validate_candles(candles, granularity):
 
 
 def _is_fx_weekend_gap(start, end, granularity):
+    if granularity == "W":
+        return False
     start_weekday = 3 if granularity == "D" else 4
     return (
         start.weekday() == start_weekday

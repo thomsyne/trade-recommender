@@ -7,6 +7,9 @@ from django.utils import timezone
 from market.models import (
     AuditEvent,
     Candle,
+    CandleConflict,
+    DataQualityIncident,
+    IngestionManifest,
     IngestionRun,
     Instrument,
     OandaInstrumentTermsSnapshot,
@@ -18,21 +21,32 @@ from market.technicals import calculate_technicals
 
 
 @transaction.atomic
-def store_ingestion(source, instrument, granularity, start, end, candle_data, manifest):
+def store_ingestion(
+    source, instrument, granularity, start, end, candle_data, manifest, dataset_version=None
+):
     digest = manifest_hash(manifest)
-    existing = IngestionRun.objects.filter(request_manifest_hash=digest).first()
-    if existing:
-        return existing
-
-    run = IngestionRun.objects.create(
-        source=source,
-        instrument=instrument,
-        granularity=granularity,
-        requested_from=start,
-        requested_to=end,
-        parameters={key: value for key, value in manifest.items() if key != "requests"},
+    run, created = IngestionRun.objects.get_or_create(
         request_manifest_hash=digest,
+        dataset_version=dataset_version,
+        defaults={
+            "source": source,
+            "instrument": instrument,
+            "granularity": granularity,
+            "requested_from": start,
+            "requested_to": end,
+            "parameters": {key: value for key, value in manifest.items() if key != "requests"},
+        },
     )
+    if not created:
+        return run
+    ingestion_manifest = None
+    if dataset_version:
+        ingestion_manifest = IngestionManifest.objects.create(
+            ingestion_run=run,
+            dataset_version=dataset_version,
+            payload=manifest,
+            sha256=digest,
+        )
     issues = validate_candles(candle_data, granularity)
     if issues:
         run.status = IngestionRun.Status.FAILED
@@ -41,6 +55,15 @@ def store_ingestion(source, instrument, granularity, start, end, candle_data, ma
         run.failure_reason = "; ".join(f"{issue.code}@{issue.index}" for issue in issues[:20])
         run.finished_at = timezone.now()
         run.save()
+        if dataset_version:
+            details = {"issues": [issue.__dict__ for issue in issues[:20]]}
+            DataQualityIncident.objects.create(
+                dataset_version=dataset_version,
+                ingestion_run=run,
+                code="candle_validation_failed",
+                details=details,
+                evidence_sha256=_json_hash(details),
+            )
         AuditEvent.objects.create(
             event_type="market.ingestion_rejected",
             actor="market.services.store_ingestion",
@@ -50,7 +73,63 @@ def store_ingestion(source, instrument, granularity, start, end, candle_data, ma
         )
         return run
 
-    series = Candle.objects.filter(instrument=instrument, granularity=granularity)
+    if dataset_version:
+        existing_by_key = {
+            row.timestamp: row
+            for row in Candle.objects.select_for_update().filter(
+                dataset_version=dataset_version,
+                instrument=instrument,
+                granularity=granularity,
+                timestamp__in=[item.timestamp for item in candle_data],
+            )
+        }
+        conflicts = []
+        for item in candle_data:
+            prior = existing_by_key.get(item.timestamp)
+            incoming_payload = _candle_payload(item)
+            if prior and _candle_payload(prior) != incoming_payload:
+                existing_payload = _candle_payload(prior)
+                conflicts.append(
+                    CandleConflict(
+                        dataset_version=dataset_version,
+                        ingestion_manifest=ingestion_manifest,
+                        existing_candle=prior,
+                        existing_payload_sha256=_json_hash(existing_payload),
+                        incoming_payload_sha256=_json_hash(incoming_payload),
+                        differing_fields=sorted(
+                            field
+                            for field in set(existing_payload) | set(incoming_payload)
+                            if existing_payload.get(field) != incoming_payload.get(field)
+                        ),
+                        incoming_payload=incoming_payload,
+                    )
+                )
+        if conflicts:
+            CandleConflict.objects.bulk_create(conflicts)
+            incident_details = {
+                "conflict_count": len(conflicts),
+                "incoming_payload_sha256": sorted(
+                    conflict.incoming_payload_sha256 for conflict in conflicts
+                ),
+            }
+            DataQualityIncident.objects.create(
+                dataset_version=dataset_version,
+                ingestion_run=run,
+                code="candle_conflict",
+                details=incident_details,
+                evidence_sha256=_json_hash(incident_details),
+            )
+            run.status = IngestionRun.Status.QUARANTINED
+            run.fetched_count = len(candle_data)
+            run.rejected_count = len(candle_data)
+            run.failure_reason = "incoming batch conflicts with governed dataset"
+            run.finished_at = timezone.now()
+            run.save()
+            return run
+
+    series = Candle.objects.filter(
+        instrument=instrument, granularity=granularity, dataset_version=dataset_version
+    )
     fixture_rows = series.filter(ingestion_run__source__name="Development fixtures")
     replaced_fixture_count = 0
     discard_fixture_batch = (
@@ -70,14 +149,19 @@ def store_ingestion(source, instrument, granularity, start, end, candle_data, ma
         if discard_fixture_batch
         else [
             Candle(
-                instrument=instrument, ingestion_run=run, granularity=granularity, **item.__dict__
+                instrument=instrument,
+                ingestion_run=run,
+                dataset_version=dataset_version,
+                granularity=granularity,
+                **item.__dict__,
             )
             for item in candle_data
+            if not dataset_version or item.timestamp not in existing_by_key
         ]
     )
-    before = Candle.objects.filter(instrument=instrument, granularity=granularity).count()
-    Candle.objects.bulk_create(rows, ignore_conflicts=True)
-    after = Candle.objects.filter(instrument=instrument, granularity=granularity).count()
+    before = series.count()
+    Candle.objects.bulk_create(rows, ignore_conflicts=dataset_version is None)
+    after = series.count()
     run.status = IngestionRun.Status.SUCCEEDED
     run.fetched_count = len(candle_data)
     run.stored_count = after - before
@@ -96,8 +180,42 @@ def store_ingestion(source, instrument, granularity, start, end, candle_data, ma
             "discarded_fixture_batch": discard_fixture_batch,
         },
     )
-    calculate_and_store_snapshot(instrument, granularity)
+    if dataset_version is None:
+        calculate_and_store_snapshot(instrument, granularity)
     return run
+
+
+def _candle_payload(candle):
+    fields = (
+        "timestamp",
+        "complete",
+        "volume",
+        "bid_open",
+        "bid_high",
+        "bid_low",
+        "bid_close",
+        "ask_open",
+        "ask_high",
+        "ask_low",
+        "ask_close",
+    )
+    return {
+        field: (
+            value.isoformat()
+            if field == "timestamp"
+            else format(value, ".6f")
+            if field.startswith(("bid_", "ask_"))
+            else str(value)
+        )
+        for field in fields
+        if (value := getattr(candle, field)) is not None
+    }
+
+
+def _json_hash(payload):
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def calculate_and_store_snapshot(instrument, granularity):

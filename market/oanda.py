@@ -57,6 +57,7 @@ class OandaClient:
             raise ValueError("start must be before end")
 
         step = {
+            "W": timedelta(weeks=1),
             "H1": timedelta(hours=1),
             "H4": timedelta(hours=4),
             "D": timedelta(days=1),
@@ -76,6 +77,7 @@ class OandaClient:
                 "smooth": "false",
                 "dailyAlignment": "17",
                 "alignmentTimezone": "America/New_York",
+                "weeklyAlignment": "Friday",
                 "includeFirst": "true" if first_request else "false",
             }
             response = self.client.get(f"/instruments/{instrument}/candles", params=params)
@@ -103,6 +105,7 @@ class OandaClient:
             "smooth": False,
             "alignmentTimezone": "America/New_York",
             "dailyAlignment": 17,
+            "weeklyAlignment": "Friday",
             "includeFirstAfterFirstPage": False,
             "requests": requests,
         }

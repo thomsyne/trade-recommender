@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, transaction
@@ -7,6 +8,8 @@ from django.test import TestCase, TransactionTestCase
 from market.models import (
     AuditEvent,
     Candle,
+    CandleConflict,
+    DatasetVersion,
     IngestionRun,
     Instrument,
     SourceRegistry,
@@ -155,6 +158,84 @@ class IngestionServiceTests(TestCase):
             event.save()
         with self.assertRaises(ValidationError):
             event.delete()
+
+    def test_governed_conflict_quarantines_batch_but_child_can_correct(self):
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        parent = DatasetVersion.objects.create(
+            name="oanda", version="v1", source=self.source, manifest_sha256="1" * 64
+        )
+        child = DatasetVersion.objects.create(
+            name="oanda",
+            version="v2",
+            parent=parent,
+            source=self.source,
+            manifest_sha256="2" * 64,
+        )
+        original = candle(start)
+        corrected = candle(start, bid_close=original.bid_close + Decimal("0.0001"))
+
+        first = store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start,
+            start + timedelta(hours=4),
+            [original],
+            {"batch": 1},
+            dataset_version=parent,
+        )
+        duplicate = store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start,
+            start + timedelta(hours=4),
+            [original],
+            {"batch": 2},
+            dataset_version=parent,
+        )
+        conflict = store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start,
+            start + timedelta(hours=4),
+            [corrected],
+            {"batch": 3},
+            dataset_version=parent,
+        )
+        correction = store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start,
+            start + timedelta(hours=4),
+            [corrected],
+            {"batch": 4},
+            dataset_version=child,
+        )
+
+        self.assertEqual(first.stored_count, 1)
+        self.assertEqual(duplicate.stored_count, 0)
+        self.assertEqual(conflict.status, IngestionRun.Status.QUARANTINED)
+        self.assertEqual(CandleConflict.objects.count(), 1)
+        self.assertEqual(CandleConflict.objects.get().differing_fields, ["bid_close"])
+        self.assertEqual(correction.stored_count, 1)
+        self.assertEqual(Candle.objects.count(), 2)
+
+    def test_component_midpoints_are_derived_from_bid_and_ask(self):
+        item = candle()
+        stored = Candle(
+            instrument=self.instrument,
+            ingestion_run_id=1,
+            granularity="H4",
+            **item.__dict__,
+        )
+
+        self.assertEqual(stored.midpoint_open, (item.bid_open + item.ask_open) / 2)
+        self.assertEqual(stored.midpoint_high, (item.bid_high + item.ask_high) / 2)
+        self.assertEqual(stored.midpoint_low, (item.bid_low + item.ask_low) / 2)
+        self.assertEqual(stored.midpoint_close, (item.bid_close + item.ask_close) / 2)
 
 
 class AuditDatabaseInvariantTests(TransactionTestCase):
