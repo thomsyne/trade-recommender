@@ -77,18 +77,28 @@ class IngestionServiceTests(TestCase):
             name="empty",
             version="1",
             source=self.source,
-            manifest_sha256="e" * 64,
+            manifest={"fixture": "empty"},
         )
 
         with self.assertRaisesMessage(DatasetQualityError, "no governed candles"):
             assert_dataset_usable(dataset)
+
+    def test_dataset_registration_rejects_manifest_sha_mismatch(self):
+        with self.assertRaisesMessage(ValidationError, "manifest SHA-256"):
+            DatasetVersion.objects.create(
+                name="bad-manifest-hash",
+                version="1",
+                source=self.source,
+                manifest={"fixture": "hash-mismatch"},
+                manifest_sha256="0" * 64,
+            )
 
     def test_required_range_detects_gap_across_successful_manifests(self):
         dataset = DatasetVersion.objects.create(
             name="cross-manifest-gap",
             version="1",
             source=self.source,
-            manifest_sha256="g" * 64,
+            manifest={"fixture": "cross-manifest-gap"},
         )
         start = datetime(2026, 1, 5, tzinfo=UTC)
         for index, timestamp in enumerate((start, start + timedelta(hours=2))):
@@ -117,7 +127,7 @@ class IngestionServiceTests(TestCase):
             name="bounded-window",
             version="1",
             source=self.source,
-            manifest_sha256="w" * 64,
+            manifest={"fixture": "bounded-window"},
         )
         start = datetime(2026, 1, 5, tzinfo=UTC)
         store_ingestion(
@@ -244,14 +254,17 @@ class IngestionServiceTests(TestCase):
     def test_governed_conflict_quarantines_batch_but_child_can_correct(self):
         start = datetime(2026, 1, 5, tzinfo=UTC)
         parent = DatasetVersion.objects.create(
-            name="oanda", version="v1", source=self.source, manifest_sha256="1" * 64
+            name="oanda",
+            version="v1",
+            source=self.source,
+            manifest={"fixture": "parent"},
         )
         child = DatasetVersion.objects.create(
             name="oanda",
             version="v2",
             parent=parent,
             source=self.source,
-            manifest_sha256="2" * 64,
+            manifest={"fixture": "child"},
         )
         original = candle(start)
         corrected = candle(start, bid_close=original.bid_close + Decimal("0.0001"))
@@ -362,7 +375,7 @@ class AuditDatabaseInvariantTests(TransactionTestCase):
             **item.__dict__,
         )
         dataset = DatasetVersion.objects.create(
-            name="governed", version="1", manifest_sha256="7" * 64
+            name="governed", version="1", manifest={"fixture": "governed"}
         )
 
         with self.assertRaises(DatabaseError), transaction.atomic():

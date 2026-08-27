@@ -1,5 +1,13 @@
+import hashlib
+import json
+
 from django.core.exceptions import ValidationError
 from django.db import models
+
+
+def dataset_manifest_sha256(manifest):
+    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class Instrument(models.Model):
@@ -79,6 +87,13 @@ class DatasetVersion(ImmutableModel):
         constraints = [
             models.UniqueConstraint(fields=("name", "version"), name="unique_dataset_version")
         ]
+
+    def save(self, *args, **kwargs):
+        expected_hash = dataset_manifest_sha256(self.manifest)
+        if self.manifest_sha256 and self.manifest_sha256 != expected_hash:
+            raise ValidationError("dataset manifest SHA-256 does not match canonical manifest JSON")
+        self.manifest_sha256 = expected_hash
+        return super().save(*args, **kwargs)
 
 
 class IngestionRun(models.Model):

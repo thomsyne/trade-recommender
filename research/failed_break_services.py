@@ -8,6 +8,7 @@ from dataclasses import asdict
 
 from django.db import transaction
 
+from market.quality import expected_candle_timestamps
 from market.services import DatasetQualityError, assert_dataset_window_usable
 from research.models import (
     AnalysisRun,
@@ -33,10 +34,54 @@ def evidence_hash(value) -> str:
     ).hexdigest()
 
 
+def _require_history(required_ranges, minimum_candles):
+    required_ranges = tuple(required_ranges)
+    supplied = {required.granularity for required in required_ranges}
+    missing = set(minimum_candles) - supplied
+    if missing:
+        raise DatasetQualityError(
+            f"operation is missing required dataset ranges: {', '.join(sorted(missing))}"
+        )
+    counts = {
+        granularity: len(
+            {
+                timestamp
+                for required in required_ranges
+                if required.granularity == granularity
+                for timestamp in expected_candle_timestamps(
+                    required.start, required.end, granularity
+                )
+            }
+        )
+        for granularity in minimum_candles
+    }
+    insufficient = [
+        granularity
+        for granularity, minimum in minimum_candles.items()
+        if counts[granularity] < minimum
+    ]
+    if insufficient:
+        raise DatasetQualityError(
+            f"operation lacks indicator warm-up history: {', '.join(sorted(insufficient))}"
+        )
+    return required_ranges
+
+
 @transaction.atomic
 def persist_level(
     *, instrument, strategy_version, dataset_version, spec: LevelSpec, required_ranges, as_of
 ) -> Level:
+    minimum_history = (
+        {"W": 1, "D": 14}
+        if spec.family == Level.Family.WEEKLY
+        else {"D": 20}
+        if spec.family == Level.Family.BREAKOUT
+        else {"D": 14}
+    )
+    required_ranges = _require_history(
+        required_ranges,
+        minimum_history,
+    )
     assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     values = {
         "family": spec.family,
@@ -80,6 +125,7 @@ def persist_analysis(
     as_of,
 ) -> AnalysisRun:
     try:
+        required_ranges = _require_history(required_ranges, {"W": 1, "D": 220, "H1": 14})
         assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     except DatasetQualityError:
         if result != AnalysisRun.Result.DATA_INCOMPLETE:
@@ -112,6 +158,7 @@ def persist_setup(
     required_ranges,
     as_of,
 ) -> SetupEvent:
+    required_ranges = _require_history(required_ranges, {"W": 1, "D": 220, "H1": 14})
     assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     if set(event.level_keys) != set(level_attributions):
         raise ValueError("setup attributions do not match deterministic sweep keys")
@@ -242,6 +289,7 @@ def persist_confirmation(
         raise ValueError("unsupported Phase 2A confirmation state")
     setup = SetupEvent.objects.select_for_update().get(pk=setup.pk)
     try:
+        required_ranges = _require_history(required_ranges, {"D": 1, "H1": 1})
         assert_dataset_window_usable(
             setup.dataset_version, setup.instrument, required_ranges, as_of
         )
@@ -280,6 +328,7 @@ def persist_entry_evaluation(
 ) -> EntryEligibilityEvaluation:
     setup = SetupEvent.objects.select_for_update().get(pk=setup.pk)
     try:
+        required_ranges = _require_history(required_ranges, {"W": 1, "D": 1, "H1": 15})
         assert_dataset_window_usable(
             setup.dataset_version, setup.instrument, required_ranges, as_of
         )

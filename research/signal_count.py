@@ -13,11 +13,19 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from market.models import Candle, DatasetVersion, IngestionRun, Instrument
+from market.models import (
+    Candle,
+    DatasetVersion,
+    IngestionRun,
+    Instrument,
+    dataset_manifest_sha256,
+)
+from market.quality import expected_candle_timestamps, registered_candle_completion
 from market.services import RequiredCandleRange, assert_dataset_window_usable
 from research.models import (
     EntryEligibilityEvaluation,
@@ -27,6 +35,13 @@ from research.models import (
 )
 
 SIGNAL_COUNT_IDENTITY = "failed-break-signal-count-v1"
+S0_JOB_NAME = "failed-break-signal-count-s0"
+PHASE1_MANIFEST_SHA256 = "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
+FROZEN_INSTRUMENTS = frozenset({"EUR_USD", "GBP_USD", "EUR_GBP", "USD_CAD", "USD_JPY", "AUD_USD"})
+S1_GRANULARITIES = frozenset({"W", "D", "H1"})
+DEVELOPMENT_START = datetime(2010, 1, 1, tzinfo=ZoneInfo("America/New_York"))
+DEVELOPMENT_END = datetime(2019, 1, 1, tzinfo=ZoneInfo("America/New_York"))
+WARMUP_CANDLES = {"W": 1, "D": 220, "H1": 14}
 ENTRY_FIELDS = frozenset({"timestamp", "bid_open", "ask_open"})
 FORBIDDEN_FIELD_PARTS = frozenset(
     {
@@ -67,6 +82,7 @@ S1_COVERAGE_FIELDS = frozenset(
     {
         "dataset_id",
         "strategy_version_id",
+        "s0_report_sha256",
         "as_of",
         "bounded",
         "maximum_setups",
@@ -235,6 +251,74 @@ def _declared_required_ranges(dataset):
     return grouped
 
 
+def _is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_s1_contract(dataset, strategy, as_of, s0_job_id):
+    if dataset.manifest_sha256 != dataset_manifest_sha256(dataset.manifest):
+        raise ReturnBlindViolation("dataset manifest SHA-256 does not match canonical JSON")
+    if (
+        strategy.content_hash != PHASE1_MANIFEST_SHA256
+        or set(strategy.pair_metadata.get("instruments", ())) != FROZEN_INSTRUMENTS
+    ):
+        raise ReturnBlindViolation("S1 requires the approved frozen six-instrument strategy")
+    manifest = dataset.manifest
+    if (
+        manifest.get("strategy_manifest_sha256") != PHASE1_MANIFEST_SHA256
+        or set(manifest.get("instruments", ())) != FROZEN_INSTRUMENTS
+        or manifest.get("partition")
+        != {"name": "development", "start_year": 2010, "end_year": 2018}
+    ):
+        raise ReturnBlindViolation("dataset manifest does not match the frozen S1 universe")
+    grouped = _declared_required_ranges(dataset)
+    if set(grouped) != FROZEN_INSTRUMENTS:
+        raise ReturnBlindViolation("S1 required_ranges must contain all six instruments")
+    development_start = DEVELOPMENT_START.astimezone(DEVELOPMENT_START.tzinfo)
+    development_end = DEVELOPMENT_END.astimezone(DEVELOPMENT_END.tzinfo)
+    for instrument, ranges in grouped.items():
+        if (
+            len(ranges) != len(S1_GRANULARITIES)
+            or {required.granularity for required in ranges} != S1_GRANULARITIES
+        ):
+            raise ReturnBlindViolation(
+                f"{instrument} must declare exactly one W, D and H1 S1 range"
+            )
+        for required in ranges:
+            try:
+                expected = expected_candle_timestamps(
+                    required.start, required.end, required.granularity
+                )
+            except ValueError as error:
+                raise ReturnBlindViolation(str(error)) from error
+            warmup = sum(
+                registered_candle_completion(timestamp, required.granularity) <= development_start
+                for timestamp in expected
+            )
+            if warmup < WARMUP_CANDLES[required.granularity] or required.end < development_end:
+                raise ReturnBlindViolation(
+                    f"{instrument} {required.granularity} range lacks development or warm-up coverage"
+                )
+            if required.end > as_of:
+                raise ReturnBlindViolation("S1 as_of precedes required development coverage")
+
+    s0_run = JobRun.objects.filter(
+        pk=s0_job_id,
+        job_name=S0_JOB_NAME,
+        strategy_version=strategy,
+        dataset_version=dataset,
+        status=JobRun.Status.SUCCEEDED,
+    ).first()
+    s0_report_sha256 = s0_run.evidence.get("report_sha256") if s0_run else None
+    if not _is_sha256(s0_report_sha256):
+        raise ReturnBlindViolation("S1 requires a matching immutable S0 audit report")
+    return grouped, s0_report_sha256
+
+
 def _s1_evaluation_queryset(setup_ids):
     return (
         EntryEligibilityEvaluation.objects.filter(setup_id__in=setup_ids)
@@ -244,7 +328,7 @@ def _s1_evaluation_queryset(setup_ids):
 
 
 def run_s1(
-    *, dataset_id: int, strategy_version_id: int, maximum_setups: int, as_of
+    *, dataset_id: int, strategy_version_id: int, s0_job_id: int, maximum_setups: int, as_of
 ) -> SignalCountOutput:
     """Count bounded persisted eligibility facts without importing post-entry execution code."""
     if maximum_setups < 1:
@@ -253,7 +337,9 @@ def run_s1(
         raise ValueError("as_of must be timezone-aware")
     dataset = DatasetVersion.objects.get(pk=dataset_id)
     strategy = StrategyVersion.objects.get(pk=strategy_version_id)
-    ranges_by_instrument = _declared_required_ranges(dataset)
+    ranges_by_instrument, s0_report_sha256 = _validate_s1_contract(
+        dataset, strategy, as_of, s0_job_id
+    )
     instruments_by_code = {
         instrument.code: instrument
         for instrument in Instrument.objects.filter(code__in=ranges_by_instrument)
@@ -314,6 +400,8 @@ def run_s1(
         "dataset_manifest_sha256": dataset.manifest_sha256,
         "strategy_version_id": strategy.pk,
         "strategy_content_hash": strategy.content_hash,
+        "s0_job_id": s0_job_id,
+        "s0_report_sha256": s0_report_sha256,
         "maximum_setups": maximum_setups,
         "as_of": as_of,
     }
@@ -324,6 +412,7 @@ def run_s1(
         {
             "dataset_id": dataset.pk,
             "strategy_version_id": strategy.pk,
+            "s0_report_sha256": s0_report_sha256,
             "as_of": as_of.isoformat(),
             "bounded": True,
             "maximum_setups": maximum_setups,

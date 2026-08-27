@@ -12,6 +12,7 @@ from django.db import DatabaseError, IntegrityError, close_old_connections, conn
 from django.test import TestCase, TransactionTestCase
 
 from market.models import DataQualityIncident, DatasetVersion, Instrument, SourceRegistry
+from market.quality import expected_candle_timestamps
 from market.services import RequiredCandleRange, store_ingestion
 from market.tests.factories import candle
 from research.failed_break_services import (
@@ -26,6 +27,7 @@ from research.failed_break_services import (
 from research.models import (
     AnalysisRun,
     EntryEligibilityEvaluation,
+    JobRun,
     Level,
     SetupEvent,
     SetupLevelAttribution,
@@ -61,20 +63,37 @@ class StrategyPersistenceTests(TestCase):
             retention_policy="test only",
         )
         self.dataset = DatasetVersion.objects.create(
-            name="candles", version="1", source=source, manifest_sha256="0" * 64
+            name="candles",
+            version="1",
+            source=source,
+            manifest={"fixture": "strategy-persistence"},
         )
-        candle_at = self.at - timedelta(hours=1)
-        store_ingestion(
-            source,
-            self.instrument,
-            "H1",
-            candle_at,
-            self.at,
-            [candle(candle_at)],
-            {"bounded": True},
-            dataset_version=self.dataset,
+        h1_at = self.at - timedelta(hours=15)
+        daily_at = datetime(2025, 1, 5, 22, tzinfo=UTC)
+        daily_end = datetime(2025, 12, 31, 22, tzinfo=UTC)
+        weekly_at = datetime(2025, 12, 19, 22, tzinfo=UTC)
+        ranges = (
+            ("H1", h1_at, self.at),
+            ("D", daily_at, daily_end),
+            ("W", weekly_at, weekly_at + timedelta(weeks=1)),
         )
-        self.required_ranges = (RequiredCandleRange("H1", candle_at, self.at),)
+        for granularity, start, end in ranges:
+            store_ingestion(
+                source,
+                self.instrument,
+                granularity,
+                start,
+                end,
+                [
+                    candle(timestamp)
+                    for timestamp in expected_candle_timestamps(start, end, granularity)
+                ],
+                {"bounded": True, "granularity": granularity},
+                dataset_version=self.dataset,
+            )
+        self.required_ranges = tuple(
+            RequiredCandleRange(granularity, start, end) for granularity, start, end in ranges
+        )
         self.as_of = self.at + timedelta(days=1)
         definition = StrategyDefinition.objects.create(key="phase-1", name="Phase 1")
         self.strategy = StrategyVersion.objects.create(
@@ -259,6 +278,55 @@ class StrategyPersistenceTests(TestCase):
                 dataset_version=self.dataset,
                 execution_identity="wrong-execution-identity",
             )
+
+        sibling = StrategyVersion.objects.create(
+            definition=self.strategy.definition,
+            version="lineage-mismatch",
+            detector_version="other-detector",
+            data_identity="data",
+            event_identity="event",
+            execution_identity="other-execution",
+            cost_identity="cost",
+            portfolio_identity="portfolio",
+            content_hash="6" * 64,
+        )
+        other_dataset = DatasetVersion.objects.create(
+            name="other-lineage",
+            version="1",
+            manifest={"fixture": "other-lineage"},
+        )
+        wrong_job = JobRun.objects.create(
+            job_name="wrong-lineage",
+            strategy_version=sibling,
+            dataset_version=self.dataset,
+            config_hash="7" * 64,
+            idempotency_key="wrong-lineage",
+            as_of=self.at,
+            status=JobRun.Status.SUCCEEDED,
+        )
+        mismatches = (
+            {"strategy_version": sibling},
+            {"dataset_version": other_dataset},
+            {"job_run": wrong_job},
+        )
+        for index, mismatch in enumerate(mismatches):
+            values = {
+                "setup": self.setup,
+                "from_state": SetupTransition.State.TRIGGER_PENDING,
+                "to_state": SetupTransition.State.CONFIRMED,
+                "effective_at": self.at,
+                "evidence_hash": str(index) * 64,
+                "strategy_version": self.strategy,
+                "dataset_version": self.dataset,
+                "execution_identity": self.strategy.execution_identity,
+                **mismatch,
+            }
+            with (
+                self.subTest(mismatch=mismatch),
+                self.assertRaises(DatabaseError),
+                transaction.atomic(),
+            ):
+                SetupTransition.objects.create(**values)
 
         target = Level.objects.create(
             family=Level.Family.WEEKLY,
@@ -461,6 +529,32 @@ class StrategyPersistenceTests(TestCase):
             first.setuptransition_set.filter(to_state=SetupTransition.State.ENTRY_PENDING).count(),
             1,
         )
+
+    def test_weekly_level_cannot_use_an_h1_only_coverage_claim(self):
+        spec = make_level(
+            "weekly",
+            Level.Family.WEEKLY,
+            Role.SUPPORT,
+            Decimal("1.1"),
+            Decimal("0.1"),
+            self.at,
+            self.at,
+            Decimal("0.00001"),
+            Context(self.as_of, "strategy", "dataset"),
+        )
+        h1_only = tuple(
+            required for required in self.required_ranges if required.granularity == "H1"
+        )
+
+        with self.assertRaisesMessage(ValueError, "missing required dataset ranges: D, W"):
+            persist_level(
+                instrument=self.instrument,
+                strategy_version=self.strategy,
+                dataset_version=self.dataset,
+                spec=spec,
+                required_ranges=h1_only,
+                as_of=self.as_of,
+            )
 
     def test_setup_rejects_cross_lineage_levels_and_freezes_attribution_set(self):
         other_instrument = Instrument.objects.create(
@@ -701,20 +795,28 @@ class TransitionConcurrencyTests(TransactionTestCase):
             name="concurrency",
             version="1",
             source=source,
-            manifest_sha256="1" * 64,
+            manifest={"fixture": "concurrency"},
         )
-        candle_at = at - timedelta(hours=1)
-        store_ingestion(
-            source,
-            instrument,
-            "H1",
-            candle_at,
-            at,
-            [candle(candle_at)],
-            {"bounded": True},
-            dataset_version=dataset,
+        h1_at = at - timedelta(hours=1)
+        daily_at = datetime(2025, 12, 30, 22, tzinfo=UTC)
+        ranges = (
+            ("H1", h1_at, at),
+            ("D", daily_at, daily_at + timedelta(days=1)),
         )
-        required_ranges = (RequiredCandleRange("H1", candle_at, at),)
+        for granularity, start, end in ranges:
+            store_ingestion(
+                source,
+                instrument,
+                granularity,
+                start,
+                end,
+                [candle(start)],
+                {"bounded": True, "granularity": granularity},
+                dataset_version=dataset,
+            )
+        required_ranges = tuple(
+            RequiredCandleRange(granularity, start, end) for granularity, start, end in ranges
+        )
         definition = StrategyDefinition.objects.create(key="concurrency", name="Concurrency")
         strategy = StrategyVersion.objects.create(
             definition=definition,

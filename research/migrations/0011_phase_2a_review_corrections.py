@@ -1,5 +1,4 @@
 import django.db.models.deletion
-import django.utils.timezone
 from django.db import migrations, models
 
 TABLES = (
@@ -16,6 +15,44 @@ TABLES = (
     "research_entryeligibilityevaluation",
     "research_jobrun",
 )
+MIGRATION_GUARD_TABLES = (
+    "research_analysisrun",
+    "research_setupevent",
+    "research_setuptransition",
+    "research_entryeligibilityevaluation",
+)
+
+
+def create_migration_write_guard(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+    schema_editor.execute(
+        """
+        CREATE FUNCTION research_phase2a_reject_migration_window_write() RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Phase 2A protected migration stage rejects concurrent writes';
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    for table in MIGRATION_GUARD_TABLES:
+        schema_editor.execute(
+            f"""
+            CREATE TRIGGER {table}_phase2a_migration_guard
+            BEFORE INSERT OR UPDATE OR DELETE ON {table}
+            FOR EACH ROW EXECUTE FUNCTION research_phase2a_reject_migration_window_write();
+            """
+        )
+
+
+def drop_migration_write_guard(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+    for table in MIGRATION_GUARD_TABLES:
+        schema_editor.execute(f"DROP TRIGGER IF EXISTS {table}_phase2a_migration_guard ON {table};")
+    schema_editor.execute(
+        "DROP FUNCTION IF EXISTS research_phase2a_reject_migration_window_write();"
+    )
 
 
 def preflight_registered_identities(apps, schema_editor):
@@ -32,11 +69,8 @@ def preflight_registered_identities(apps, schema_editor):
             analysis.dataset_version_id,
         )
         retained = analyses.get(key)
-        if retained and (retained.result, retained.evidence_hash) != (
-            analysis.result,
-            analysis.evidence_hash,
-        ):
-            raise RuntimeError("AnalysisRun rows conflict under detector-version identity")
+        if retained:
+            raise RuntimeError("AnalysisRun rows collapse under detector-version identity")
         analyses.setdefault(key, analysis)
 
     if EntryEligibilityEvaluation.objects.filter(decision="ENTRY_PENDING").exists():
@@ -46,8 +80,14 @@ def preflight_registered_identities(apps, schema_editor):
         )
 
     transitions_by_setup = {}
-    for transition in SetupTransition.objects.filter(from_state="CONFIRMED").order_by("pk"):
-        transitions_by_setup.setdefault(transition.setup_id, []).append(transition)
+    for transition in SetupTransition.objects.select_related("setup", "job_run").order_by("pk"):
+        if transition.job_run_id and (
+            transition.job_run.strategy_version_id != transition.setup.strategy_version_id
+            or transition.job_run.dataset_version_id != transition.setup.dataset_version_id
+        ):
+            raise RuntimeError("existing transition job lineage conflicts with setup")
+        if transition.from_state == "CONFIRMED":
+            transitions_by_setup.setdefault(transition.setup_id, []).append(transition)
     setup_ids = set(transitions_by_setup) | set(
         EntryEligibilityEvaluation.objects.values_list("setup_id", flat=True)
     )
@@ -82,6 +122,7 @@ def preflight_registered_identities(apps, schema_editor):
 def drop_append_only_triggers(apps, schema_editor):
     if schema_editor.connection.vendor != "postgresql":
         return
+    drop_migration_write_guard(apps, schema_editor)
     for table in TABLES:
         schema_editor.execute(f"DROP TRIGGER IF EXISTS {table}_append_only ON {table};")
         schema_editor.execute(f"DROP FUNCTION IF EXISTS {table}_reject_mutation();")
@@ -109,6 +150,7 @@ def restore_original_append_only_triggers(apps, schema_editor):
             FOR EACH ROW EXECUTE FUNCTION {function}();
             """
         )
+    create_migration_write_guard(apps, schema_editor)
 
 
 def restore_corrected_triggers(apps, schema_editor):
@@ -274,8 +316,6 @@ def populate_registered_identities(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    atomic = False
-
     dependencies = [
         ("market", "0008_reject_governed_candle_promotion"),
         ("research", "0010_phase_2a_append_only_triggers"),
@@ -286,7 +326,6 @@ class Migration(migrations.Migration):
             migrations.RunPython.noop,
             atomic=True,
         ),
-        migrations.RunPython(drop_append_only_triggers, restore_original_append_only_triggers),
         migrations.RemoveConstraint(
             model_name="analysisrun",
             name="unique_analysis_instrument_h1_strategy_dataset",
@@ -372,136 +411,5 @@ class Migration(migrations.Migration):
             name="risk_per_unit_quote",
             field=models.DecimalField(blank=True, decimal_places=10, max_digits=20, null=True),
         ),
-        migrations.RunPython(
-            populate_registered_identities,
-            migrations.RunPython.noop,
-            atomic=True,
-        ),
-        migrations.AlterField(
-            model_name="analysisrun",
-            name="detector_version",
-            field=models.CharField(max_length=80),
-        ),
-        migrations.AlterField(
-            model_name="setuptransition",
-            name="decision_at",
-            field=models.DateTimeField(default=django.utils.timezone.now),
-        ),
-        migrations.AlterField(
-            model_name="setuptransition",
-            name="dataset_version",
-            field=models.ForeignKey(
-                on_delete=django.db.models.deletion.PROTECT,
-                to="market.datasetversion",
-            ),
-        ),
-        migrations.AlterField(
-            model_name="setuptransition",
-            name="execution_identity",
-            field=models.CharField(max_length=160),
-        ),
-        migrations.AlterField(
-            model_name="setuptransition",
-            name="strategy_version",
-            field=models.ForeignKey(
-                on_delete=django.db.models.deletion.PROTECT,
-                to="research.strategyversion",
-            ),
-        ),
-        migrations.AddConstraint(
-            model_name="analysisrun",
-            constraint=models.UniqueConstraint(
-                fields=(
-                    "instrument",
-                    "completed_h1_timestamp",
-                    "detector_version",
-                    "dataset_version",
-                ),
-                name="unique_analysis_instrument_h1_detector_dataset",
-            ),
-        ),
-        migrations.AddConstraint(
-            model_name="setuptransition",
-            constraint=models.UniqueConstraint(
-                fields=("setup", "from_state", "book_identity"),
-                name="unique_setup_outgoing_transition",
-            ),
-        ),
-        migrations.AddConstraint(
-            model_name="setuptransition",
-            constraint=models.CheckConstraint(
-                condition=(
-                    models.Q(
-                        from_state="TRIGGER_PENDING",
-                        book_identity="",
-                        to_state__in=(
-                            "CONFIRMED",
-                            "INVALIDATED",
-                            "EXPIRED",
-                            "CANCELLED_DATA_QUALITY",
-                        ),
-                    )
-                    | models.Q(
-                        from_state="CONFIRMED",
-                        book_identity__gt="",
-                        to_state__in=(
-                            "ENTRY_PENDING",
-                            "MISSED_FILL",
-                            "BLOCKED_SESSION",
-                            "BLOCKED_SPREAD",
-                            "NO_TARGET",
-                            "INSUFFICIENT_REWARD",
-                            "CANCELLED_DATA_QUALITY",
-                        ),
-                    )
-                ),
-                name="valid_phase2a_setup_transition",
-            ),
-        ),
-        migrations.AddConstraint(
-            model_name="entryeligibilityevaluation",
-            constraint=models.CheckConstraint(
-                condition=(
-                    models.Q(
-                        decision="ENTRY_PENDING",
-                        terminal_reason="",
-                        entry_timestamp__isnull=False,
-                        entry_price__isnull=False,
-                        stop_price__isnull=False,
-                        target_price__isnull=False,
-                        reward_risk__isnull=False,
-                        risk_per_unit_quote__isnull=False,
-                        conversion_rate_to_cad__isnull=False,
-                        conversion_effective_at__isnull=False,
-                        conversion_identity__gt="",
-                        risk_per_unit_cad__isnull=False,
-                        target_level__isnull=False,
-                    )
-                    | models.Q(
-                        decision__in=(
-                            "MISSED_FILL",
-                            "BLOCKED_SESSION",
-                            "BLOCKED_SPREAD",
-                            "NO_TARGET",
-                            "INSUFFICIENT_REWARD",
-                            "CANCELLED_DATA_QUALITY",
-                        ),
-                        terminal_reason__gt="",
-                        entry_timestamp__isnull=True,
-                        entry_price__isnull=True,
-                        stop_price__isnull=True,
-                        target_price__isnull=True,
-                        reward_risk__isnull=True,
-                        risk_per_unit_quote__isnull=True,
-                        conversion_rate_to_cad__isnull=True,
-                        conversion_effective_at__isnull=True,
-                        conversion_identity="",
-                        risk_per_unit_cad__isnull=True,
-                        target_level__isnull=True,
-                    )
-                ),
-                name="eligibility_fields_match_decision",
-            ),
-        ),
-        migrations.RunPython(restore_corrected_triggers, drop_append_only_triggers),
+        migrations.RunPython(create_migration_write_guard, drop_migration_write_guard),
     ]

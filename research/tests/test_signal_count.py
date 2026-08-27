@@ -1,11 +1,13 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
 
-from market.models import DatasetVersion, Instrument, SourceRegistry
-from market.services import store_ingestion
+from market.models import DatasetVersion, Instrument, SourceRegistry, dataset_manifest_sha256
+from market.services import DatasetQualityError, store_ingestion
 from market.tests.factories import candle
 from research.models import (
     EntryEligibilityEvaluation,
@@ -18,10 +20,14 @@ from research.models import (
 )
 from research.signal_count import (
     ENTRY_FIELDS,
+    FROZEN_INSTRUMENTS,
+    PHASE1_MANIFEST_SHA256,
+    S0_JOB_NAME,
     SIGNAL_COUNT_IDENTITY,
     ReturnBlindViolation,
     SignalCountOutput,
     _s1_evaluation_queryset,
+    _validate_s1_contract,
     enforce_price_cutoff,
     generate_spread_ceilings,
     read_entry_projection,
@@ -30,6 +36,24 @@ from research.signal_count import (
 
 
 class SignalCountBoundaryTests(SimpleTestCase):
+    def test_s1_contract_rejects_missing_frozen_instrument(self):
+        strategy = SimpleNamespace(
+            content_hash=PHASE1_MANIFEST_SHA256,
+            pair_metadata={"instruments": sorted(FROZEN_INSTRUMENTS)},
+        )
+        dataset = SimpleNamespace(
+            manifest_sha256="0" * 64,
+            manifest={
+                "strategy_manifest_sha256": PHASE1_MANIFEST_SHA256,
+                "instruments": sorted(FROZEN_INSTRUMENTS - {"USD_JPY"}),
+                "partition": {"name": "development", "start_year": 2010, "end_year": 2018},
+            },
+        )
+
+        dataset.manifest_sha256 = dataset_manifest_sha256(dataset.manifest)
+        with self.assertRaisesMessage(ReturnBlindViolation, "frozen S1 universe"):
+            _validate_s1_contract(dataset, strategy, datetime(2019, 1, 5, tzinfo=UTC), 1)
+
     def test_entry_projection_rejects_forbidden_or_partial_fields_before_query(self):
         for fields in ({"timestamp", "bid_open", "ask_open", "bid_high"}, {"bid_open"}):
             with self.subTest(fields=fields), self.assertRaises(ReturnBlindViolation):
@@ -66,6 +90,39 @@ class SignalCountBoundaryTests(SimpleTestCase):
             )
             objects.filter.return_value.values.assert_called_once_with(*sorted(ENTRY_FIELDS))
         self.assertEqual(projection.ask_open, Decimal("1.2"))
+
+    def test_s1_contract_rejects_insufficient_indicator_warmup(self):
+        strategy = SimpleNamespace(
+            content_hash=PHASE1_MANIFEST_SHA256,
+            pair_metadata={"instruments": sorted(FROZEN_INSTRUMENTS)},
+        )
+        range_specs = (
+            ("W", datetime(2009, 12, 18, 22, tzinfo=UTC), datetime(2019, 1, 4, 22, tzinfo=UTC)),
+            ("D", datetime(2009, 12, 27, 22, tzinfo=UTC), datetime(2019, 1, 1, 22, tzinfo=UTC)),
+            ("H1", datetime(2009, 12, 30, 5, tzinfo=UTC), datetime(2019, 1, 1, 5, tzinfo=UTC)),
+        )
+        manifest = {
+            "strategy_manifest_sha256": PHASE1_MANIFEST_SHA256,
+            "instruments": sorted(FROZEN_INSTRUMENTS),
+            "partition": {"name": "development", "start_year": 2010, "end_year": 2018},
+            "required_ranges": [
+                {
+                    "instrument": code,
+                    "granularity": granularity,
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                }
+                for code in sorted(FROZEN_INSTRUMENTS)
+                for granularity, start, end in range_specs
+            ],
+        }
+        dataset = SimpleNamespace(
+            manifest=manifest,
+            manifest_sha256=dataset_manifest_sha256(manifest),
+        )
+
+        with self.assertRaisesMessage(ReturnBlindViolation, "lacks development or warm-up"):
+            _validate_s1_contract(dataset, strategy, datetime(2019, 1, 5, tzinfo=UTC), 1)
 
     def test_later_rows_and_m1_fail_closed(self):
         timestamp = datetime(2018, 1, 1, tzinfo=UTC)
@@ -110,24 +167,41 @@ class SignalCountFunctionalTests(TestCase):
             acquisition_method="test",
             retention_policy="test",
         )
-        instrument = Instrument.objects.create(
-            code="EUR_USD", base_currency="EUR", quote_currency="USD", display_order=1
+        instruments = {}
+        for display_order, code in enumerate(sorted(FROZEN_INSTRUMENTS), 1):
+            base_currency, quote_currency = code.split("_")
+            instruments[code] = Instrument.objects.create(
+                code=code,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+                display_order=display_order,
+            )
+        instrument = instruments["EUR_USD"]
+        range_specs = (
+            ("W", datetime(2009, 12, 18, 22, tzinfo=UTC), datetime(2019, 1, 4, 22, tzinfo=UTC)),
+            ("D", datetime(2009, 1, 4, 22, tzinfo=UTC), datetime(2019, 1, 1, 22, tzinfo=UTC)),
+            ("H1", datetime(2009, 12, 30, 5, tzinfo=UTC), datetime(2019, 1, 1, 5, tzinfo=UTC)),
         )
+        s0_report_sha256 = "a" * 64
         dataset = DatasetVersion.objects.create(
             name="bounded",
             version="1",
             source=source,
             manifest={
+                "strategy_manifest_sha256": PHASE1_MANIFEST_SHA256,
+                "instruments": sorted(FROZEN_INSTRUMENTS),
+                "partition": {"name": "development", "start_year": 2010, "end_year": 2018},
                 "required_ranges": [
                     {
-                        "instrument": "EUR_USD",
-                        "granularity": "H1",
-                        "start": entry_at.isoformat(),
-                        "end": (entry_at + timedelta(hours=1)).isoformat(),
+                        "instrument": code,
+                        "granularity": granularity,
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
                     }
-                ]
+                    for code in sorted(FROZEN_INSTRUMENTS)
+                    for granularity, start, end in range_specs
+                ],
             },
-            manifest_sha256="1" * 64,
         )
         store_ingestion(
             source,
@@ -149,7 +223,18 @@ class SignalCountFunctionalTests(TestCase):
             execution_identity="execution-h1-stop-first-v1",
             cost_identity="cost",
             portfolio_identity="portfolio",
-            content_hash="2" * 64,
+            pair_metadata={"instruments": sorted(FROZEN_INSTRUMENTS)},
+            content_hash=PHASE1_MANIFEST_SHA256,
+        )
+        s0_job = JobRun.objects.create(
+            job_name=S0_JOB_NAME,
+            strategy_version=strategy,
+            dataset_version=dataset,
+            config_hash="b" * 64,
+            idempotency_key="bounded-s0",
+            as_of=datetime(2019, 1, 4, 22, tzinfo=UTC),
+            status=JobRun.Status.SUCCEEDED,
+            evidence={"report_sha256": s0_report_sha256},
         )
         setup = SetupEvent.objects.create(
             instrument=instrument,
@@ -208,19 +293,42 @@ class SignalCountFunctionalTests(TestCase):
             evidence_hash="6" * 64,
         )
 
-        output = run_s1(
-            dataset_id=dataset.pk,
-            strategy_version_id=strategy.pk,
-            maximum_setups=1,
-            as_of=entry_at + timedelta(hours=1),
-        )
+        with self.assertRaises(DatasetQualityError):
+            run_s1(
+                dataset_id=dataset.pk,
+                strategy_version_id=strategy.pk,
+                s0_job_id=s0_job.pk,
+                maximum_setups=1,
+                as_of=datetime(2019, 1, 4, 22, tzinfo=UTC),
+            )
+
+        with patch("research.signal_count.assert_dataset_window_usable"):
+            output = run_s1(
+                dataset_id=dataset.pk,
+                strategy_version_id=strategy.pk,
+                s0_job_id=s0_job.pk,
+                maximum_setups=1,
+                as_of=datetime(2019, 1, 4, 22, tzinfo=UTC),
+            )
+            replay = run_s1(
+                dataset_id=dataset.pk,
+                strategy_version_id=strategy.pk,
+                s0_job_id=s0_job.pk,
+                maximum_setups=1,
+                as_of=datetime(2019, 1, 4, 22, tzinfo=UTC),
+            )
 
         self.assertEqual(output.counts["physical_setups_processed"], 1)
         self.assertEqual(output.counts["eligibility_evaluations_processed"], 1)
         self.assertEqual(output.counts["entry_eligible"], 1)
         self.assertEqual(output.coverage["entry_projections_read"], 1)
+        self.assertEqual(replay.report_sha256, output.report_sha256)
         job = JobRun.objects.get(job_name="failed-break-signal-count-s1")
         self.assertEqual(job.evidence["report_sha256"], output.report_sha256)
+        self.assertEqual(JobRun.objects.filter(job_name="failed-break-signal-count-s1").count(), 1)
+        job.evidence = {"report_sha256": "tampered"}
+        with self.assertRaisesMessage(ValidationError, "immutable"):
+            job.save()
 
     def test_s1_evaluation_query_projects_no_frozen_price_risk_or_evidence_fields(self):
         sql = str(_s1_evaluation_queryset([0]).query)

@@ -16,6 +16,7 @@ from market.models import (
     Instrument,
     OandaInstrumentTermsSnapshot,
     TechnicalSnapshot,
+    dataset_manifest_sha256,
 )
 from market.oanda import manifest_hash
 from market.quality import (
@@ -39,6 +40,8 @@ class RequiredCandleRange:
 
 def assert_dataset_usable(dataset_version) -> None:
     """Fail closed for any immutable conflict, incident, or unadmitted candle lineage."""
+    if dataset_version.manifest_sha256 != dataset_manifest_sha256(dataset_version.manifest):
+        raise DatasetQualityError("dataset manifest SHA-256 does not match canonical JSON")
     if dataset_version.conflicts.exists() or dataset_version.incidents.exists():
         raise DatasetQualityError("dataset has unresolved conflict or data-quality incident")
     runs = dataset_version.ingestion_runs.all()

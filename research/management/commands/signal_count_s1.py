@@ -12,6 +12,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--dataset-id", type=int, required=True)
         parser.add_argument("--strategy-version-id", type=int, required=True)
+        parser.add_argument("--s0-job-id", type=int, required=True)
         parser.add_argument("--as-of", required=True)
         parser.add_argument("--max-setups", type=int, default=100)
 
@@ -23,6 +24,7 @@ class Command(BaseCommand):
             output = run_s1(
                 dataset_id=options["dataset_id"],
                 strategy_version_id=options["strategy_version_id"],
+                s0_job_id=options["s0_job_id"],
                 maximum_setups=options["max_setups"],
                 as_of=as_of,
             )
