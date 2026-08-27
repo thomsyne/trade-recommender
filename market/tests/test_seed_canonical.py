@@ -41,7 +41,14 @@ class CanonicalSeedTests(TestCase):
         self.assertTrue(oanda.enabled)
         self.assertEqual(
             ScheduledJob.objects.filter(task_name="market.ingest_oanda", enabled=True).count(),
-            24,
+            16,
+        )
+        self.assertFalse(
+            ScheduledJob.objects.filter(
+                task_name="market.ingest_oanda",
+                parameters__instrument__in=("USD_JPY", "AUD_USD"),
+                enabled=True,
+            ).exists()
         )
         self.assertTrue(ScheduledJob.objects.get(task_name="market.capture_oanda_terms").enabled)
         self.assertTrue(

@@ -9,6 +9,7 @@ from research.strategy import (
     Candle,
     Context,
     EntryOpen,
+    LevelState,
     Lifecycle,
     Pivot,
     Role,
@@ -70,6 +71,10 @@ def level(key="support", role=Role.SUPPORT, price="10", activated_at=START):
         D("0.01"),
         context(),
     )
+
+
+def active_states(levels):
+    return {item.key: LevelState(Lifecycle.ACTIVE) for item in levels}
 
 
 class IndicatorTests(TestCase):
@@ -149,9 +154,23 @@ class LevelTests(TestCase):
             D("0.01"),
             context(),
         )
-        target = nearest_opposing_target(D("10"), Side.LONG, [swing, weekly], context())
+        levels = [swing, weekly]
+        target = nearest_opposing_target(
+            D("10"), Side.LONG, levels, context(), level_states=active_states(levels)
+        )
         self.assertEqual(target.key, "w")
         self.assertEqual(target.zone_lower, D("12.85"))
+
+    def test_target_inventory_excludes_every_inactive_lifecycle_state(self):
+        targets = [
+            level(state.value, Role.RESISTANCE, str(13 + index))
+            for index, state in enumerate(Lifecycle)
+        ]
+        states = {item.key: LevelState(Lifecycle(item.key)) for item in targets}
+        selected = nearest_opposing_target(
+            D("10"), Side.LONG, targets, context(), level_states=states
+        )
+        self.assertEqual(selected.key, Lifecycle.ACTIVE.value)
 
     def test_breakout_activates_at_breakout_close_and_expires_after_twenty_subsequent_sessions(
         self,
@@ -208,28 +227,41 @@ class SetupTests(TestCase):
 
     def test_three_h1_window_is_exact_and_frozen_threshold_is_used(self):
         event = SweepEvent(START, Side.LONG, ("a",), D("11"), D("9"), Bias.BULLISH, D("8"))
-        bars = [candle(i, "10.9", high="20", low="9", hours=1) for i in range(1, 5)]
-        result = confirm_sweep(event, bars, [], context())
+        bars = [candle(i, "10.9", high="20", low="9", hours=1) for i in range(4)]
+        result = confirm_sweep(event, bars, [], context(), attributed_level_inactive_at={"a": None})
         self.assertEqual((result.state, result.at), ("EXPIRED", bars[2].completed_at))
 
     def test_sweep_bias_is_frozen_and_daily_invalidation_precedes_confirmation(self):
         event = SweepEvent(START, Side.LONG, ("a",), D("11"), D("9"), Bias.BULLISH, D("8"))
-        confirmation = candle(24, "11.1", high="12", low="9", hours=1)
-        invalidating_daily = candle(0, "7.9", high="9", low="7")
+        confirmation = candle(0, "11.1", high="12", low="9", hours=1)
+        invalidating_daily = candle(0, "7.9", high="9", low="7", hours=1)
         self.assertEqual(event.frozen_bias, Bias.BULLISH)
-        result = confirm_sweep(event, [confirmation], [invalidating_daily], context())
+        result = confirm_sweep(
+            event,
+            [confirmation],
+            [invalidating_daily],
+            context(),
+            attributed_level_inactive_at={"a": None},
+        )
         self.assertEqual(result.state, "INVALIDATED")
 
     def test_confirmation_freezes_latest_still_valid_supporting_swing(self):
         event = SweepEvent(START, Side.LONG, ("a",), D("11"), D("9"), Bias.BULLISH, D("8"))
-        confirmation = candle(2, "11.1", high="12", low="9", hours=1)
+        confirmation = candle(0, "11.1", high="12", low="9", hours=1)
         new_swing = Pivot(START, START + timedelta(hours=1), D("8.5"), "low")
-        result = confirm_sweep(event, [confirmation], [], context(), supporting_swings=[new_swing])
+        result = confirm_sweep(
+            event,
+            [confirmation],
+            [],
+            context(),
+            attributed_level_inactive_at={"a": None},
+            supporting_swings=[new_swing],
+        )
         self.assertEqual((result.state, result.supporting_swing), ("CONFIRMED", D("8.5")))
 
     def test_pending_setup_invalidates_only_when_every_attributed_level_is_inactive(self):
         event = SweepEvent(START, Side.LONG, ("a", "b"), D("11"), D("9"), Bias.BULLISH, D("8"))
-        confirmation = candle(2, "11.1", high="12", low="9", hours=1)
+        confirmation = candle(0, "11.1", high="12", low="9", hours=1)
         still_active = confirm_sweep(
             event,
             [confirmation],
@@ -244,11 +276,31 @@ class SetupTests(TestCase):
             context(),
             attributed_level_inactive_at={
                 "a": START + timedelta(hours=1),
-                "b": START + timedelta(hours=2),
+                "b": START + timedelta(hours=1),
             },
         )
         self.assertEqual(still_active.state, "CONFIRMED")
         self.assertEqual(inactive.state, "INVALIDATED")
+
+    def test_confirmation_fails_closed_for_missing_level_state_or_h1_gap(self):
+        event = SweepEvent(START, Side.LONG, ("a", "b"), D("11"), D("9"), Bias.BULLISH, D("8"))
+        next_bar = candle(0, "11.1", hours=1)
+        missing_level = confirm_sweep(
+            event,
+            [next_bar],
+            [],
+            context(),
+            attributed_level_inactive_at={"a": None},
+        )
+        gap = confirm_sweep(
+            event,
+            [candle(1, "11.1", hours=1)],
+            [],
+            context(),
+            attributed_level_inactive_at={"a": None, "b": None},
+        )
+        self.assertEqual(missing_level.state, "CANCELLED_DATA_QUALITY")
+        self.assertEqual(gap.state, "CANCELLED_DATA_QUALITY")
 
 
 class EntryTests(TestCase):
@@ -259,23 +311,35 @@ class EntryTests(TestCase):
     def target(self, role=Role.RESISTANCE, price="13"):
         return level("target", role, price)
 
+    def eligibility_kwargs(self, levels, expected_entry_timestamp):
+        return {
+            "expected_entry_timestamp": expected_entry_timestamp,
+            "precision": D("0.01"),
+            "absolute_spread_ceiling": D("0.2"),
+            "level_states": active_states(levels),
+            "cad_conversion_rate": D("1.35"),
+            "conversion_effective_at": expected_entry_timestamp,
+            "conversion_identity": "USD_CAD@entry",
+        }
+
     def test_correct_side_aware_next_open_and_frozen_prices(self):
         opening = EntryOpen(START + timedelta(hours=1), D("10"), D("10.1"))
+        targets = [self.target()]
         result = entry_eligibility(
             self.event(),
             opening,
             D("1"),
-            [self.target()],
+            targets,
             context(),
-            expected_entry_timestamp=opening.timestamp,
-            precision=D("0.01"),
-            absolute_spread_ceiling=D("0.2"),
+            **self.eligibility_kwargs(targets, opening.timestamp),
             session_eligible=True,
         )
         self.assertEqual(result.decision, "ENTRY_PENDING")
         self.assertEqual(
             (result.entry, result.stop, result.target), (D("10.1"), D("8.9"), D("12.85"))
         )
+        self.assertEqual(result.risk_per_unit_quote, D("1.2"))
+        self.assertEqual(result.risk_per_unit_cad, D("1.620"))
 
     def test_terminal_guard_precedence_and_blocked_results_hide_prices(self):
         opening = EntryOpen(START + timedelta(hours=1), D("10"), D("10.5"))
@@ -285,9 +349,7 @@ class EntryTests(TestCase):
             D("1"),
             [],
             context(),
-            expected_entry_timestamp=opening.timestamp,
-            precision=D("0.01"),
-            absolute_spread_ceiling=D("0.2"),
+            **self.eligibility_kwargs([], opening.timestamp),
             data_complete=False,
             session_eligible=False,
         )
@@ -296,15 +358,14 @@ class EntryTests(TestCase):
 
     def test_short_entry_uses_bid_open(self):
         opening = EntryOpen(START + timedelta(hours=1), D("10"), D("10.1"))
+        targets = [self.target(Role.SUPPORT, "7")]
         result = entry_eligibility(
             self.event(Side.SHORT),
             opening,
             D("1"),
-            [self.target(Role.SUPPORT, "7")],
+            targets,
             context(),
-            expected_entry_timestamp=opening.timestamp,
-            precision=D("0.01"),
-            absolute_spread_ceiling=D("0.2"),
+            **self.eligibility_kwargs(targets, opening.timestamp),
             session_eligible=True,
         )
         self.assertEqual((result.decision, result.entry), ("ENTRY_PENDING", D("10")))
@@ -314,9 +375,7 @@ class EntryTests(TestCase):
             h1_atr=D("1"),
             levels=[],
             context=context(),
-            expected_entry_timestamp=START + timedelta(hours=1),
-            precision=D("0.01"),
-            absolute_spread_ceiling=D("0.1"),
+            **self.eligibility_kwargs([], START + timedelta(hours=1)),
         )
         self.assertEqual(
             entry_eligibility(self.event(), None, session_eligible=False, **kwargs).decision,
@@ -327,3 +386,24 @@ class EntryTests(TestCase):
             entry_eligibility(self.event(), opening, session_eligible=True, **kwargs).decision,
             "BLOCKED_SPREAD",
         )
+
+    def test_expected_timestamp_session_precedes_missing_quote_without_override(self):
+        result = entry_eligibility(
+            self.event(),
+            None,
+            D("1"),
+            [],
+            context(),
+            **self.eligibility_kwargs([], START + timedelta(hours=1)),
+        )
+        self.assertEqual(result.decision, "BLOCKED_SESSION")
+
+    def test_missing_or_future_conversion_fails_closed(self):
+        opening = EntryOpen(START + timedelta(hours=1), D("10"), D("10.1"))
+        targets = [self.target()]
+        kwargs = self.eligibility_kwargs(targets, opening.timestamp)
+        kwargs["cad_conversion_rate"] = None
+        result = entry_eligibility(
+            self.event(), opening, D("1"), targets, context(), **kwargs, session_eligible=True
+        )
+        self.assertEqual(result.decision, "CANCELLED_DATA_QUALITY")

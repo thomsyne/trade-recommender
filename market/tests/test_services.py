@@ -249,3 +249,45 @@ class AuditDatabaseInvariantTests(TransactionTestCase):
 
         event.refresh_from_db()
         self.assertEqual(event.payload, {})
+
+    def test_legacy_candle_cannot_be_mutated_while_promoted_to_governed_dataset(self):
+        source = SourceRegistry.objects.create(
+            name="legacy-source",
+            tier=SourceRegistry.Tier.QUARANTINE,
+            base_url="https://example.invalid",
+            acquisition_method="test",
+            retention_policy="test",
+        )
+        instrument = Instrument.objects.create(
+            code="EUR_USD", base_currency="EUR", quote_currency="USD", display_order=1
+        )
+        at = datetime(2026, 1, 5, tzinfo=UTC)
+        run = IngestionRun.objects.create(
+            source=source,
+            instrument=instrument,
+            granularity="H1",
+            requested_from=at,
+            requested_to=at + timedelta(hours=1),
+            parameters={},
+            request_manifest_hash="legacy",
+            status=IngestionRun.Status.SUCCEEDED,
+        )
+        item = candle(at)
+        stored = Candle.objects.create(
+            instrument=instrument,
+            ingestion_run=run,
+            granularity="H1",
+            **item.__dict__,
+        )
+        dataset = DatasetVersion.objects.create(
+            name="governed", version="1", manifest_sha256="7" * 64
+        )
+
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            Candle.objects.filter(pk=stored.pk).update(
+                dataset_version=dataset,
+                bid_close=stored.bid_close + Decimal("0.0001"),
+            )
+
+        stored.refresh_from_db()
+        self.assertIsNone(stored.dataset_version_id)

@@ -68,7 +68,7 @@ class Command(BaseCommand):
                     task_name="market.ingest_oanda",
                     parameters={"instrument": code, "granularity": granularity},
                     interval=interval,
-                    enabled=bool(settings.OANDA_TOKEN),
+                    enabled=bool(settings.OANDA_TOKEN and code in PROSPECTIVE_INSTRUMENT_CODES),
                 )
 
         _upsert_job(

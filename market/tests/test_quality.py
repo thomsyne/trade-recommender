@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from django.test import SimpleTestCase
 
@@ -56,3 +57,31 @@ class CandleQualityTests(SimpleTestCase):
             [candle(thursday - timedelta(days=1)), candle(sunday)], "D"
         )
         self.assertIn("unexpected_gap", {issue.code for issue in daily_non_weekend})
+
+    def test_one_missing_interval_is_an_unexpected_gap(self):
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        issues = validate_candles([candle(start), candle(start + timedelta(hours=2))], "H1")
+        self.assertIn("unexpected_gap", {issue.code for issue in issues})
+
+    def test_daily_and_weekly_new_york_alignment_accepts_dst_boundaries(self):
+        new_york = ZoneInfo("America/New_York")
+        daily = [
+            candle(datetime(2026, 3, day, 17, tzinfo=new_york).astimezone(UTC)) for day in (5, 8)
+        ]
+        spring_weeks = [
+            candle(datetime(2026, 3, day, 17, tzinfo=new_york).astimezone(UTC)) for day in (6, 13)
+        ]
+        fall_weeks = [
+            candle(datetime(2026, month, day, 17, tzinfo=new_york).astimezone(UTC))
+            for month, day in ((10, 30), (11, 6))
+        ]
+        for granularity, candles in (
+            ("D", daily),
+            ("W", spring_weeks),
+            ("W", fall_weeks),
+        ):
+            with self.subTest(granularity=granularity, candles=candles):
+                self.assertEqual(
+                    validate_candles(candles, granularity, require_registered_alignment=True),
+                    [],
+                )

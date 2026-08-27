@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from datetime import UTC, timedelta
+from datetime import UTC, time, timedelta
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -9,7 +10,7 @@ class ValidationIssue:
     detail: str
 
 
-def validate_candles(candles, granularity):
+def validate_candles(candles, granularity, *, require_registered_alignment=False):
     issues = []
     seen = set()
     previous = None
@@ -29,11 +30,22 @@ def validate_candles(candles, granularity):
         seen.add(timestamp)
         if previous and timestamp <= previous.timestamp:
             issues.append(ValidationIssue("non_monotonic_timestamp", index, str(timestamp)))
-        if previous and timestamp - previous.timestamp > expected_step * 2:
-            if not _is_fx_weekend_gap(previous.timestamp, timestamp, granularity):
-                issues.append(
-                    ValidationIssue("unexpected_gap", index, f"{previous.timestamp} to {timestamp}")
-                )
+        if previous and not _is_expected_successor(
+            previous.timestamp,
+            timestamp,
+            granularity,
+            expected_step,
+            require_registered_alignment=require_registered_alignment,
+        ):
+            issues.append(
+                ValidationIssue("unexpected_gap", index, f"{previous.timestamp} to {timestamp}")
+            )
+        if (
+            require_registered_alignment
+            and granularity in {"D", "W"}
+            and not _has_registered_alignment(timestamp, granularity)
+        ):
+            issues.append(ValidationIssue("alignment_mismatch", index, str(timestamp)))
         if not candle.complete:
             issues.append(ValidationIssue("incomplete_candle", index, str(timestamp)))
         if candle.volume < 0:
@@ -52,12 +64,45 @@ def validate_candles(candles, granularity):
     return issues
 
 
-def _is_fx_weekend_gap(start, end, granularity):
+def _is_fx_weekend_gap(start, end, granularity, *, registered=False):
     if granularity == "W":
         return False
+    if registered:
+        start_local = start.astimezone(ZoneInfo("America/New_York"))
+        end_local = end.astimezone(ZoneInfo("America/New_York"))
+        expected_start = {"H1": (4, time(16)), "H4": (4, time(13)), "D": (3, time(17))}
+        start_weekday, start_time = expected_start[granularity]
+        return (
+            start_local.weekday() == start_weekday
+            and start_local.time() == start_time
+            and end_local.weekday() == 6
+            and end_local.time() == time(17)
+        )
     start_weekday = 3 if granularity == "D" else 4
     return (
         start.weekday() == start_weekday
         and end.weekday() in {6, 0}
         and end - start <= timedelta(days=4)
     )
+
+
+def _is_expected_successor(
+    start, end, granularity, expected_step, *, require_registered_alignment=False
+):
+    if end - start == expected_step:
+        return True
+    if _is_fx_weekend_gap(start, end, granularity, registered=require_registered_alignment):
+        return True
+    if granularity not in {"D", "W"}:
+        return False
+    start_local = start.astimezone(ZoneInfo("America/New_York"))
+    end_local = end.astimezone(ZoneInfo("America/New_York"))
+    local_delta = end_local.replace(tzinfo=None) - start_local.replace(tzinfo=None)
+    return local_delta == expected_step
+
+
+def _has_registered_alignment(timestamp, granularity):
+    local = timestamp.astimezone(ZoneInfo("America/New_York"))
+    if local.time() != time(17):
+        return False
+    return granularity == "D" or local.weekday() == 4

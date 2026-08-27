@@ -53,9 +53,20 @@ class Command(BaseCommand):
                 "content_hash": MANIFEST_SHA256,
             },
         )
-        if strategy.content_hash != MANIFEST_SHA256:
+        expected_strategy = {
+            "detector_version": identities["detector"],
+            "data_identity": identities["data"],
+            "event_identity": identities["event_policy"],
+            "execution_identity": identities["primary_execution"],
+            "cost_identity": identities["primary_cost"],
+            "portfolio_identity": identities["portfolio"],
+            "pair_metadata": {"instruments": manifest["instruments"]},
+            "timeframe_metadata": manifest["timeframes"],
+            "content_hash": MANIFEST_SHA256,
+        }
+        if any(getattr(strategy, field) != value for field, value in expected_strategy.items()):
             raise CommandError("registered strategy version conflicts with approved manifest")
-        StrategyParameterManifest.objects.get_or_create(
+        parameter_manifest, created = StrategyParameterManifest.objects.get_or_create(
             strategy_version=strategy,
             defaults={
                 "payload": manifest,
@@ -64,4 +75,14 @@ class Command(BaseCommand):
                 "phase1_manifest_hash": MANIFEST_SHA256,
             },
         )
+        expected = {
+            "payload": manifest,
+            "sha256": MANIFEST_SHA256,
+            "phase1_spec_hash": SPEC_SHA256,
+            "phase1_manifest_hash": MANIFEST_SHA256,
+        }
+        if not created and any(
+            getattr(parameter_manifest, field) != value for field, value in expected.items()
+        ):
+            raise CommandError("registered parameter manifest conflicts with approved artifacts")
         self.stdout.write(self.style.SUCCESS(f"registered {strategy.version}"))

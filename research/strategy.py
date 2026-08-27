@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
 from zoneinfo import ZoneInfo
@@ -149,6 +149,11 @@ class EntryResult:
     target: Decimal | None = None
     reward_risk: Decimal | None = None
     target_key: str | None = None
+    risk_per_unit_quote: Decimal | None = None
+    conversion_rate_to_cad: Decimal | None = None
+    conversion_effective_at: datetime | None = None
+    conversion_identity: str = ""
+    risk_per_unit_cad: Decimal | None = None
 
 
 def completed_candles(candles: Iterable[Candle], context: Context) -> tuple[Candle, ...]:
@@ -480,12 +485,21 @@ def flip_level(
 
 
 def nearest_opposing_target(
-    price: Decimal, side: Side, levels: Iterable[LevelSpec], context: Context
+    price: Decimal,
+    side: Side,
+    levels: Iterable[LevelSpec],
+    context: Context,
+    *,
+    level_states: Mapping[str, LevelState],
 ) -> LevelSpec | None:
+    levels = tuple(levels)
+    if set(level_states) != {level.key for level in levels}:
+        raise ValueError("target inventory requires lifecycle state for every level")
     active = [
         level
         for level in levels
-        if level.activated_at <= context.as_of
+        if level_states[level.key].state == Lifecycle.ACTIVE
+        and level.activated_at <= context.as_of
         and (level.expires_at is None or level.expires_at > context.as_of)
     ]
     if side == Side.LONG:
@@ -578,16 +592,23 @@ def confirm_sweep(
     daily: Iterable[Candle],
     context: Context,
     *,
-    attributed_level_inactive_at: Mapping[str, datetime | None] | None = None,
+    attributed_level_inactive_at: Mapping[str, datetime | None],
     supporting_swings: Iterable[Pivot] = (),
 ) -> Confirmation:
+    if set(attributed_level_inactive_at) != set(event.level_keys):
+        return Confirmation("CANCELLED_DATA_QUALITY", context.as_of)
     following = [
         candle for candle in completed_candles(h1, context) if candle.completed_at > event.at
     ][:3]
+    previous_completion = event.at
+    for candle in following:
+        if not _is_registered_h1_successor(previous_completion, candle):
+            return Confirmation("CANCELLED_DATA_QUALITY", candle.opened_at)
+        previous_completion = candle.completed_at
     daily_after_sweep = [
         candle for candle in completed_candles(daily, context) if candle.completed_at > event.at
     ]
-    inactive_times = tuple((attributed_level_inactive_at or {}).values())
+    inactive_times = tuple(attributed_level_inactive_at.values())
 
     def latest_valid_support(at: datetime) -> Decimal:
         kind = "low" if event.side == Side.LONG else "high"
@@ -660,6 +681,22 @@ def confirm_sweep(
     return Confirmation("TRIGGER_PENDING")
 
 
+def _is_registered_h1_successor(previous_completion: datetime, candle: Candle) -> bool:
+    if candle.completed_at - candle.opened_at != timedelta(hours=1):
+        return False
+    if candle.opened_at == previous_completion:
+        return True
+    previous_local = previous_completion.astimezone(ZoneInfo("America/New_York"))
+    opened_local = candle.opened_at.astimezone(ZoneInfo("America/New_York"))
+    return (
+        previous_local.weekday() == 4
+        and previous_local.time() == time(17)
+        and opened_local.weekday() == 6
+        and opened_local.time() == time(17)
+        and candle.opened_at - previous_completion <= timedelta(days=3)
+    )
+
+
 def in_entry_session(timestamp) -> bool:
     for timezone_name in ("Europe/London", "America/New_York"):
         local_time = timestamp.astimezone(ZoneInfo(timezone_name)).time()
@@ -678,20 +715,31 @@ def entry_eligibility(
     expected_entry_timestamp: datetime,
     precision: Decimal,
     absolute_spread_ceiling: Decimal,
+    level_states: Mapping[str, LevelState],
+    cad_conversion_rate: Decimal | None,
+    conversion_effective_at: datetime | None,
+    conversion_identity: str,
     relative_spread_ceiling: Decimal = Decimal("0.10"),
     data_complete: bool = True,
-    conversion_available: bool = True,
     market_open: bool = True,
     session_eligible: bool | None = None,
 ) -> EntryResult:
     if (
         not data_complete
-        or not conversion_available
         or h1_atr is None
         or h1_atr <= 0
         or precision <= 0
+        or cad_conversion_rate is None
+        or cad_conversion_rate <= 0
+        or conversion_effective_at is None
+        or conversion_effective_at > expected_entry_timestamp
+        or conversion_effective_at > context.as_of
+        or not conversion_identity
     ):
         return EntryResult("CANCELLED_DATA_QUALITY", "DATA_INCOMPLETE")
+    levels = tuple(levels)
+    if set(level_states) != {level.key for level in levels}:
+        return EntryResult("CANCELLED_DATA_QUALITY", "INCOMPLETE_TARGET_INVENTORY")
     if opening is not None:
         if opening.timestamp != expected_entry_timestamp:
             return EntryResult("CANCELLED_DATA_QUALITY", "NOT_NEXT_H1_OPEN")
@@ -699,8 +747,8 @@ def entry_eligibility(
             return EntryResult("CANCELLED_DATA_QUALITY", "ENTRY_OPEN_AFTER_AS_OF")
         if opening.ask_open < opening.bid_open:
             return EntryResult("CANCELLED_DATA_QUALITY", "NEGATIVE_SPREAD")
-    if opening is not None and session_eligible is None:
-        session_eligible = in_entry_session(opening.timestamp)
+    if session_eligible is None:
+        session_eligible = in_entry_session(expected_entry_timestamp)
     if session_eligible is False:
         return EntryResult("BLOCKED_SESSION", "OUTSIDE_SESSION")
     if opening is None or not market_open:
@@ -718,7 +766,9 @@ def entry_eligibility(
         stop = (event.sweep_extreme + buffer).quantize(precision, rounding=ROUND_CEILING)
         if opening.ask_open >= stop:
             return EntryResult("MISSED_FILL", "OPEN_AT_OR_BEYOND_STOP")
-    target_level = nearest_opposing_target(entry, event.side, levels, context)
+    target_level = nearest_opposing_target(
+        entry, event.side, levels, context, level_states=level_states
+    )
     if target_level is None:
         return EntryResult("NO_TARGET", "NO_ACTIVE_OPPOSING_LEVEL")
     target = target_level.zone_lower if event.side == Side.LONG else target_level.zone_upper
@@ -727,4 +777,19 @@ def entry_eligibility(
     reward_risk = reward / risk if risk > 0 else Decimal("-Infinity")
     if reward_risk < Decimal("1.5"):
         return EntryResult("INSUFFICIENT_REWARD", "BELOW_1_5R")
-    return EntryResult("ENTRY_PENDING", "", entry, stop, target, reward_risk, target_level.key)
+    risk_per_unit_quote = risk
+    risk_per_unit_cad = risk_per_unit_quote * cad_conversion_rate
+    return EntryResult(
+        "ENTRY_PENDING",
+        "",
+        entry,
+        stop,
+        target,
+        reward_risk,
+        target_level.key,
+        risk_per_unit_quote,
+        cad_conversion_rate,
+        conversion_effective_at,
+        conversion_identity,
+        risk_per_unit_cad,
+    )

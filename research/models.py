@@ -1,5 +1,6 @@
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 from market.models import Instrument, SourceRegistry
 
@@ -418,6 +419,7 @@ class AnalysisRun(ImmutableRecord):
 
     instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
     completed_h1_timestamp = models.DateTimeField()
+    detector_version = models.CharField(max_length=80)
     strategy_version = models.ForeignKey(StrategyVersion, on_delete=models.PROTECT)
     dataset_version = models.ForeignKey("market.DatasetVersion", on_delete=models.PROTECT)
     result = models.CharField(max_length=20, choices=Result)
@@ -429,10 +431,10 @@ class AnalysisRun(ImmutableRecord):
                 fields=(
                     "instrument",
                     "completed_h1_timestamp",
-                    "strategy_version",
+                    "detector_version",
                     "dataset_version",
                 ),
-                name="unique_analysis_instrument_h1_strategy_dataset",
+                name="unique_analysis_instrument_h1_detector_dataset",
             )
         ]
 
@@ -455,6 +457,7 @@ class SetupEvent(ImmutableRecord):
     bias_evidence = models.JSONField()
     provisional_swing_evidence = models.JSONField()
     threshold_evidence = models.JSONField()
+    attribution_keys = models.JSONField(default=list)
     evidence_hash = models.CharField(max_length=64)
     initial_state = models.CharField(
         max_length=16, choices=InitialState, default=InitialState.TRIGGER_PENDING
@@ -521,24 +524,30 @@ class SetupTransition(ImmutableRecord):
         CANCELLED_DATA_QUALITY = "CANCELLED_DATA_QUALITY", "Cancelled data quality"
 
     setup = models.ForeignKey(SetupEvent, on_delete=models.PROTECT)
+    book_identity = models.CharField(max_length=160, blank=True, default="")
     from_state = models.CharField(max_length=24, choices=State)
     to_state = models.CharField(max_length=24, choices=State)
     effective_at = models.DateTimeField()
+    decision_at = models.DateTimeField(default=timezone.now)
     evidence = models.JSONField(default=dict)
     evidence_hash = models.CharField(max_length=64)
     reason = models.CharField(max_length=240, blank=True)
+    strategy_version = models.ForeignKey(StrategyVersion, on_delete=models.PROTECT)
+    dataset_version = models.ForeignKey("market.DatasetVersion", on_delete=models.PROTECT)
+    execution_identity = models.CharField(max_length=160)
     job_run = models.ForeignKey(JobRun, on_delete=models.PROTECT, null=True, blank=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=("setup", "from_state", "to_state", "effective_at"),
-                name="unique_setup_transition",
+                fields=("setup", "from_state", "book_identity"),
+                name="unique_setup_outgoing_transition",
             ),
             models.CheckConstraint(
                 condition=(
                     models.Q(
                         from_state="TRIGGER_PENDING",
+                        book_identity="",
                         to_state__in=(
                             "CONFIRMED",
                             "INVALIDATED",
@@ -548,6 +557,7 @@ class SetupTransition(ImmutableRecord):
                     )
                     | models.Q(
                         from_state="CONFIRMED",
+                        book_identity__gt="",
                         to_state__in=(
                             "ENTRY_PENDING",
                             "MISSED_FILL",
@@ -583,6 +593,15 @@ class EntryEligibilityEvaluation(ImmutableRecord):
     stop_price = models.DecimalField(max_digits=20, decimal_places=10, null=True, blank=True)
     target_price = models.DecimalField(max_digits=20, decimal_places=10, null=True, blank=True)
     reward_risk = models.DecimalField(max_digits=20, decimal_places=10, null=True, blank=True)
+    risk_per_unit_quote = models.DecimalField(
+        max_digits=20, decimal_places=10, null=True, blank=True
+    )
+    conversion_rate_to_cad = models.DecimalField(
+        max_digits=20, decimal_places=10, null=True, blank=True
+    )
+    conversion_effective_at = models.DateTimeField(null=True, blank=True)
+    conversion_identity = models.CharField(max_length=160, blank=True)
+    risk_per_unit_cad = models.DecimalField(max_digits=20, decimal_places=10, null=True, blank=True)
     target_level = models.ForeignKey(
         Level, on_delete=models.PROTECT, null=True, blank=True, related_name="entry_evaluations"
     )
@@ -604,6 +623,11 @@ class EntryEligibilityEvaluation(ImmutableRecord):
                         stop_price__isnull=False,
                         target_price__isnull=False,
                         reward_risk__isnull=False,
+                        risk_per_unit_quote__isnull=False,
+                        conversion_rate_to_cad__isnull=False,
+                        conversion_effective_at__isnull=False,
+                        conversion_identity__gt="",
+                        risk_per_unit_cad__isnull=False,
                         target_level__isnull=False,
                     )
                     | models.Q(
@@ -621,6 +645,11 @@ class EntryEligibilityEvaluation(ImmutableRecord):
                         stop_price__isnull=True,
                         target_price__isnull=True,
                         reward_risk__isnull=True,
+                        risk_per_unit_quote__isnull=True,
+                        conversion_rate_to_cad__isnull=True,
+                        conversion_effective_at__isnull=True,
+                        conversion_identity="",
+                        risk_per_unit_cad__isnull=True,
                         target_level__isnull=True,
                     )
                 ),

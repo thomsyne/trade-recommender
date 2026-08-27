@@ -20,6 +20,23 @@ from market.quality import validate_candles
 from market.technicals import calculate_technicals
 
 
+class DatasetQualityError(ValueError):
+    """Raised when a governed dataset cannot support deterministic analysis."""
+
+
+def assert_dataset_usable(dataset_version) -> None:
+    """Fail closed for any immutable conflict, incident, or unadmitted candle lineage."""
+    if dataset_version.conflicts.exists() or dataset_version.incidents.exists():
+        raise DatasetQualityError("dataset has unresolved conflict or data-quality incident")
+    candles = dataset_version.candles.all()
+    if candles.exclude(ingestion_run__status=IngestionRun.Status.SUCCEEDED).exists():
+        raise DatasetQualityError("dataset contains candles from an unsuccessful ingestion")
+    if candles.exclude(ingestion_run__dataset_version=dataset_version).exists():
+        raise DatasetQualityError("dataset candle ingestion lineage does not match")
+    if candles.filter(ingestion_run__ingestion_manifest__isnull=True).exists():
+        raise DatasetQualityError("dataset candle has no governed ingestion manifest")
+
+
 @transaction.atomic
 def store_ingestion(
     source, instrument, granularity, start, end, candle_data, manifest, dataset_version=None
@@ -47,7 +64,9 @@ def store_ingestion(
             payload=manifest,
             sha256=digest,
         )
-    issues = validate_candles(candle_data, granularity)
+    issues = validate_candles(
+        candle_data, granularity, require_registered_alignment=dataset_version is not None
+    )
     if issues:
         run.status = IngestionRun.Status.FAILED
         run.fetched_count = len(candle_data)
