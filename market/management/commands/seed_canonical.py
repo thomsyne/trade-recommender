@@ -10,11 +10,19 @@ from market.models import Instrument, SourceRegistry
 from operations.models import ScheduledJob
 
 INSTRUMENTS = (
-    (Instrument.Code.USD_CAD, "USD", "CAD", 1),
+    (Instrument.Code.EUR_USD, "EUR", "USD", 1),
     (Instrument.Code.GBP_USD, "GBP", "USD", 2),
     (Instrument.Code.EUR_GBP, "EUR", "GBP", 3),
-    (Instrument.Code.EUR_USD, "EUR", "USD", 4),
+    (Instrument.Code.USD_CAD, "USD", "CAD", 4),
+    (Instrument.Code.USD_JPY, "USD", "JPY", 5),
+    (Instrument.Code.AUD_USD, "AUD", "USD", 6),
 )
+PROSPECTIVE_INSTRUMENT_CODES = {
+    Instrument.Code.EUR_USD,
+    Instrument.Code.GBP_USD,
+    Instrument.Code.EUR_GBP,
+    Instrument.Code.USD_CAD,
+}
 
 
 class Command(BaseCommand):
@@ -35,6 +43,10 @@ class Command(BaseCommand):
             },
         )
 
+        # Vacate legacy display-order slots before applying the registered six-pair order.
+        for code, _base, _quote, order in INSTRUMENTS:
+            Instrument.objects.filter(code=code).update(display_order=30_000 + order)
+
         for code, base, quote, order in INSTRUMENTS:
             Instrument.objects.update_or_create(
                 code=code,
@@ -42,16 +54,21 @@ class Command(BaseCommand):
                     "base_currency": base,
                     "quote_currency": quote,
                     "display_order": order,
-                    "active": True,
+                    "active": code in PROSPECTIVE_INSTRUMENT_CODES,
                 },
             )
-            for granularity, interval in (("H1", 3_600), ("H4", 14_400), ("D", 86_400)):
+            for granularity, interval in (
+                ("H1", 3_600),
+                ("H4", 14_400),
+                ("D", 86_400),
+                ("W", 604_800),
+            ):
                 _upsert_job(
                     name=f"OANDA {code} {granularity}",
                     task_name="market.ingest_oanda",
                     parameters={"instrument": code, "granularity": granularity},
                     interval=interval,
-                    enabled=bool(settings.OANDA_TOKEN),
+                    enabled=bool(settings.OANDA_TOKEN and code in PROSPECTIVE_INSTRUMENT_CODES),
                 )
 
         _upsert_job(

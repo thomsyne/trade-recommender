@@ -1,0 +1,423 @@
+{
+  "manifest_id": "failed-break-phase-1-freeze-v1",
+  "status": "FROZEN_FOR_REVIEW",
+  "authorization": {
+    "implementation": false,
+    "migrations": false,
+    "dataset_download": false,
+    "signal_count": false,
+    "pnl_calculation": false,
+    "live_execution": false
+  },
+  "source_baseline": {
+    "repository": "https://github.com/thomsyne/trade-recommender",
+    "ref": "main",
+    "commit": "354a5e75c0a69ab22fce88b81ca56028ea7fe897"
+  },
+  "identities": {
+    "data": "oanda-ba-ny17-friday-v1",
+    "detector": "failed-break-detector-v1",
+    "event_policy": "event-policy-none-v1",
+    "primary_execution": "execution-h1-stop-first-v1",
+    "paired_execution": "execution-m1-windowed-v1",
+    "primary_cost": "cost-observed-spread-only-v1",
+    "cost_sensitivity": "cost-commission-financing-grid-v1",
+    "portfolio": "portfolio-common-fraction-025-100-050-v1",
+    "signal_count": "failed-break-signal-count-v1",
+    "evaluation_policy": "failed-break-evaluation-policy-v1"
+  },
+  "strategy_books": [
+    "failed-break-weekly-extreme-v1",
+    "failed-break-daily-swing-v1",
+    "failed-break-breakout-flip-v1",
+    "failed-break-any-level-deduplicated-v1"
+  ],
+  "instruments": [
+    "EUR_USD",
+    "GBP_USD",
+    "EUR_GBP",
+    "USD_CAD",
+    "USD_JPY",
+    "AUD_USD"
+  ],
+  "timeframes": {
+    "W": "context_and_levels",
+    "D": "bias_atr_swings_levels_structure_and_time",
+    "H4": "context_only",
+    "H1": "detection_confirmation_primary_execution_and_exit",
+    "M1": "paired_windowed_execution_refinement_only",
+    "S5": "deferred"
+  },
+  "market_data": {
+    "provider": "OANDA_V20",
+    "price_component": "BA_STORED_TOGETHER",
+    "midpoint": "COMPONENTWISE_BID_ASK_MEAN",
+    "smooth": false,
+    "complete_only": true,
+    "timestamp_storage": "UTC_INTERVAL_START",
+    "alignment_timezone": "America/New_York",
+    "daily_alignment_hour": 17,
+    "weekly_alignment": "Friday",
+    "weekly_interval": "FRIDAY_17_NY_TO_FRIDAY_17_NY",
+    "candle_key_within_dataset": [
+      "instrument",
+      "granularity",
+      "timestamp"
+    ],
+    "same_key_identical": "IDEMPOTENT_NO_OP_WITH_LINEAGE",
+    "same_key_different": "APPEND_CONFLICT_AND_QUARANTINE",
+    "correction_policy": "NEW_CHILD_DATASET_VERSION_ONLY"
+  },
+  "as_of": {
+    "candle_available_when": [
+      "ALIGNED_INTERVAL_ENDED_AT_OR_BEFORE_AS_OF",
+      "PROVIDER_COMPLETE_TRUE",
+      "FROZEN_DATASET_MEMBERSHIP",
+      "SUCCESSFUL_INGESTION_MANIFEST"
+    ],
+    "pivot_confirmation_delay_daily_candles": 2,
+    "level_must_preexist_sweep_interval": true,
+    "sweep_decision": "H1_COMPLETION",
+    "confirmation_decision": "H1_COMPLETION",
+    "primary_entry": "NEXT_H1_INTERVAL_OPEN",
+    "historical_entry_resolution": "AFTER_ENTRY_H1_CANDLE_COMPLETES",
+    "entry_effective_timestamp_preserved": true,
+    "signal_count_entry_projection": [
+      "TIMESTAMP",
+      "BID_OPEN",
+      "ASK_OPEN"
+    ]
+  },
+  "daily_bias": {
+    "price": "MIDPOINT_CLOSE",
+    "ema_fast": 50,
+    "ema_slow": 200,
+    "ema_multiplier": "2/(n+1)",
+    "ema_seed": "ARITHMETIC_MEAN_FIRST_N_CLOSES",
+    "slope_lookback_sessions": 20,
+    "bullish_ema": [
+      "EMA50_T_GT_EMA200_T",
+      "EMA50_T_GT_EMA50_T_MINUS_20"
+    ],
+    "bearish_ema": [
+      "EMA50_T_LT_EMA200_T",
+      "EMA50_T_LT_EMA50_T_MINUS_20"
+    ],
+    "pivot": {
+      "window": 5,
+      "strict": true,
+      "equal_values_fail": true
+    },
+    "atr": {
+      "period": 14,
+      "smoothing": "WILDER",
+      "seed": "ARITHMETIC_MEAN_FIRST_14_TRUE_RANGES"
+    }
+  },
+  "levels": {
+    "families": [
+      "PREVIOUS_WEEKLY_EXTREME",
+      "CONFIRMED_DAILY_SWING",
+      "TWENTY_SESSION_BREAKOUT_FLIP"
+    ],
+    "generated_independent_of_entry_bias": true,
+    "zone": {
+      "total_width": "0.15*DAILY_ATR14_AT_ACTIVATION",
+      "lower": "CENTRAL_PRICE-TOTAL_WIDTH/2",
+      "upper": "CENTRAL_PRICE+TOTAL_WIDTH/2",
+      "rounding": "OUTWARD_TO_INSTRUMENT_PRECISION",
+      "frozen": true,
+      "spread_resizes_zone": false
+    },
+    "weekly_expiry": "NEXT_ALIGNED_WEEKLY_COMPLETION",
+    "daily_swing_confirmation": "STRICT_FIVE_CANDLE_PIVOT_AFTER_T_PLUS_2",
+    "breakout_lookback_sessions": 20,
+    "breakout_expiry_subsequent_daily_sessions": 20,
+    "weekly_and_daily_swing_flip_trigger": "STRICT_DAILY_CLOSE_THROUGH_SOURCE_CENTRAL_PRICE",
+    "support_invalidation": "STRICT_DAILY_CLOSE_BELOW_ZONE_LOWER",
+    "resistance_invalidation": "STRICT_DAILY_CLOSE_ABOVE_ZONE_UPPER",
+    "setup_consumption_ends_price_lifecycle": false,
+    "consumed_level_remains_target_eligible_while_active": true
+  },
+  "setup": {
+    "physical_event_key": [
+      "instrument",
+      "direction",
+      "sweep_h1_timestamp",
+      "detector_version",
+      "data_version"
+    ],
+    "one_event_multiple_level_attributions": true,
+    "one_family_trade_per_physical_event": true,
+    "one_combined_trade_per_physical_event": true,
+    "attributed_level_reusable_for_later_setup": false,
+    "bias_snapshot_at_sweep": true,
+    "updated_ema_bias_applies_to_new_sweep_detection_only": true,
+    "level_lifecycle_updates_apply_globally": true,
+    "level_lifecycle_updates_affect_pending_setups_and_target_inventory": true,
+    "structure_updates_affect_pending_and_open_trades": true,
+    "pending_setup_uses_frozen_sweep_bias": true,
+    "pending_setup_ema_recalculation": false,
+    "ema_only_change_cancels_pending_setup": false,
+    "ema_change_after_sweep_creates_retroactive_setup": false,
+    "provisional_supporting_swing_captured_at_sweep": true,
+    "pending_long_structure_invalidation": "COMPLETED_D_CLOSE_STRICTLY_BELOW_PROVISIONAL_SWING_LOW",
+    "pending_short_structure_invalidation": "COMPLETED_D_CLOSE_STRICTLY_ABOVE_PROVISIONAL_SWING_HIGH",
+    "supporting_swing_at_confirmation": "LATEST_STILL_VALID",
+    "same_timestamp_structure_invalidation_precedes_confirmation": true,
+    "confirmation_window_h1_candles": 3,
+    "confirmation_threshold_frozen_from_sweep": true,
+    "long": {
+      "bias": "BULLISH_AT_SWEEP",
+      "prior_close": "AT_OR_ABOVE_ZONE_LOWER",
+      "sweep_low": "STRICTLY_BELOW_ZONE_LOWER",
+      "sweep_close": "AT_OR_ABOVE_ZONE_LOWER",
+      "confirm": "FIRST_OF_NEXT_3_H1_CLOSES_STRICTLY_ABOVE_SWEEP_HIGH"
+    },
+    "short": {
+      "bias": "BEARISH_AT_SWEEP",
+      "prior_close": "AT_OR_BELOW_ZONE_UPPER",
+      "sweep_high": "STRICTLY_ABOVE_ZONE_UPPER",
+      "sweep_close": "AT_OR_BELOW_ZONE_UPPER",
+      "confirm": "FIRST_OF_NEXT_3_H1_CLOSES_STRICTLY_BELOW_SWEEP_LOW"
+    },
+    "second_sweep_resets_window": false
+  },
+  "analysis_outcomes": [
+    "NO_SETUP",
+    "LEVEL_ACTIVE",
+    "CANDIDATE_CREATED",
+    "DATA_INCOMPLETE"
+  ],
+  "setup_states": [
+    "TRIGGER_PENDING",
+    "CONFIRMED",
+    "EXPIRED",
+    "INVALIDATED",
+    "MISSED_FILL",
+    "BLOCKED_SESSION",
+    "BLOCKED_SPREAD",
+    "NO_TARGET",
+    "INSUFFICIENT_REWARD",
+    "CANCELLED_DATA_QUALITY",
+    "ENTRY_PENDING"
+  ],
+  "trade_states": [
+    "ENTRY_PENDING",
+    "OPEN",
+    "BLOCKED_CAPACITY",
+    "STOPPED",
+    "TARGETED",
+    "DAILY_STRUCTURE_INVALIDATION",
+    "TIME_EXIT",
+    "UNRESOLVED_DATA"
+  ],
+  "restrictions": {
+    "session_union": [
+      {
+        "timezone": "Europe/London",
+        "start_inclusive": "08:00",
+        "end_exclusive": "17:00"
+      },
+      {
+        "timezone": "America/New_York",
+        "start_inclusive": "08:00",
+        "end_exclusive": "17:00"
+      }
+    ],
+    "event_policy": "NONE",
+    "relative_spread_ceiling_h1_atr_fraction": 0.1,
+    "absolute_spread_ceilings": {
+      "status": "PENDING_RETURN_BLIND_S0",
+      "formula": "PAIR_ELIGIBLE_SESSION_DEVELOPMENT_H1_OPEN_SPREAD_P99_ROUNDED_UP_TO_PIPETTE",
+      "outcome_conditioning": false
+    }
+  },
+  "entry_risk_target": {
+    "long_entry": "NEXT_H1_ASK_OPEN",
+    "short_entry": "NEXT_H1_BID_OPEN",
+    "stop_buffer": "MAX(OPENING_SPREAD,0.10*COMPLETED_H1_ATR14)",
+    "long_stop": "SWEEP_MID_LOW-BUFFER_ROUNDED_DOWN",
+    "short_stop": "SWEEP_MID_HIGH+BUFFER_ROUNDED_UP",
+    "target_inventory_independent_of_bias": true,
+    "long_target": "NEAREST_ACTIVE_RESISTANCE_ZONE_LOWER_STRICTLY_ABOVE_ENTRY",
+    "short_target": "NEAREST_ACTIVE_SUPPORT_ZONE_UPPER_STRICTLY_BELOW_ENTRY",
+    "target_frozen_at_entry": true,
+    "minimum_reward_risk": 1.5,
+    "account_currency": "CAD"
+  },
+  "primary_execution": {
+    "identity": "execution-h1-stop-first-v1",
+    "complete_primary_model": true,
+    "long_stop_evidence": "BID_LOW",
+    "long_target_evidence": "BID_HIGH",
+    "short_stop_evidence": "ASK_HIGH",
+    "short_target_evidence": "ASK_LOW",
+    "same_h1_stop_and_target": "STOP_FIRST",
+    "stop_gap": "WORSE_OF_STOP_OR_ADVERSE_H1_OPEN",
+    "target_gap_improvement": false,
+    "time_exit_completed_daily_candles": 10
+  },
+  "paired_execution": {
+    "identity": "execution-m1-windowed-v1",
+    "can_change_primary_results": false,
+    "required_windows": [
+      "ENTRY_H1_INTERVAL",
+      "PRIMARY_H1_INTERVALS_WITH_ORDERING_AMBIGUITY"
+    ],
+    "incomplete_window": "PAIRED_REFINEMENT_UNAVAILABLE",
+    "same_m1_stop_and_target": "STOP_FIRST",
+    "retrieval_before_evaluation_policy_freeze": false
+  },
+  "portfolio": {
+    "identity": "portfolio-common-fraction-025-100-050-v1",
+    "starting_equity_cad_per_book": 10000,
+    "requested_risk_equity_fraction": 0.0025,
+    "aggregate_open_planned_risk_cap": 0.01,
+    "same_currency_same_direction_cap": 0.005,
+    "opposing_exposure_netted": false,
+    "simultaneous_rule": "LARGEST_COMMON_FRACTION",
+    "fraction_formula": "MIN(1,AGGREGATE_REMAINING/REQUESTED_TOTAL,EACH_BUCKET_REMAINING/REQUESTED_IN_BUCKET)",
+    "unit_rounding": "DOWN",
+    "redistribute_rounding_residual": false,
+    "pair_priority_used": false,
+    "confidence_used": false
+  },
+  "costs": {
+    "primary": {
+      "identity": "cost-observed-spread-only-v1",
+      "observed_bid_ask": true,
+      "additional_commission_pips": null,
+      "commission_status": "UNKNOWN_EXCLUDED",
+      "financing_included": false,
+      "financing_status": "HISTORICALLY_UNAVAILABLE_EXCLUDED",
+      "label": "OBSERVED_SPREAD_ONLY_COMMISSION_UNKNOWN_FINANCING_EXCLUDED_NOT_NET"
+    },
+    "sensitivity": {
+      "identity": "cost-commission-financing-grid-v1",
+      "round_turn_commission_pips": [
+        0.0,
+        0.5,
+        1.0
+      ],
+      "annual_notional_financing_rates": [
+        -0.06,
+        -0.03,
+        0.0,
+        0.03,
+        0.06
+      ],
+      "rollover_timezone": "America/New_York",
+      "rollover_hour": 17,
+      "wednesday_multiplier": 3,
+      "historical_reconstruction_claim": false,
+      "zero_commission_cell": "SENSITIVITY_SCENARIO_NOT_HISTORICAL_EVIDENCE",
+      "result_semantics": "SCENARIO_ADJUSTED_ESTIMATES_NOT_RECONSTRUCTED_HISTORICAL_NET_RETURNS"
+    }
+  },
+  "comparators": {
+    "registered": [
+      "comparator-bias-level-touch-v1",
+      "comparator-failed-break-no-bias-v1",
+      "comparator-matched-random-h1-v1",
+      "failed-break-any-level-deduplicated-v1"
+    ],
+    "matched_random_replicates": 100,
+    "matched_random_seed_template": "SHA256(matched-random-h1-v1|setup_stable_key|replicate_NNN)",
+    "definitions_frozen_before_returns": true
+  },
+  "partitions": {
+    "assignment_timezone": "America/New_York",
+    "assignment_field": "SETUP_CONFIRMATION_TIMESTAMP",
+    "development": [
+      2010,
+      2018
+    ],
+    "walk_forward_validation": [
+      2019,
+      2022
+    ],
+    "untouched_evaluation": [
+      2023,
+      2025
+    ],
+    "prospective_shadow_start_year": 2026,
+    "boundary_purge": "EXCLUDE_CONFIRMATION_IF_LATEST_10_SESSION_EXIT_IS_NOT_STRICTLY_BEFORE_NEXT_BOUNDARY"
+  },
+  "signal_count": {
+    "identity": "failed-break-signal-count-v1",
+    "data_partition": "DEVELOPMENT_ONLY",
+    "maximum_price_timestamp": "THEORETICAL_ENTRY_TIMESTAMP",
+    "post_entry_price_access": false,
+    "entry_projection_fields_allowed": [
+      "TIMESTAMP",
+      "BID_OPEN",
+      "ASK_OPEN"
+    ],
+    "entry_candle_fields_forbidden": [
+      "BID_HIGH",
+      "BID_LOW",
+      "BID_CLOSE",
+      "ASK_HIGH",
+      "ASK_LOW",
+      "ASK_CLOSE",
+      "VOLUME"
+    ],
+    "entry_candle_read_after_completion_and_dataset_admission": true,
+    "entry_open_effective_timestamp_preserved": true,
+    "theoretical_entry_open_usage_allowed": [
+      "SIDE_AWARE_THEORETICAL_ENTRY",
+      "ENTRY_TIME_RESTRICTIONS",
+      "REWARD_TO_RISK_ELIGIBILITY"
+    ],
+    "later_price_rows_allowed": false,
+    "exit_resolution_imports_allowed": false,
+    "execution_resolution_functions_allowed": false,
+    "outcomes_forbidden": [
+      "STOP_OUTCOME",
+      "TARGET_OUTCOME",
+      "TIME_EXIT_OUTCOME",
+      "POST_ENTRY_STRUCTURE_OUTCOME",
+      "PNL",
+      "R_OUTCOME",
+      "FAVOURABLE_EXCURSION",
+      "ADVERSE_EXCURSION"
+    ],
+    "return_fields_allowed": false,
+    "m1_post_entry_data_allowed": false,
+    "m1_download_allowed": false,
+    "output_hash_required": true,
+    "forbidden_access_behavior": "FAIL_CLOSED",
+    "fail_closed_reader_test_required": true,
+    "numeric_evaluation_thresholds_set_during_s1": false,
+    "s2_inputs_allowed": [
+      "COUNTS",
+      "DEPENDENCE_CLUSTERS",
+      "MISSINGNESS",
+      "PRE_ENTRY_GEOMETRY"
+    ],
+    "s2_must_precede_forward_return_calculation_or_display": true
+  },
+  "evaluation": {
+    "identity": "failed-break-evaluation-policy-v1",
+    "numeric_threshold_status": "PENDING_S2_AFTER_SIGNAL_COUNTS_BEFORE_PNL",
+    "bootstrap_replicates": 10000,
+    "portfolio_method": "STATIONARY_BOOTSTRAP_DAILY_RETURNS",
+    "mean_block_length": "MAX(5,ROUND(1.5*N^(1/3)))",
+    "setup_method": "ALIGNED_NEW_YORK_CALENDAR_WEEK_CLUSTER_BOOTSTRAP",
+    "primary_book": "failed-break-any-level-deduplicated-v1",
+    "primary_estimand": "OBSERVED_SPREAD_ADJUSTED_EXPECTANCY_R_BEFORE_UNKNOWN_COMMISSION_AND_FINANCING",
+    "primary_comparison": "OBSERVED_SPREAD_ADJUSTED_R_DIFFERENCES",
+    "cost_grid_result_semantics": "SCENARIO_ADJUSTED_ESTIMATES_NOT_RECONSTRUCTED_HISTORICAL_NET_RETURNS",
+    "promotion_requires_preregistered_cost_sensitivity_robustness": true,
+    "family_multiplicity": "HOLM",
+    "threshold_changes_after_returns": "REQUIRE_NEW_STRATEGY_VERSION_AND_NEW_UNTOUCHED_EVALUATION"
+  },
+  "storage": {
+    "compact_h1_analysis": "POSTGRESQL",
+    "material_evidence": "POSTGRESQL",
+    "prospective_transitions": "POSTGRESQL",
+    "external_artifact_service": false,
+    "artifact_service_trigger": "SEPARATE_APPROVAL_AFTER_MEASURED_PAYLOAD_NEED"
+  }
+}

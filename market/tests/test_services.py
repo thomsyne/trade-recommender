@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, transaction
@@ -7,12 +8,20 @@ from django.test import TestCase, TransactionTestCase
 from market.models import (
     AuditEvent,
     Candle,
+    CandleConflict,
+    DatasetVersion,
     IngestionRun,
     Instrument,
     SourceRegistry,
     TechnicalSnapshot,
 )
-from market.services import store_ingestion
+from market.services import (
+    DatasetQualityError,
+    RequiredCandleRange,
+    assert_dataset_usable,
+    assert_dataset_window_usable,
+    store_ingestion,
+)
 from market.tests.factories import candle
 
 
@@ -62,6 +71,92 @@ class IngestionServiceTests(TestCase):
         self.assertEqual(run.status, IngestionRun.Status.FAILED)
         self.assertEqual(Candle.objects.count(), 0)
         self.assertIn("incomplete_candle", run.failure_reason)
+
+    def test_empty_governed_dataset_is_not_usable(self):
+        dataset = DatasetVersion.objects.create(
+            name="empty",
+            version="1",
+            source=self.source,
+            manifest={"fixture": "empty"},
+        )
+
+        with self.assertRaisesMessage(DatasetQualityError, "no governed candles"):
+            assert_dataset_usable(dataset)
+
+    def test_dataset_registration_rejects_manifest_sha_mismatch(self):
+        with self.assertRaisesMessage(ValidationError, "manifest SHA-256"):
+            DatasetVersion.objects.create(
+                name="bad-manifest-hash",
+                version="1",
+                source=self.source,
+                manifest={"fixture": "hash-mismatch"},
+                manifest_sha256="0" * 64,
+            )
+
+    def test_required_range_detects_gap_across_successful_manifests(self):
+        dataset = DatasetVersion.objects.create(
+            name="cross-manifest-gap",
+            version="1",
+            source=self.source,
+            manifest={"fixture": "cross-manifest-gap"},
+        )
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        for index, timestamp in enumerate((start, start + timedelta(hours=2))):
+            run = store_ingestion(
+                self.source,
+                self.instrument,
+                "H1",
+                timestamp,
+                timestamp + timedelta(hours=1),
+                [candle(timestamp)],
+                {"batch": index},
+                dataset_version=dataset,
+            )
+            self.assertEqual(run.status, IngestionRun.Status.SUCCEEDED)
+
+        with self.assertRaisesMessage(DatasetQualityError, "does not completely cover"):
+            assert_dataset_window_usable(
+                dataset,
+                self.instrument,
+                (RequiredCandleRange("H1", start, start + timedelta(hours=3)),),
+                start + timedelta(hours=3),
+            )
+
+    def test_required_ranges_are_instrument_timeframe_and_as_of_specific(self):
+        dataset = DatasetVersion.objects.create(
+            name="bounded-window",
+            version="1",
+            source=self.source,
+            manifest={"fixture": "bounded-window"},
+        )
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "H1",
+            start,
+            start + timedelta(hours=2),
+            [candle(start), candle(start + timedelta(hours=1))],
+            {"bounded": True},
+            dataset_version=dataset,
+        )
+        complete_range = (RequiredCandleRange("H1", start, start + timedelta(hours=2)),)
+
+        assert_dataset_window_usable(
+            dataset, self.instrument, complete_range, start + timedelta(hours=2)
+        )
+        with self.assertRaisesMessage(DatasetQualityError, "incomplete at as_of"):
+            assert_dataset_window_usable(
+                dataset, self.instrument, complete_range, start + timedelta(hours=1)
+            )
+        with self.assertRaisesMessage(DatasetQualityError, "does not completely cover"):
+            daily_start = datetime(2026, 1, 4, 22, tzinfo=UTC)
+            assert_dataset_window_usable(
+                dataset,
+                self.instrument,
+                (RequiredCandleRange("D", daily_start, daily_start + timedelta(days=1)),),
+                daily_start + timedelta(days=1),
+            )
 
     def test_real_ingestion_replaces_development_fixtures(self):
         self.source.name = "Development fixtures"
@@ -156,6 +251,87 @@ class IngestionServiceTests(TestCase):
         with self.assertRaises(ValidationError):
             event.delete()
 
+    def test_governed_conflict_quarantines_batch_but_child_can_correct(self):
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        parent = DatasetVersion.objects.create(
+            name="oanda",
+            version="v1",
+            source=self.source,
+            manifest={"fixture": "parent"},
+        )
+        child = DatasetVersion.objects.create(
+            name="oanda",
+            version="v2",
+            parent=parent,
+            source=self.source,
+            manifest={"fixture": "child"},
+        )
+        original = candle(start)
+        corrected = candle(start, bid_close=original.bid_close + Decimal("0.0001"))
+
+        first = store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start,
+            start + timedelta(hours=4),
+            [original],
+            {"batch": 1},
+            dataset_version=parent,
+        )
+        duplicate = store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start,
+            start + timedelta(hours=4),
+            [original],
+            {"batch": 2},
+            dataset_version=parent,
+        )
+        conflict = store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start,
+            start + timedelta(hours=4),
+            [corrected],
+            {"batch": 3},
+            dataset_version=parent,
+        )
+        correction = store_ingestion(
+            self.source,
+            self.instrument,
+            "H4",
+            start,
+            start + timedelta(hours=4),
+            [corrected],
+            {"batch": 4},
+            dataset_version=child,
+        )
+
+        self.assertEqual(first.stored_count, 1)
+        self.assertEqual(duplicate.stored_count, 0)
+        self.assertEqual(conflict.status, IngestionRun.Status.QUARANTINED)
+        self.assertEqual(CandleConflict.objects.count(), 1)
+        self.assertEqual(CandleConflict.objects.get().differing_fields, ["bid_close"])
+        self.assertEqual(correction.stored_count, 1)
+        self.assertEqual(Candle.objects.count(), 2)
+
+    def test_component_midpoints_are_derived_from_bid_and_ask(self):
+        item = candle()
+        stored = Candle(
+            instrument=self.instrument,
+            ingestion_run_id=1,
+            granularity="H4",
+            **item.__dict__,
+        )
+
+        self.assertEqual(stored.midpoint_open, (item.bid_open + item.ask_open) / 2)
+        self.assertEqual(stored.midpoint_high, (item.bid_high + item.ask_high) / 2)
+        self.assertEqual(stored.midpoint_low, (item.bid_low + item.ask_low) / 2)
+        self.assertEqual(stored.midpoint_close, (item.bid_close + item.ask_close) / 2)
+
 
 class AuditDatabaseInvariantTests(TransactionTestCase):
     def test_queryset_cannot_bypass_append_only_trigger(self):
@@ -168,3 +344,45 @@ class AuditDatabaseInvariantTests(TransactionTestCase):
 
         event.refresh_from_db()
         self.assertEqual(event.payload, {})
+
+    def test_legacy_candle_cannot_be_mutated_while_promoted_to_governed_dataset(self):
+        source = SourceRegistry.objects.create(
+            name="legacy-source",
+            tier=SourceRegistry.Tier.QUARANTINE,
+            base_url="https://example.invalid",
+            acquisition_method="test",
+            retention_policy="test",
+        )
+        instrument = Instrument.objects.create(
+            code="EUR_USD", base_currency="EUR", quote_currency="USD", display_order=1
+        )
+        at = datetime(2026, 1, 5, tzinfo=UTC)
+        run = IngestionRun.objects.create(
+            source=source,
+            instrument=instrument,
+            granularity="H1",
+            requested_from=at,
+            requested_to=at + timedelta(hours=1),
+            parameters={},
+            request_manifest_hash="legacy",
+            status=IngestionRun.Status.SUCCEEDED,
+        )
+        item = candle(at)
+        stored = Candle.objects.create(
+            instrument=instrument,
+            ingestion_run=run,
+            granularity="H1",
+            **item.__dict__,
+        )
+        dataset = DatasetVersion.objects.create(
+            name="governed", version="1", manifest={"fixture": "governed"}
+        )
+
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            Candle.objects.filter(pk=stored.pk).update(
+                dataset_version=dataset,
+                bid_close=stored.bid_close + Decimal("0.0001"),
+            )
+
+        stored.refresh_from_db()
+        self.assertIsNone(stored.dataset_version_id)

@@ -1,0 +1,14 @@
+{
+  "status": "APPROVED",
+  "phase": "Phase 1",
+  "approved_source_baseline": "354a5e75c0a69ab22fce88b81ca56028ea7fe897",
+  "specification": {
+    "path": "docs/strategy/failed-break/v1/phase-1-specification.md",
+    "sha256": "47d0346bcf723cb78a71763df43f6b092b0c235bb1d17ccbe69f17d9550203cd"
+  },
+  "freeze_manifest": {
+    "path": "docs/strategy/failed-break/v1/phase-1-freeze-manifest.json",
+    "sha256": "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
+  },
+  "implementation_authorization": "PHASE_2A_ONLY"
+}

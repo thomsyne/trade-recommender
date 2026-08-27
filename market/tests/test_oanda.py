@@ -71,6 +71,20 @@ class OandaClientTests(SimpleTestCase):
 
         self.assertEqual(include_first_values, ["true", "false"])
 
+    def test_weekly_requests_use_friday_new_york_alignment(self):
+        def handler(request):
+            self.assertEqual(request.url.params["weeklyAlignment"], "Friday")
+            self.assertEqual(request.url.params["dailyAlignment"], "17")
+            self.assertEqual(request.url.params["alignmentTimezone"], "America/New_York")
+            return httpx.Response(200, json={"candles": []})
+
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        candles, manifest = client.fetch_candles("AUD_USD", "W", start, start + timedelta(weeks=2))
+
+        self.assertEqual(candles, [])
+        self.assertEqual(manifest["weeklyAlignment"], "Friday")
+
     def test_fetches_account_terms_without_account_id_in_manifest(self):
         def handler(request):
             if request.url.path.endswith("/summary"):

@@ -14,10 +14,12 @@ from market.oanda import CandleData
 from market.services import store_ingestion
 
 FIXTURE_INITIALS = {
+    Instrument.Code.AUD_USD: Decimal("0.650000"),
     Instrument.Code.USD_CAD: Decimal("1.371000"),
     Instrument.Code.GBP_USD: Decimal("1.296000"),
     Instrument.Code.EUR_GBP: Decimal("0.856000"),
     Instrument.Code.EUR_USD: Decimal("1.109000"),
+    Instrument.Code.USD_JPY: Decimal("147.000000"),
 }
 
 
@@ -41,7 +43,7 @@ class Command(BaseCommand):
         now = datetime(2026, 8, 15, 21, tzinfo=UTC)
         for code, _base, _quote, _order in INSTRUMENTS:
             instrument = Instrument.objects.get(code=code)
-            if settings.DEBUG:
+            if settings.DEBUG and instrument.active:
                 initial = FIXTURE_INITIALS[code]
                 self._seed_candles(fixture, instrument, "D", now, initial, 48)
                 self._seed_candles(fixture, instrument, "H4", now, initial, 72)

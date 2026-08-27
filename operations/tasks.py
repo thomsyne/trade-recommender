@@ -63,7 +63,7 @@ def ingest_oanda(parameters):
     instrument = Instrument.objects.get(code=parameters["instrument"])
     granularity = parameters["granularity"]
     end = _datetime(parameters.get("to")) if parameters.get("to") else datetime.now(UTC)
-    default_days = {"H1": 14, "H4": 14, "D": 90}[granularity]
+    default_days = {"H1": 14, "H4": 14, "D": 90, "W": 730}[granularity]
     days = int(parameters.get("days", default_days))
     start = (
         _datetime(parameters.get("from")) if parameters.get("from") else end - timedelta(days=days)
