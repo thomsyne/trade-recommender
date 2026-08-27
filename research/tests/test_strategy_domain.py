@@ -111,6 +111,20 @@ class IndicatorTests(TestCase):
         self.assertEqual(daily_bias(candles, pivots, context()), Bias.BULLISH)
         self.assertNotIn("h4", inspect.signature(daily_bias).parameters)
 
+    def test_daily_close_at_shared_boundary_updates_sweep_bias(self):
+        candles = [candle(i, 100 + i) for i in range(219)]
+        candles.extend((candle(219, 100), candle(220, 320)))
+        pivots = (
+            Pivot(candles[100].opened_at, candles[102].completed_at, D("180"), "high"),
+            Pivot(candles[110].opened_at, candles[112].completed_at, D("160"), "low"),
+            Pivot(candles[150].opened_at, candles[152].completed_at, D("230"), "high"),
+            Pivot(candles[160].opened_at, candles[162].completed_at, D("200"), "low"),
+        )
+        before = context(candles[-2].completed_at)
+        at_shared_close = context(candles[-1].completed_at)
+        self.assertEqual(daily_bias(candles, pivots, before), Bias.NEUTRAL)
+        self.assertEqual(daily_bias(candles, pivots, at_shared_close), Bias.BULLISH)
+
 
 class LevelTests(TestCase):
     def test_level_never_activates_retroactively_and_zone_is_frozen(self):
@@ -223,6 +237,21 @@ class SetupTests(TestCase):
         swept = candle(1, "10", high="10.4", low="9.8", hours=1)
         self.assertIsNone(
             detect_failed_sweep(previous, swept, [level()], Bias.NEUTRAL, D("9"), context())
+        )
+
+    def test_level_activated_at_sweep_close_cannot_explain_completed_sweep(self):
+        previous = candle(0, "10.1", high="10.2", low="10", hours=1)
+        swept = candle(1, "10", high="10.4", low="9.8", hours=1)
+        newly_activated = level(activated_at=swept.completed_at)
+        self.assertIsNone(
+            detect_failed_sweep(
+                previous,
+                swept,
+                [newly_activated],
+                Bias.BULLISH,
+                D("9"),
+                context(),
+            )
         )
 
     def test_three_h1_window_is_exact_and_frozen_threshold_is_used(self):

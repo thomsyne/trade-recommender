@@ -39,7 +39,27 @@ python manage.py signal_count_s1 \
 S1 first runs the bounded chronological detector, records one detector-scoped `AnalysisRun` for
 every registered development H1 decision point, and registers an immutable detector `JobRun`.
 The final return-blind report verifies that detector job and exact analysis coverage before it is
-registered. Raw sweep and attribution diagnostics retain partition-boundary-purged confirmations;
-confirmation, eligibility, and later populations exclude them. S1 fails rather than registering an
+registered. Re-running an existing identity is an idempotent resume/revalidation of immutable
+records; it is not an independent offline replay.
+
+The detector reads H1 evidence chronologically. It resolves an entry through the restricted
+timestamp/bid-open/ask-open projection after that H1 interval completes and before loading the
+interval's full detection OHLC. At a shared H1/D/W close it then admits the completed candles,
+applies D/W lifecycle and structure changes before pending confirmation, and detects a new sweep
+using the updated bias while excluding levels activated at that sweep close.
+
+`partition_boundary_censored` is a research-partition exclusion, not a strategy transition. A
+development sweep is censored when its latest possible three-H1 confirmation window plus its
+required entry-evidence H1 completion is not strictly before `2019-01-01 00:00
+America/New_York`. The detector computes that horizon from timestamps and the registered H1
+calendar (including Friday-to-Sunday alignment), without reading a 2019 candle. Its immutable
+detector report records canonical, individually hashed evidence for every censored setup. The final
+S1 audit reconstructs that evidence and fails if it is absent, forged, or attached to a setup with a
+strategy transition.
+
+Censored setups remain in raw sweep and attribution diagnostics but are excluded from confirmation,
+eligibility, book, concurrency, proposed-M1-window, and later return populations. They are distinct
+from `partition_boundary_purged`, which retains the frozen ten-session rule for resolved
+confirmations, so the populations cannot overlap. S1 fails rather than registering any other
 incomplete or truncated audit. These commands must not be run against complete historical data
 until that run is separately authorized.

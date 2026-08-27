@@ -45,6 +45,7 @@ from research.models import (
 SIGNAL_COUNT_IDENTITY = "failed-break-signal-count-v1"
 S0_JOB_NAME = "failed-break-signal-count-s0"
 S1_DETECTOR_JOB_NAME = "failed-break-signal-count-s1-detector"
+PARTITION_BOUNDARY_CENSOR_RULE = "development-sweep-three-h1-plus-entry-v1"
 PHASE1_MANIFEST_SHA256 = "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
 FROZEN_INSTRUMENTS = frozenset({"EUR_USD", "GBP_USD", "EUR_GBP", "USD_CAD", "USD_JPY", "AUD_USD"})
 S1_GRANULARITIES = frozenset({"W", "D", "H1"})
@@ -114,6 +115,7 @@ S1_COUNT_FIELDS = frozenset(
         "setup_expired",
         "setup_cancelled_data_quality",
         "still_trigger_pending",
+        "partition_boundary_censored",
         "partition_boundary_purged",
         "physical_setups_processed",
         "eligibility_evaluations_processed",
@@ -665,6 +667,25 @@ def expected_analysis_keys(ranges_by_instrument):
     return tuple(keys)
 
 
+def development_candle_range(required):
+    """Restrict a declared range to candles completed strictly inside development."""
+    timestamps = tuple(
+        timestamp
+        for timestamp in expected_candle_timestamps(
+            required.start, required.end, required.granularity
+        )
+        if registered_candle_completion(timestamp, required.granularity)
+        < DEVELOPMENT_END.astimezone(UTC)
+    )
+    if not timestamps:
+        raise ReturnBlindViolation("declared range has no pre-boundary candles")
+    return RequiredCandleRange(
+        required.granularity,
+        timestamps[0],
+        registered_candle_completion(timestamps[-1], required.granularity),
+    )
+
+
 def _validate_detector_coverage(
     *,
     detector_job_id,
@@ -689,6 +710,7 @@ def _validate_detector_coverage(
     configuration = job.evidence["configuration"]
     report = job.evidence["report"]
     report_body = {key: value for key, value in report.items() if key != "report_sha256"}
+    censored_evidence = report.get("partition_boundary_censored")
     if (
         set(configuration)
         != {
@@ -720,10 +742,16 @@ def _validate_detector_coverage(
             "expected_analysis_sha256",
             "observed_analysis_count",
             "observed_analysis_sha256",
+            "partition_boundary_censored",
+            "partition_boundary_censored_sha256",
         }
         or report.get("report_sha256") != stable_hash(report_body)
         or report.get("expected_analysis_count") != len(expected)
         or report.get("expected_analysis_sha256") != expected_hash
+        or not isinstance(censored_evidence, list)
+        or any(not isinstance(row, Mapping) for row in censored_evidence)
+        or censored_evidence != sorted(censored_evidence, key=lambda row: row.get("setup_id", -1))
+        or report.get("partition_boundary_censored_sha256") != stable_hash(censored_evidence)
     ):
         raise ReturnBlindViolation("S1 detector audit hashes or identities do not verify")
 
@@ -744,6 +772,36 @@ def _validate_detector_coverage(
         or any(result == AnalysisRun.Result.DATA_INCOMPLETE for _, _, result in observed_rows)
     ):
         raise ReturnBlindViolation("S1 detector analysis coverage is incomplete or unresolved")
+
+    setup_rows = list(
+        SetupEvent.objects.filter(
+            dataset_version=dataset,
+            strategy_version=strategy,
+            sweep_h1_timestamp__gte=DEVELOPMENT_START.astimezone(UTC),
+            sweep_h1_timestamp__lt=DEVELOPMENT_END.astimezone(UTC),
+        ).values("pk", "sweep_h1_timestamp")
+    )
+    expected_censored = sorted(
+        (
+            evidence
+            for row in setup_rows
+            if (
+                evidence := partition_boundary_censorship(
+                    setup_id=row["pk"], sweep_timestamp=row["sweep_h1_timestamp"]
+                )
+            )
+        ),
+        key=lambda row: row["setup_id"],
+    )
+    censored_ids = {row["setup_id"] for row in expected_censored}
+    transitioned_censored_ids = set(
+        SetupTransition.objects.filter(
+            setup_id__in=censored_ids,
+            book_identity="",
+        ).values_list("setup_id", flat=True)
+    )
+    if censored_evidence != expected_censored or transitioned_censored_ids:
+        raise ReturnBlindViolation("S1 detector partition censorship evidence does not verify")
     return job, report["report_sha256"]
 
 
@@ -760,6 +818,35 @@ def _next_registered_h1_open(timestamp):
     if local.weekday() == 4 and local.time() == time(17):
         return (local + timedelta(days=2)).replace(hour=17).astimezone(timestamp.tzinfo)
     return timestamp
+
+
+def _partition_boundary_lifecycle_horizon(sweep_timestamp):
+    completion = sweep_timestamp
+    for _ in range(3):
+        confirmation_open = _next_registered_h1_open(completion)
+        completion = registered_candle_completion(confirmation_open, "H1")
+    latest_confirmation_completion = completion
+    entry_open = _next_registered_h1_open(latest_confirmation_completion)
+    entry_evidence_completion = registered_candle_completion(entry_open, "H1")
+    return latest_confirmation_completion, entry_evidence_completion
+
+
+def partition_boundary_censorship(*, setup_id, sweep_timestamp):
+    """Return canonical timestamp-only evidence when development cannot observe a setup."""
+    latest_confirmation_completion, entry_evidence_completion = (
+        _partition_boundary_lifecycle_horizon(sweep_timestamp)
+    )
+    if entry_evidence_completion < DEVELOPMENT_END.astimezone(UTC):
+        return None
+    body = {
+        "setup_id": setup_id,
+        "sweep_timestamp": sweep_timestamp.isoformat(),
+        "rule": PARTITION_BOUNDARY_CENSOR_RULE,
+        "partition_boundary": DEVELOPMENT_END.astimezone(UTC).isoformat(),
+        "latest_confirmation_completion": latest_confirmation_completion.isoformat(),
+        "entry_evidence_completion": entry_evidence_completion.isoformat(),
+    }
+    return {**body, "evidence_sha256": stable_hash(body)}
 
 
 def _maximum_horizon_end(entry_timestamp):
@@ -835,7 +922,12 @@ def run_s1(
     if set(instruments_by_code) != set(ranges_by_instrument):
         raise ReturnBlindViolation("dataset required_ranges references an unknown instrument")
     for code, ranges in ranges_by_instrument.items():
-        assert_dataset_window_usable(dataset, instruments_by_code[code], ranges, as_of)
+        assert_dataset_window_usable(
+            dataset,
+            instruments_by_code[code],
+            tuple(development_candle_range(required) for required in ranges),
+            as_of,
+        )
     detector_job, detector_report_sha256 = _validate_detector_coverage(
         detector_job_id=detector_job_id,
         dataset=dataset,
@@ -844,6 +936,11 @@ def run_s1(
         s0_job_id=s0_job_id,
         s0_report_sha256=s0_report_sha256,
         as_of=as_of,
+    )
+    detector_evidence = getattr(detector_job, "evidence", {})
+    censored_setup_ids = frozenset(
+        row["setup_id"]
+        for row in detector_evidence.get("report", {}).get("partition_boundary_censored", ())
     )
     ranges_by_instrument_id = {
         instruments_by_code[code].pk: ranges for code, ranges in ranges_by_instrument.items()
@@ -862,10 +959,11 @@ def run_s1(
         .annotate(has_global_transition=Exists(global_transition))
         .filter(has_global_transition=False)
     )
-    pending_count = pending.count()
-    if pending_count:
+    pending_ids = set(pending.values_list("pk", flat=True))
+    if pending_ids != set(censored_setup_ids):
         raise ReturnBlindViolation(
-            f"S1 lifecycle is incomplete: {pending_count} development setup(s) still trigger-pending"
+            "S1 lifecycle is incomplete: trigger-pending setups do not match immutable "
+            "partition censorship evidence"
         )
 
     confirmations = []
@@ -955,6 +1053,7 @@ def run_s1(
     counts["physical_setups_processed"] = len(setup_ids)
     counts["sweeps"] = len(development_setup_ids)
     counts["confirmations"] = len(setup_ids)
+    counts["partition_boundary_censored"] = len(censored_setup_ids)
     counts["partition_boundary_purged"] = purged
     counts["attributions"] = raw_attribution_count
     projections_read = 0

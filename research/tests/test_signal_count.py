@@ -32,11 +32,13 @@ from research.signal_count import (
     _analysis_data_incomplete_count,
     _maximum_horizon_end,
     _next_registered_h1_open,
+    _partition_boundary_lifecycle_horizon,
     _s1_evaluation_queryset,
     _validate_s1_contract,
     _validated_s0_job,
     enforce_price_cutoff,
     generate_spread_ceilings,
+    partition_boundary_censorship,
     read_entry_projection,
     run_s0,
     run_s1,
@@ -44,6 +46,43 @@ from research.signal_count import (
 
 
 class SignalCountBoundaryTests(SimpleTestCase):
+    def test_partition_boundary_censorship_is_strict_and_timestamp_only(self):
+        new_york = ZoneInfo("America/New_York")
+        fully_observable = datetime(2018, 12, 31, 19, tzinfo=new_york)
+        entry_evidence_at_boundary = datetime(2018, 12, 31, 20, tzinfo=new_york)
+        third_confirmation_at_boundary = datetime(2018, 12, 31, 21, tzinfo=new_york)
+
+        with patch("research.signal_count.Candle.objects") as candle_objects:
+            self.assertIsNone(
+                partition_boundary_censorship(setup_id=1, sweep_timestamp=fully_observable)
+            )
+            entry_censored = partition_boundary_censorship(
+                setup_id=2, sweep_timestamp=entry_evidence_at_boundary
+            )
+            confirmation_censored = partition_boundary_censorship(
+                setup_id=3, sweep_timestamp=third_confirmation_at_boundary
+            )
+        candle_objects.assert_not_called()
+        self.assertEqual(entry_censored["entry_evidence_completion"], "2019-01-01T05:00:00+00:00")
+        self.assertEqual(
+            confirmation_censored["latest_confirmation_completion"],
+            "2019-01-01T05:00:00+00:00",
+        )
+
+    def test_partition_boundary_horizon_uses_friday_to_sunday_calendar(self):
+        new_york = ZoneInfo("America/New_York")
+        latest_confirmation, entry_evidence = _partition_boundary_lifecycle_horizon(
+            datetime(2018, 12, 28, 17, tzinfo=new_york)
+        )
+        self.assertEqual(
+            latest_confirmation.astimezone(new_york),
+            datetime(2018, 12, 30, 20, tzinfo=new_york),
+        )
+        self.assertEqual(
+            entry_evidence.astimezone(new_york),
+            datetime(2018, 12, 30, 21, tzinfo=new_york),
+        )
+
     def test_partition_boundary_purge_uses_new_york_confirmation_and_weekend_alignment(self):
         new_york = ZoneInfo("America/New_York")
         retained_confirmation = datetime(2018, 12, 14, 17, tzinfo=new_york)

@@ -10,7 +10,11 @@ from django.db import transaction
 
 from market.models import Candle as MarketCandle
 from market.models import DatasetVersion, Instrument
-from market.quality import registered_candle_completion, registered_successor
+from market.quality import (
+    expected_candle_timestamps,
+    registered_candle_completion,
+    registered_successor,
+)
 from market.services import assert_dataset_window_usable
 from research.failed_break_services import (
     books_for_setup,
@@ -40,7 +44,10 @@ from research.signal_count import (
     PIPETTES,
     S1_DETECTOR_JOB_NAME,
     _validate_s1_contract,
+    development_candle_range,
     expected_analysis_keys,
+    partition_boundary_censorship,
+    read_entry_projection,
     stable_hash,
 )
 from research.strategy import (
@@ -80,31 +87,76 @@ class _PendingSetup:
     setup: SetupEvent
 
 
-def _strategy_candle(row: MarketCandle) -> Candle:
+DETECTION_CANDLE_FIELDS = (
+    "timestamp",
+    "granularity",
+    "complete",
+    "bid_open",
+    "bid_high",
+    "bid_low",
+    "bid_close",
+    "ask_open",
+    "ask_high",
+    "ask_low",
+    "ask_close",
+)
+
+
+def _strategy_candle(row) -> Candle:
     return Candle(
-        opened_at=row.timestamp,
-        completed_at=registered_candle_completion(row.timestamp, row.granularity),
-        bid_open=row.bid_open,
-        bid_high=row.bid_high,
-        bid_low=row.bid_low,
-        bid_close=row.bid_close,
-        ask_open=row.ask_open,
-        ask_high=row.ask_high,
-        ask_low=row.ask_low,
-        ask_close=row.ask_close,
-        complete=row.complete,
+        opened_at=row["timestamp"],
+        completed_at=registered_candle_completion(row["timestamp"], row["granularity"]),
+        bid_open=row["bid_open"],
+        bid_high=row["bid_high"],
+        bid_low=row["bid_low"],
+        bid_close=row["bid_close"],
+        ask_open=row["ask_open"],
+        ask_high=row["ask_high"],
+        ask_low=row["ask_low"],
+        ask_close=row["ask_close"],
+        complete=row["complete"],
     )
 
 
-def _candles(dataset, instrument, granularity):
+def _read_candles(dataset, instrument, granularity, timestamps):
+    timestamps = tuple(timestamps)
+    if not timestamps:
+        return ()
     return tuple(
         _strategy_candle(row)
         for row in MarketCandle.objects.filter(
             dataset_version=dataset,
             instrument=instrument,
             granularity=granularity,
-        ).order_by("timestamp")
+            timestamp__in=timestamps,
+        )
+        .order_by("timestamp")
+        .values(*DETECTION_CANDLE_FIELDS)
     )
+
+
+def _range_timestamps(ranges, granularity):
+    required = next(required for required in ranges if required.granularity == granularity)
+    return expected_candle_timestamps(required.start, required.end, granularity)
+
+
+def _admitted_before(dataset, instrument, ranges, granularity, boundary):
+    timestamps = tuple(
+        timestamp
+        for timestamp in _range_timestamps(ranges, granularity)
+        if registered_candle_completion(timestamp, granularity) < boundary
+    )
+    return list(_read_candles(dataset, instrument, granularity, timestamps))
+
+
+def _candle_completing_at(dataset, instrument, schedules, granularity, boundary):
+    timestamp = schedules[granularity].get(boundary)
+    if timestamp is None:
+        return None
+    rows = _read_candles(dataset, instrument, granularity, (timestamp,))
+    if len(rows) != 1:
+        raise ValueError(f"registered {granularity} candle is missing at {boundary.isoformat()}")
+    return rows[0]
 
 
 def _context(at, strategy, dataset):
@@ -345,36 +397,72 @@ def _evaluate_entry(
         )
 
 
+def _merge_material_specs(nodes, known_keys, specs):
+    additions = sorted(
+        (spec for spec in specs if spec.key not in known_keys),
+        key=lambda item: (item.activated_at, item.key),
+    )
+    nodes.extend(_LevelNode(spec) for spec in additions)
+    known_keys.update(spec.key for spec in additions)
+
+
+def _seed_h1_atr(candles, context):
+    ranges = []
+    for index, candle in enumerate(candles):
+        previous_close = candles[index - 1].close if index else candle.close
+        ranges.append(
+            max(
+                candle.high - candle.low,
+                abs(candle.high - previous_close),
+                abs(candle.low - previous_close),
+            )
+        )
+    points = atr14(candles, context)
+    return (points[-1].value, []) if points else (None, ranges)
+
+
 def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceiling, as_of):
     for required in ranges:
-        assert_dataset_window_usable(dataset, instrument, (required,), as_of)
-    weekly = _candles(dataset, instrument, "W")
-    daily = _candles(dataset, instrument, "D")
-    h1 = _candles(dataset, instrument, "H1")
+        assert_dataset_window_usable(
+            dataset, instrument, (development_candle_range(required),), as_of
+        )
     development_start = DEVELOPMENT_START.astimezone(UTC)
     development_end = DEVELOPMENT_END.astimezone(UTC)
-    development_h1 = [
-        candle for candle in h1 if development_start <= candle.completed_at < development_end
-    ]
-    specs, _, pivots = _material_level_specs(
-        weekly, daily, PIPETTES[instrument.code], strategy, dataset, as_of
+    schedules = {
+        granularity: {
+            registered_candle_completion(timestamp, granularity): timestamp
+            for timestamp in _range_timestamps(ranges, granularity)
+            if registered_candle_completion(timestamp, granularity) < development_end
+        }
+        for granularity in ("W", "D", "H1")
+    }
+    development_h1 = sorted(
+        (completion, timestamp)
+        for completion, timestamp in schedules["H1"].items()
+        if development_start <= completion < development_end
     )
-    nodes = [
-        _LevelNode(spec) for spec in sorted(specs, key=lambda item: (item.activated_at, item.key))
-    ]
-    daily_by_completion = {candle.completed_at: candle for candle in daily}
-    h1_atr = {point.at: point.value for point in atr14(h1, _context(as_of, strategy, dataset))}
+    weekly = _admitted_before(dataset, instrument, ranges, "W", development_start)
+    daily = _admitted_before(dataset, instrument, ranges, "D", development_start)
+    h1 = _admitted_before(dataset, instrument, ranges, "H1", development_start)
+    nodes = []
+    known_spec_keys = set()
+    specs, _, pivots = _material_level_specs(
+        weekly,
+        daily,
+        PIPETTES[instrument.code],
+        strategy,
+        dataset,
+        development_start,
+    )
+    _merge_material_specs(nodes, known_spec_keys, specs)
+    initial_context = _context(development_start, strategy, dataset)
+    bias = daily_bias(daily, pivots, initial_context)
+    swing = supporting_swing(pivots, bias, initial_context)
+    h1_atr, unseeded_true_ranges = _seed_h1_atr(h1, initial_context)
     pending = []
     activation_index = 0
-    previous = max(
-        (
-            candle
-            for candle in h1
-            if development_h1 and candle.completed_at <= development_h1[0].opened_at
-        ),
-        key=lambda item: item.completed_at,
-        default=None,
-    )
+    levels_initialized = False
+    previous = max(h1, key=lambda item: item.completed_at, default=None)
     consumed = set(
         SetupLevelAttribution.objects.filter(
             setup__instrument=instrument,
@@ -383,40 +471,89 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
         ).values_list("level__stable_key", flat=True)
     )
 
-    for candle in development_h1:
-        activation_index = _persist_material_levels(
-            nodes=nodes,
-            activation_index=activation_index,
-            daily_by_completion={
-                at: value for at, value in daily_by_completion.items() if at <= candle.opened_at
-            },
-            instrument=instrument,
-            strategy=strategy,
-            dataset=dataset,
-            ranges=ranges,
-            as_of=candle.opened_at,
-        )
-
+    for completion, opened_at in development_h1:
         for candidate in tuple(pending):
             confirmed = candidate.setup.setuptransition_set.filter(
                 from_state=SetupTransition.State.TRIGGER_PENDING,
                 to_state=SetupTransition.State.CONFIRMED,
                 book_identity="",
             ).exists()
-            if confirmed and derive_expected_entry_timestamp(candidate.setup) == candle.opened_at:
+            if confirmed and derive_expected_entry_timestamp(candidate.setup) == opened_at:
+                projection = read_entry_projection(
+                    dataset_id=dataset.pk,
+                    instrument_id=instrument.pk,
+                    theoretical_entry_timestamp=opened_at,
+                    as_of=completion,
+                )
                 _evaluate_entry(
                     pending=candidate,
-                    opening=EntryOpen(candle.opened_at, candle.bid_open, candle.ask_open),
-                    h1_atr=h1_atr.get(candle.opened_at),
+                    opening=EntryOpen(
+                        projection.timestamp, projection.bid_open, projection.ask_open
+                    ),
+                    h1_atr=h1_atr,
                     nodes=nodes,
                     instrument=instrument,
                     dataset=dataset,
                     strategy=strategy,
                     ceiling=spread_ceiling,
                     ranges=ranges,
-                    as_of=as_of,
+                    as_of=completion,
                 )
                 pending.remove(candidate)
+
+        candle = _candle_completing_at(dataset, instrument, schedules, "H1", completion)
+        if candle is None or candle.opened_at != opened_at:
+            raise ValueError(f"registered H1 candle is missing at {completion.isoformat()}")
+        previous_close = h1[-1].close if h1 else candle.close
+        true_range = max(
+            candle.high - candle.low,
+            abs(candle.high - previous_close),
+            abs(candle.low - previous_close),
+        )
+        h1.append(candle)
+        if h1_atr is None:
+            unseeded_true_ranges.append(true_range)
+            if len(unseeded_true_ranges) == 14:
+                h1_atr = sum(unseeded_true_ranges, Decimal()) / 14
+                unseeded_true_ranges = []
+        else:
+            h1_atr = (h1_atr * 13 + true_range) / 14
+
+        structure_changed = False
+        for granularity, admitted in (("W", weekly), ("D", daily)):
+            completed_candle = _candle_completing_at(
+                dataset, instrument, schedules, granularity, completion
+            )
+            if completed_candle is not None:
+                admitted.append(completed_candle)
+                structure_changed = True
+
+        if structure_changed:
+            specs, _, pivots = _material_level_specs(
+                weekly,
+                daily,
+                PIPETTES[instrument.code],
+                strategy,
+                dataset,
+                completion,
+            )
+            _merge_material_specs(nodes, known_spec_keys, specs)
+            boundary_context = _context(completion, strategy, dataset)
+            bias = daily_bias(daily, pivots, boundary_context)
+            swing = supporting_swing(pivots, bias, boundary_context)
+        if structure_changed or not levels_initialized:
+            daily_by_completion = {item.completed_at: item for item in daily}
+            activation_index = _persist_material_levels(
+                nodes=nodes,
+                activation_index=activation_index,
+                daily_by_completion=daily_by_completion,
+                instrument=instrument,
+                strategy=strategy,
+                dataset=dataset,
+                ranges=ranges,
+                as_of=completion,
+            )
+            levels_initialized = True
 
         for candidate in tuple(pending):
             inactive = {
@@ -433,12 +570,10 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
             confirmation = confirm_sweep(
                 candidate.event,
                 h1,
-                (value for value in daily if value.completed_at <= candle.opened_at),
-                _context(candle.completed_at, strategy, dataset),
+                daily,
+                _context(completion, strategy, dataset),
                 attributed_level_inactive_at=inactive,
-                supporting_swings=(
-                    pivot for pivot in pivots if pivot.available_at <= candle.opened_at
-                ),
+                supporting_swings=pivots,
             )
             if confirmation.state != SetupTransition.State.TRIGGER_PENDING:
                 persist_confirmation(
@@ -446,7 +581,7 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
                     confirmation=confirmation,
                     evidence=_serializable(asdict(confirmation)),
                     required_ranges=ranges,
-                    as_of=as_of,
+                    as_of=completion,
                 )
                 if confirmation.state != SetupTransition.State.CONFIRMED:
                     pending.remove(candidate)
@@ -461,15 +596,7 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
         )
         created_setup = bool(existing_setup_ids)
         if previous is not None and not created_setup:
-            context = _context(candle.completed_at, strategy, dataset)
-            available_daily = tuple(
-                value for value in daily if value.completed_at <= candle.opened_at
-            )
-            visible_pivots = tuple(
-                pivot for pivot in pivots if pivot.available_at <= candle.opened_at
-            )
-            bias = daily_bias(available_daily, visible_pivots, context)
-            swing = supporting_swing(visible_pivots, bias, context)
+            context = _context(completion, strategy, dataset)
             active_nodes = [
                 node
                 for node in nodes[:activation_index]
@@ -499,10 +626,16 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
                         level_attributions={key: levels_by_key[key] for key in event.level_keys},
                         evidence=_setup_evidence(event),
                         required_ranges=ranges,
-                        as_of=as_of,
+                        as_of=completion,
                     )
                     consumed.update(event.level_keys)
-                    pending.append(_PendingSetup(event, setup))
+                    if (
+                        partition_boundary_censorship(
+                            setup_id=setup.pk, sweep_timestamp=setup.sweep_h1_timestamp
+                        )
+                        is None
+                    ):
+                        pending.append(_PendingSetup(event, setup))
                     existing_setup_ids.append(setup.pk)
                     created_setup = True
 
@@ -528,7 +661,7 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
                 "setup_ids": existing_setup_ids,
             },
             required_ranges=ranges,
-            as_of=as_of,
+            as_of=completion,
         )
         previous = candle
 
@@ -537,7 +670,7 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
         raise ValueError(f"S1 detector left unresolved TRIGGER_PENDING setups: {unresolved}")
 
 
-def _assert_complete_setup_lifecycle(dataset, strategy):
+def _assert_complete_setup_lifecycle(dataset, strategy, censored_setup_ids=frozenset()):
     setups = SetupEvent.objects.filter(
         dataset_version=dataset,
         strategy_version=strategy,
@@ -547,7 +680,11 @@ def _assert_complete_setup_lifecycle(dataset, strategy):
     for setup in setups:
         global_transition = setup.setuptransition_set.filter(book_identity="").first()
         if global_transition is None:
+            if setup.pk in censored_setup_ids:
+                continue
             raise ValueError("S1 detector lifecycle contains a TRIGGER_PENDING setup")
+        if setup.pk in censored_setup_ids:
+            raise ValueError("partition-censored setup has a strategy transition")
         if global_transition.to_state != SetupTransition.State.CONFIRMED:
             continue
         expected_books = set(books_for_setup(setup))
@@ -609,7 +746,26 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
             f"expected={len(expected)} observed={len(observed)} "
             f"missing={missing} unexpected={unexpected}"
         )
-    _assert_complete_setup_lifecycle(dataset, strategy)
+    setup_rows = SetupEvent.objects.filter(
+        dataset_version=dataset,
+        strategy_version=strategy,
+        sweep_h1_timestamp__gte=DEVELOPMENT_START.astimezone(UTC),
+        sweep_h1_timestamp__lt=DEVELOPMENT_END.astimezone(UTC),
+    ).values("pk", "sweep_h1_timestamp")
+    censored_evidence = sorted(
+        (
+            evidence
+            for row in setup_rows
+            if (
+                evidence := partition_boundary_censorship(
+                    setup_id=row["pk"], sweep_timestamp=row["sweep_h1_timestamp"]
+                )
+            )
+        ),
+        key=lambda row: row["setup_id"],
+    )
+    censored_setup_ids = frozenset(row["setup_id"] for row in censored_evidence)
+    _assert_complete_setup_lifecycle(dataset, strategy, censored_setup_ids)
 
     configuration = {
         "identity": S1_DETECTOR_JOB_NAME,
@@ -627,6 +783,8 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
         "expected_analysis_sha256": stable_hash(expected),
         "observed_analysis_count": len(observed),
         "observed_analysis_sha256": stable_hash(observed),
+        "partition_boundary_censored": censored_evidence,
+        "partition_boundary_censored_sha256": stable_hash(censored_evidence),
     }
     report = {**report_body, "report_sha256": stable_hash(report_body)}
     values = {
