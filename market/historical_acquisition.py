@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -19,11 +19,17 @@ from market.models import (
     Instrument,
     SourceRegistry,
 )
-from market.quality import expected_candle_timestamps, registered_candle_completion
+from market.quality import (
+    expected_candle_timestamps,
+    final_registered_completion_before,
+    registered_candle_completion,
+    validate_candles,
+)
 from market.services import DatasetQualityError, store_ingestion
 
 DEVELOPMENT_END = datetime(2019, 1, 1, tzinfo=ZoneInfo("America/New_York")).astimezone(UTC)
 INSTRUMENTS = ("AUD_USD", "EUR_GBP", "EUR_USD", "GBP_USD", "USD_CAD", "USD_JPY")
+STRATEGY_INSTRUMENTS = ("EUR_USD", "GBP_USD", "EUR_GBP", "USD_CAD", "USD_JPY", "AUD_USD")
 GRANULARITIES = ("D", "H1", "W")
 ALIGNMENT = {
     "timezone": "America/New_York",
@@ -31,6 +37,9 @@ ALIGNMENT = {
     "weekly_day": "Friday",
     "smooth": False,
 }
+PHASE1_SPEC_SHA256 = "47d0346bcf723cb78a71763df43f6b092b0c235bb1d17ccbe69f17d9550203cd"
+PHASE1_MANIFEST_SHA256 = "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
+PARTITION = {"name": "development", "start_year": 2010, "end_year": 2018}
 
 
 def stable_hash(payload):
@@ -74,15 +83,30 @@ def create_historical_dataset_plan(payload):
     if source.name != "OANDA v20" or not source.enabled:
         raise ValueError("historical plans require the enabled OANDA v20 source")
     strategy = source_plan_strategy(payload["strategy_version_id"])
-    if strategy.data_identity != payload["identity"]:
+    if (
+        strategy.data_identity != payload["identity"]
+        or strategy.data_identity != "oanda-ba-ny17-friday-v1"
+        or strategy.content_hash != PHASE1_MANIFEST_SHA256
+        or strategy.pair_metadata != {"instruments": list(STRATEGY_INSTRUMENTS)}
+    ):
         raise ValueError("historical plan identity must match the strategy data identity")
     parameter_manifest = strategy.strategyparametermanifest
+    if (
+        parameter_manifest.sha256 != PHASE1_MANIFEST_SHA256
+        or parameter_manifest.phase1_manifest_hash != PHASE1_MANIFEST_SHA256
+        or parameter_manifest.phase1_spec_hash != PHASE1_SPEC_SHA256
+    ):
+        raise ValueError("historical plan requires the exact approved Phase 1 artifacts")
     normalized_ranges = {}
     for granularity in GRANULARITIES:
         raw = payload["ranges"][granularity]
         if set(raw) != {"from", "to"}:
             raise ValueError("historical ranges require exactly from and to")
         start, end = parse_timestamp(raw["from"]), parse_timestamp(raw["to"])
+        if end != final_registered_completion_before(DEVELOPMENT_END, granularity):
+            raise ValueError(
+                f"historical {granularity} range must end at its final development completion"
+            )
         timestamps = expected_candle_timestamps(start, end, granularity)
         if registered_candle_completion(timestamps[-1], granularity) >= DEVELOPMENT_END:
             raise ValueError(
@@ -106,8 +130,8 @@ def create_historical_dataset_plan(payload):
         "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
         "complete_only": True,
         "chunk_size": chunk_size,
-        "phase1_spec_hash": parameter_manifest.phase1_spec_hash,
-        "phase1_manifest_hash": parameter_manifest.phase1_manifest_hash,
+        "phase1_spec_hash": PHASE1_SPEC_SHA256,
+        "phase1_manifest_hash": PHASE1_MANIFEST_SHA256,
     }
     digest = stable_hash(normalized)
     plan, created = HistoricalDatasetPlan.objects.get_or_create(
@@ -133,14 +157,25 @@ def create_historical_dataset_plan(payload):
     dataset_fields = payload["dataset"]
     if set(dataset_fields) != {"name", "version", "description"}:
         raise ValueError("dataset fields must be exactly name, version and description")
+    required_ranges = [
+        {
+            "instrument": code,
+            "granularity": granularity,
+            "start": normalized_ranges[granularity]["from"],
+            "end": normalized_ranges[granularity]["to"],
+        }
+        for code in INSTRUMENTS
+        for granularity in GRANULARITIES
+    ]
     dataset_manifest = {
-        "identity": payload["identity"],
+        "strategy_manifest_sha256": PHASE1_MANIFEST_SHA256,
+        "partition": PARTITION,
+        "required_ranges": required_ranges,
         "historical_plan_sha256": plan.sha256,
         "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
         "complete_only": True,
         "instruments": list(INSTRUMENTS),
         "granularities": list(GRANULARITIES),
-        "ranges": normalized_ranges,
         "alignment": ALIGNMENT,
     }
     dataset = DatasetVersion.objects.create(
@@ -256,7 +291,7 @@ def run_historical_chunk(logical_key, client):
         return attempt
     chunk, run = attempt.chunk, attempt.ingestion_run
     try:
-        candles, manifest = client.fetch_candles(
+        candles, manifest = client.fetch_historical_chunk(
             chunk.instrument.code,
             chunk.granularity,
             chunk.requested_from,
@@ -303,6 +338,7 @@ def _validate_chunk_response(chunk, candles, manifest):
         "alignmentTimezone": "America/New_York",
         "dailyAlignment": 17,
         "weeklyAlignment": "Friday",
+        "includeFirst": True,
     }
     if any(manifest.get(key) != value for key, value in required_manifest.items()):
         raise DatasetQualityError("provider manifest conflicts with the logical chunk")
@@ -316,6 +352,56 @@ def _validate_chunk_response(chunk, candles, manifest):
     )
     if tuple(item.timestamp for item in candles) != expected:
         raise DatasetQualityError("provider response does not exactly cover the logical chunk")
+    issues = validate_candles(candles, chunk.granularity, require_registered_alignment=True)
+    if issues:
+        raise DatasetQualityError(
+            "provider response contains invalid candles: "
+            + "; ".join(f"{issue.code}@{issue.index}" for issue in issues[:20])
+        )
+
+
+@transaction.atomic
+def resolve_stale_historical_attempt(attempt_id, stale_threshold, reason):
+    """Fail one explicitly selected stale RUNNING attempt; retry remains a separate action."""
+    if not isinstance(stale_threshold, timedelta) or stale_threshold <= timedelta(0):
+        raise ValueError("stale threshold must be a positive timedelta")
+    if not reason or not reason.strip():
+        raise ValueError("stale resolution requires a reason")
+    attempt = (
+        HistoricalIngestionAttempt.objects.select_for_update()
+        .select_related("chunk__dataset_version", "ingestion_run")
+        .get(pk=attempt_id)
+    )
+    chunk = HistoricalIngestionChunk.objects.select_for_update().get(pk=attempt.chunk_id)
+    run = IngestionRun.objects.select_for_update().get(pk=attempt.ingestion_run_id)
+    if DatasetRegistration.objects.filter(dataset_version=chunk.dataset_version).exists():
+        raise DatasetQualityError("registered datasets are sealed against recovery")
+    if run.status != IngestionRun.Status.RUNNING:
+        raise DatasetQualityError("stale recovery requires a RUNNING attempt")
+    cutoff = timezone.now() - stale_threshold
+    if run.started_at > cutoff:
+        raise DatasetQualityError("historical attempt is not stale")
+    run.status = IngestionRun.Status.FAILED
+    run.failure_reason = f"governed stale resolution: {reason.strip()}"
+    run.finished_at = timezone.now()
+    run.save()
+    from market.models import AuditEvent
+
+    AuditEvent.objects.create(
+        event_type="market.historical_attempt_stale_failed",
+        actor="market.historical_acquisition.resolve_stale_historical_attempt",
+        subject_type="HistoricalIngestionAttempt",
+        subject_id=str(attempt.pk),
+        payload={
+            "attempt_id": attempt.pk,
+            "ingestion_run_id": run.pk,
+            "logical_key": chunk.logical_key,
+            "stale_threshold_seconds": int(stale_threshold.total_seconds()),
+            "reason": reason.strip(),
+        },
+    )
+    attempt.ingestion_run = run
+    return attempt
 
 
 @transaction.atomic

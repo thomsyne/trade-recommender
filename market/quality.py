@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from django.utils import timezone
@@ -19,6 +19,30 @@ REGISTERED_STEPS = {
     "H4": timedelta(hours=4),
     "H1": timedelta(hours=1),
 }
+
+
+def final_registered_completion_before(boundary, granularity):
+    """Return the last frozen-calendar completion strictly before ``boundary``."""
+    if not timezone.is_aware(boundary) or granularity not in {"W", "D", "H1"}:
+        raise ValueError("boundary must be aware and granularity must be W, D or H1")
+    local_boundary = boundary.astimezone(NEW_YORK)
+    if granularity == "H1":
+        candidate = local_boundary - timedelta(hours=1)
+        while not _market_is_open(candidate - timedelta(hours=1)):
+            candidate -= timedelta(hours=1)
+        return candidate.astimezone(UTC)
+    if granularity == "D":
+        candidate = datetime.combine(local_boundary.date(), time(17), NEW_YORK)
+        if candidate >= local_boundary:
+            candidate -= timedelta(days=1)
+        while candidate.weekday() in {4, 5}:
+            candidate -= timedelta(days=1)
+        return candidate.astimezone(UTC)
+    candidate = datetime.combine(local_boundary.date(), time(17), NEW_YORK)
+    candidate -= timedelta(days=(candidate.weekday() - 4) % 7)
+    if candidate >= local_boundary:
+        candidate -= timedelta(weeks=1)
+    return candidate.astimezone(UTC)
 
 
 def registered_candle_completion(timestamp, granularity):

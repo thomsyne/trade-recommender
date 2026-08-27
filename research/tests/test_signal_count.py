@@ -275,9 +275,9 @@ class SignalCountFunctionalTests(TestCase):
             )
         instrument = instruments["EUR_USD"]
         range_specs = (
-            ("W", datetime(2009, 12, 18, 22, tzinfo=UTC), datetime(2019, 1, 4, 22, tzinfo=UTC)),
-            ("D", datetime(2009, 1, 4, 22, tzinfo=UTC), datetime(2019, 1, 1, 22, tzinfo=UTC)),
-            ("H1", datetime(2009, 12, 30, 5, tzinfo=UTC), datetime(2019, 1, 1, 5, tzinfo=UTC)),
+            ("W", datetime(2009, 12, 18, 22, tzinfo=UTC), datetime(2018, 12, 28, 22, tzinfo=UTC)),
+            ("D", datetime(2009, 1, 4, 22, tzinfo=UTC), datetime(2018, 12, 31, 22, tzinfo=UTC)),
+            ("H1", datetime(2009, 12, 30, 5, tzinfo=UTC), datetime(2019, 1, 1, 4, tzinfo=UTC)),
         )
         dataset = DatasetVersion.objects.create(
             name="bounded",
