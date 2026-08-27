@@ -1,5 +1,7 @@
 import hashlib
 import json
+from dataclasses import dataclass
+from datetime import datetime
 
 from django.db import transaction
 from django.utils import timezone
@@ -16,12 +18,23 @@ from market.models import (
     TechnicalSnapshot,
 )
 from market.oanda import manifest_hash
-from market.quality import validate_candles
+from market.quality import (
+    expected_candle_timestamps,
+    registered_candle_completion,
+    validate_candles,
+)
 from market.technicals import calculate_technicals
 
 
 class DatasetQualityError(ValueError):
     """Raised when a governed dataset cannot support deterministic analysis."""
+
+
+@dataclass(frozen=True, slots=True)
+class RequiredCandleRange:
+    granularity: str
+    start: datetime
+    end: datetime
 
 
 def assert_dataset_usable(dataset_version) -> None:
@@ -40,6 +53,66 @@ def assert_dataset_usable(dataset_version) -> None:
         raise DatasetQualityError("dataset candle ingestion lineage does not match")
     if candles.filter(ingestion_run__ingestion_manifest__isnull=True).exists():
         raise DatasetQualityError("dataset candle has no governed ingestion manifest")
+    if not candles.exists():
+        raise DatasetQualityError("dataset contains no governed candles")
+
+
+def assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of) -> None:
+    """Prove exact point-in-time coverage for one instrument across ingestion runs."""
+    assert_dataset_usable(dataset_version)
+    if not timezone.is_aware(as_of):
+        raise DatasetQualityError("as_of must be timezone-aware")
+    ranges = tuple(required_ranges)
+    if not ranges:
+        raise DatasetQualityError("at least one required candle range must be declared")
+    instrument_id = getattr(instrument, "pk", instrument)
+    for required in ranges:
+        try:
+            expected = expected_candle_timestamps(
+                required.start, required.end, required.granularity
+            )
+        except ValueError as error:
+            raise DatasetQualityError(str(error)) from error
+        if as_of < required.end:
+            raise DatasetQualityError("required candle range is incomplete at as_of")
+        rows = list(
+            dataset_version.candles.filter(
+                instrument_id=instrument_id,
+                granularity=required.granularity,
+                timestamp__gte=required.start,
+                timestamp__lt=required.end,
+            )
+            .order_by("timestamp")
+            .values(
+                "timestamp",
+                "complete",
+                "ingestion_run__instrument_id",
+                "ingestion_run__granularity",
+                "ingestion_run__requested_from",
+                "ingestion_run__requested_to",
+                "ingestion_run__status",
+                "ingestion_run__dataset_version_id",
+                "ingestion_run__ingestion_manifest__dataset_version_id",
+            )
+        )
+        if tuple(row["timestamp"] for row in rows) != expected:
+            raise DatasetQualityError(
+                f"dataset does not completely cover {required.granularity} range"
+            )
+        for row in rows:
+            completion = registered_candle_completion(row["timestamp"], required.granularity)
+            if (
+                not row["complete"]
+                or row["ingestion_run__instrument_id"] != instrument_id
+                or row["ingestion_run__granularity"] != required.granularity
+                or row["ingestion_run__requested_from"] > row["timestamp"]
+                or row["ingestion_run__requested_to"] < completion
+                or row["ingestion_run__status"] != IngestionRun.Status.SUCCEEDED
+                or row["ingestion_run__dataset_version_id"] != dataset_version.pk
+                or row["ingestion_run__ingestion_manifest__dataset_version_id"]
+                != dataset_version.pk
+            ):
+                raise DatasetQualityError("required candle has invalid ingestion lineage")
 
 
 @transaction.atomic

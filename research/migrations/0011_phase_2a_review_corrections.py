@@ -100,26 +100,41 @@ def populate_registered_identities(apps, schema_editor):
     EntryEligibilityEvaluation = apps.get_model("research", "EntryEligibilityEvaluation")
     SetupLevelAttribution = apps.get_model("research", "SetupLevelAttribution")
 
-    for analysis in AnalysisRun.objects.select_related("strategy_version"):
+    retained_analyses = {}
+    for analysis in AnalysisRun.objects.select_related("strategy_version").order_by("pk"):
         analysis.detector_version = analysis.strategy_version.detector_version
-        analysis.save(update_fields=("detector_version",))
+        key = (
+            analysis.instrument_id,
+            analysis.completed_h1_timestamp,
+            analysis.detector_version,
+            analysis.dataset_version_id,
+        )
+        retained = retained_analyses.get(key)
+        if retained:
+            if (retained.result, retained.evidence_hash) != (
+                analysis.result,
+                analysis.evidence_hash,
+            ):
+                raise RuntimeError(
+                    "existing AnalysisRun rows conflict under detector-version identity"
+                )
+            analysis.delete()
+        else:
+            analysis.save(update_fields=("detector_version",))
+            retained_analyses[key] = analysis
 
-    for transition in SetupTransition.objects.select_related("setup__strategy_version"):
+    entry_transitions = {}
+    for transition in SetupTransition.objects.select_related("setup__strategy_version").order_by(
+        "pk"
+    ):
         setup = transition.setup
+        if transition.from_state == "CONFIRMED":
+            entry_transitions.setdefault(setup.pk, []).append(transition)
+            continue
         transition.strategy_version_id = setup.strategy_version_id
         transition.dataset_version_id = setup.dataset_version_id
         transition.execution_identity = setup.strategy_version.execution_identity
         transition.decision_at = transition.effective_at
-        if transition.from_state == "CONFIRMED":
-            candidates = EntryEligibilityEvaluation.objects.filter(
-                setup_id=setup.pk,
-                decision=transition.to_state,
-            )
-            if candidates.count() != 1:
-                raise RuntimeError(
-                    "cannot unambiguously assign a book to an existing entry transition"
-                )
-            transition.book_identity = candidates.get().book_identity
         transition.save(
             update_fields=(
                 "strategy_version",
@@ -129,6 +144,57 @@ def populate_registered_identities(apps, schema_editor):
                 "book_identity",
             )
         )
+
+    setup_ids = set(entry_transitions) | set(
+        EntryEligibilityEvaluation.objects.values_list("setup_id", flat=True)
+    )
+    for setup_id in sorted(setup_ids):
+        transitions = entry_transitions.get(setup_id, [])
+        evaluations = list(
+            EntryEligibilityEvaluation.objects.filter(setup_id=setup_id).order_by(
+                "book_identity", "pk"
+            )
+        )
+        sources_by_decision = {}
+        for transition in transitions:
+            retained = sources_by_decision.get(transition.to_state)
+            if retained and (
+                retained.effective_at,
+                retained.evidence,
+                retained.evidence_hash,
+                retained.reason,
+                retained.job_run_id,
+            ) != (
+                transition.effective_at,
+                transition.evidence,
+                transition.evidence_hash,
+                transition.reason,
+                transition.job_run_id,
+            ):
+                raise RuntimeError("existing entry transition evidence is ambiguous")
+            sources_by_decision.setdefault(transition.to_state, transition)
+        if set(sources_by_decision) != {evaluation.decision for evaluation in evaluations}:
+            raise RuntimeError("existing entry transitions do not match eligibility evaluations")
+
+        SetupTransition.objects.filter(setup_id=setup_id, from_state="CONFIRMED").delete()
+        for evaluation in evaluations:
+            source = sources_by_decision[evaluation.decision]
+            setup = source.setup
+            SetupTransition.objects.create(
+                setup_id=setup_id,
+                book_identity=evaluation.book_identity,
+                from_state="CONFIRMED",
+                to_state=source.to_state,
+                effective_at=source.effective_at,
+                decision_at=source.effective_at,
+                evidence=source.evidence,
+                evidence_hash=source.evidence_hash,
+                reason=source.reason,
+                strategy_version_id=setup.strategy_version_id,
+                dataset_version_id=setup.dataset_version_id,
+                execution_identity=setup.strategy_version.execution_identity,
+                job_run_id=source.job_run_id,
+            )
 
     for setup in apps.get_model("research", "SetupEvent").objects.all():
         setup.attribution_keys = sorted(
@@ -147,6 +213,8 @@ def populate_registered_identities(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    atomic = False
+
     dependencies = [
         ("market", "0008_reject_governed_candle_promotion"),
         ("research", "0010_phase_2a_append_only_triggers"),
@@ -238,7 +306,11 @@ class Migration(migrations.Migration):
             name="risk_per_unit_quote",
             field=models.DecimalField(blank=True, decimal_places=10, max_digits=20, null=True),
         ),
-        migrations.RunPython(populate_registered_identities, migrations.RunPython.noop),
+        migrations.RunPython(
+            populate_registered_identities,
+            migrations.RunPython.noop,
+            atomic=True,
+        ),
         migrations.AlterField(
             model_name="analysisrun",
             name="detector_version",

@@ -8,7 +8,7 @@ from dataclasses import asdict
 
 from django.db import transaction
 
-from market.services import DatasetQualityError, assert_dataset_usable
+from market.services import DatasetQualityError, assert_dataset_window_usable
 from research.models import (
     AnalysisRun,
     EntryEligibilityEvaluation,
@@ -34,7 +34,10 @@ def evidence_hash(value) -> str:
 
 
 @transaction.atomic
-def persist_level(*, instrument, strategy_version, dataset_version, spec: LevelSpec) -> Level:
+def persist_level(
+    *, instrument, strategy_version, dataset_version, spec: LevelSpec, required_ranges, as_of
+) -> Level:
+    assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     values = {
         "family": spec.family,
         "role": spec.role.value,
@@ -66,10 +69,18 @@ def persist_level(*, instrument, strategy_version, dataset_version, spec: LevelS
 
 @transaction.atomic
 def persist_analysis(
-    *, instrument, strategy_version, dataset_version, completed_h1_timestamp, result, evidence
+    *,
+    instrument,
+    strategy_version,
+    dataset_version,
+    completed_h1_timestamp,
+    result,
+    evidence,
+    required_ranges,
+    as_of,
 ) -> AnalysisRun:
     try:
-        assert_dataset_usable(dataset_version)
+        assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     except DatasetQualityError:
         if result != AnalysisRun.Result.DATA_INCOMPLETE:
             raise
@@ -98,8 +109,10 @@ def persist_setup(
     event: SweepEvent,
     level_attributions,
     evidence,
+    required_ranges,
+    as_of,
 ) -> SetupEvent:
-    assert_dataset_usable(dataset_version)
+    assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     if set(event.level_keys) != set(level_attributions):
         raise ValueError("setup attributions do not match deterministic sweep keys")
     expected_role = Level.Role.SUPPORT if event.side.value == "long" else Level.Role.RESISTANCE
@@ -210,7 +223,13 @@ def _persist_single_outgoing_transition(setup, *, from_state, values):
 
 @transaction.atomic
 def persist_confirmation(
-    *, setup: SetupEvent, confirmation: Confirmation, evidence, job_run=None
+    *,
+    setup: SetupEvent,
+    confirmation: Confirmation,
+    evidence,
+    required_ranges,
+    as_of,
+    job_run=None,
 ) -> SetupTransition | None:
     if confirmation.state == SetupTransition.State.TRIGGER_PENDING:
         return None
@@ -223,7 +242,9 @@ def persist_confirmation(
         raise ValueError("unsupported Phase 2A confirmation state")
     setup = SetupEvent.objects.select_for_update().get(pk=setup.pk)
     try:
-        assert_dataset_usable(setup.dataset_version)
+        assert_dataset_window_usable(
+            setup.dataset_version, setup.instrument, required_ranges, as_of
+        )
     except DatasetQualityError:
         if confirmation.state != SetupTransition.State.CANCELLED_DATA_QUALITY:
             raise
@@ -252,12 +273,16 @@ def persist_entry_evaluation(
     opening: EntryOpen | None,
     target_level: Level | None,
     evidence,
+    required_ranges,
+    as_of,
     job_run=None,
     expected_entry_timestamp=None,
 ) -> EntryEligibilityEvaluation:
     setup = SetupEvent.objects.select_for_update().get(pk=setup.pk)
     try:
-        assert_dataset_usable(setup.dataset_version)
+        assert_dataset_window_usable(
+            setup.dataset_version, setup.instrument, required_ranges, as_of
+        )
     except DatasetQualityError:
         if result.decision != EntryEligibilityEvaluation.Decision.CANCELLED_DATA_QUALITY:
             raise
@@ -277,8 +302,21 @@ def persist_entry_evaluation(
         or target_level.instrument_id != setup.instrument_id
         or target_level.strategy_version_id != setup.strategy_version_id
         or target_level.dataset_version_id != setup.dataset_version_id
+        or target_level.role
+        != (
+            Level.Role.RESISTANCE
+            if setup.direction == SetupEvent.Direction.LONG
+            else Level.Role.SUPPORT
+        )
+        or target_level.stable_key != result.target_key
+        or result.target
+        != (
+            target_level.zone_lower
+            if setup.direction == SetupEvent.Direction.LONG
+            else target_level.zone_upper
+        )
     ):
-        raise ValueError("target level lineage does not match setup")
+        raise ValueError("target identity, boundary, or lineage does not match entry result")
     defaults = {
         "decision": result.decision,
         "terminal_reason": result.reason,
@@ -293,6 +331,7 @@ def persist_entry_evaluation(
         "conversion_identity": result.conversion_identity if permitted else "",
         "risk_per_unit_cad": result.risk_per_unit_cad if permitted else None,
         "target_level": target_level if permitted else None,
+        "target_stable_key": result.target_key if permitted else "",
         "evidence": evidence,
         "evidence_hash": evidence_hash(evidence),
     }

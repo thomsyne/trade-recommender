@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 from django.test import SimpleTestCase
 
-from market.quality import validate_candles
+from market.quality import expected_candle_timestamps, validate_candles
 from market.tests.factories import candle
 
 
@@ -85,3 +85,22 @@ class CandleQualityTests(SimpleTestCase):
                     validate_candles(candles, granularity, require_registered_alignment=True),
                     [],
                 )
+
+    def test_required_daily_and_weekly_ranges_preserve_new_york_dst_alignment(self):
+        new_york = ZoneInfo("America/New_York")
+        daily_start = datetime(2026, 3, 5, 17, tzinfo=new_york).astimezone(UTC)
+        daily_end = datetime(2026, 3, 9, 17, tzinfo=new_york).astimezone(UTC)
+        weekly_start = datetime(2026, 3, 6, 17, tzinfo=new_york).astimezone(UTC)
+        weekly_end = datetime(2026, 3, 13, 17, tzinfo=new_york).astimezone(UTC)
+
+        self.assertEqual(
+            expected_candle_timestamps(daily_start, daily_end, "D"),
+            (
+                daily_start,
+                datetime(2026, 3, 8, 17, tzinfo=new_york).astimezone(UTC),
+            ),
+        )
+        self.assertEqual(
+            expected_candle_timestamps(weekly_start, weekly_end, "W"),
+            (weekly_start,),
+        )

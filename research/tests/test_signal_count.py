@@ -9,6 +9,7 @@ from market.services import store_ingestion
 from market.tests.factories import candle
 from research.models import (
     EntryEligibilityEvaluation,
+    JobRun,
     Level,
     SetupEvent,
     SetupTransition,
@@ -20,6 +21,7 @@ from research.signal_count import (
     SIGNAL_COUNT_IDENTITY,
     ReturnBlindViolation,
     SignalCountOutput,
+    _s1_evaluation_queryset,
     enforce_price_cutoff,
     generate_spread_ceilings,
     read_entry_projection,
@@ -50,7 +52,11 @@ class SignalCountBoundaryTests(SimpleTestCase):
                 fields=ENTRY_FIELDS,
             )
         row = {"timestamp": timestamp, "bid_open": Decimal("1.1"), "ask_open": Decimal("1.2")}
-        with patch("research.signal_count.Candle.objects") as objects:
+        with (
+            patch("research.signal_count.DatasetVersion.objects.get"),
+            patch("research.signal_count.assert_dataset_window_usable"),
+            patch("research.signal_count.Candle.objects") as objects,
+        ):
             objects.filter.return_value.values.return_value.get.return_value = row
             projection = read_entry_projection(
                 dataset_id=1,
@@ -111,6 +117,16 @@ class SignalCountFunctionalTests(TestCase):
             name="bounded",
             version="1",
             source=source,
+            manifest={
+                "required_ranges": [
+                    {
+                        "instrument": "EUR_USD",
+                        "granularity": "H1",
+                        "start": entry_at.isoformat(),
+                        "end": (entry_at + timedelta(hours=1)).isoformat(),
+                    }
+                ]
+            },
             manifest_sha256="1" * 64,
         )
         store_ingestion(
@@ -188,12 +204,35 @@ class SignalCountFunctionalTests(TestCase):
             conversion_identity="USD_CAD@entry",
             risk_per_unit_cad=Decimal("0.01377"),
             target_level=level,
+            target_stable_key=level.stable_key,
             evidence_hash="6" * 64,
         )
 
-        output = run_s1(dataset_id=dataset.pk, maximum_setups=1)
+        output = run_s1(
+            dataset_id=dataset.pk,
+            strategy_version_id=strategy.pk,
+            maximum_setups=1,
+            as_of=entry_at + timedelta(hours=1),
+        )
 
         self.assertEqual(output.counts["physical_setups_processed"], 1)
         self.assertEqual(output.counts["eligibility_evaluations_processed"], 1)
         self.assertEqual(output.counts["entry_eligible"], 1)
         self.assertEqual(output.coverage["entry_projections_read"], 1)
+        job = JobRun.objects.get(job_name="failed-break-signal-count-s1")
+        self.assertEqual(job.evidence["report_sha256"], output.report_sha256)
+
+    def test_s1_evaluation_query_projects_no_frozen_price_risk_or_evidence_fields(self):
+        sql = str(_s1_evaluation_queryset([0]).query)
+
+        for forbidden_column in (
+            "stop_price",
+            "target_price",
+            "reward_risk",
+            "risk_per_unit_quote",
+            "conversion_rate_to_cad",
+            "risk_per_unit_cad",
+            "evidence",
+        ):
+            with self.subTest(forbidden_column=forbidden_column):
+                self.assertNotIn(forbidden_column, sql)

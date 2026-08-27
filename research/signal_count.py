@@ -10,13 +10,21 @@ import hashlib
 import json
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 
-from market.models import Candle, DatasetVersion, IngestionRun
-from market.services import assert_dataset_usable
-from research.models import EntryEligibilityEvaluation, SetupEvent
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
+
+from market.models import Candle, DatasetVersion, IngestionRun, Instrument
+from market.services import RequiredCandleRange, assert_dataset_window_usable
+from research.models import (
+    EntryEligibilityEvaluation,
+    JobRun,
+    SetupEvent,
+    StrategyVersion,
+)
 
 SIGNAL_COUNT_IDENTITY = "failed-break-signal-count-v1"
 ENTRY_FIELDS = frozenset({"timestamp", "bid_open", "ask_open"})
@@ -56,7 +64,20 @@ S1_COUNT_FIELDS = frozenset(
     }
 )
 S1_COVERAGE_FIELDS = frozenset(
-    {"dataset_id", "bounded", "maximum_setups", "entry_projections_read"}
+    {
+        "dataset_id",
+        "strategy_version_id",
+        "as_of",
+        "bounded",
+        "maximum_setups",
+        "entry_projections_read",
+    }
+)
+S1_EVALUATION_FIELDS = (
+    "setup_id",
+    "setup__instrument_id",
+    "decision",
+    "entry_timestamp",
 )
 
 
@@ -82,6 +103,20 @@ def read_entry_projection(
         )
     if as_of < theoretical_entry_timestamp + timedelta(hours=1):
         raise ReturnBlindViolation("entry H1 candle has not completed as of the requested time")
+
+    dataset = DatasetVersion.objects.get(pk=dataset_id)
+    assert_dataset_window_usable(
+        dataset,
+        instrument_id,
+        (
+            RequiredCandleRange(
+                "H1",
+                theoretical_entry_timestamp,
+                theoretical_entry_timestamp + timedelta(hours=1),
+            ),
+        ),
+        as_of,
+    )
 
     row = (
         Candle.objects.filter(
@@ -126,6 +161,7 @@ class SignalCountOutput:
     counts: Mapping[str, int]
     coverage: Mapping[str, object]
     configuration_sha256: str
+    report_sha256: str = field(init=False)
 
     def __post_init__(self):
         if self.identity != SIGNAL_COUNT_IDENTITY or self.stage not in {"S0", "S1"}:
@@ -136,6 +172,19 @@ class SignalCountOutput:
             raise ReturnBlindViolation("signal-count output does not match the registered schema")
         if any(type(value) is not int or value < 0 for value in self.counts.values()):
             raise ReturnBlindViolation("signal-count values must be non-negative integers")
+        object.__setattr__(
+            self,
+            "report_sha256",
+            stable_hash(
+                {
+                    "identity": self.identity,
+                    "stage": self.stage,
+                    "counts": self.counts,
+                    "coverage": self.coverage,
+                    "configuration_sha256": self.configuration_sha256,
+                }
+            ),
+        )
         _assert_return_blind(asdict(self))
 
     def as_dict(self):
@@ -162,22 +211,66 @@ def generate_spread_ceilings(
     return ceilings
 
 
-def run_s1(*, dataset_id: int, maximum_setups: int) -> SignalCountOutput:
+def _declared_required_ranges(dataset):
+    raw_ranges = dataset.manifest.get("required_ranges")
+    if not isinstance(raw_ranges, list) or not raw_ranges:
+        raise ReturnBlindViolation("dataset manifest must declare bounded required_ranges")
+    grouped = {}
+    for item in raw_ranges:
+        try:
+            instrument = str(item["instrument"])
+            granularity = str(item["granularity"])
+            start = parse_datetime(item["start"])
+            end = parse_datetime(item["end"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ReturnBlindViolation("invalid dataset required_ranges declaration") from error
+        if (
+            start is None
+            or end is None
+            or not timezone.is_aware(start)
+            or not timezone.is_aware(end)
+        ):
+            raise ReturnBlindViolation("dataset required_ranges timestamps must be timezone-aware")
+        grouped.setdefault(instrument, []).append(RequiredCandleRange(granularity, start, end))
+    return grouped
+
+
+def _s1_evaluation_queryset(setup_ids):
+    return (
+        EntryEligibilityEvaluation.objects.filter(setup_id__in=setup_ids)
+        .order_by("setup__sweep_h1_timestamp", "setup_id", "book_identity")
+        .values(*S1_EVALUATION_FIELDS)
+    )
+
+
+def run_s1(
+    *, dataset_id: int, strategy_version_id: int, maximum_setups: int, as_of
+) -> SignalCountOutput:
     """Count bounded persisted eligibility facts without importing post-entry execution code."""
     if maximum_setups < 1:
         raise ValueError("maximum_setups must be positive")
+    if not timezone.is_aware(as_of):
+        raise ValueError("as_of must be timezone-aware")
     dataset = DatasetVersion.objects.get(pk=dataset_id)
-    assert_dataset_usable(dataset)
+    strategy = StrategyVersion.objects.get(pk=strategy_version_id)
+    ranges_by_instrument = _declared_required_ranges(dataset)
+    instruments_by_code = {
+        instrument.code: instrument
+        for instrument in Instrument.objects.filter(code__in=ranges_by_instrument)
+    }
+    if set(instruments_by_code) != set(ranges_by_instrument):
+        raise ReturnBlindViolation("dataset required_ranges references an unknown instrument")
+    for code, ranges in ranges_by_instrument.items():
+        assert_dataset_window_usable(dataset, instruments_by_code[code], ranges, as_of)
+    ranges_by_instrument_id = {
+        instruments_by_code[code].pk: ranges for code, ranges in ranges_by_instrument.items()
+    }
     setup_ids = list(
-        SetupEvent.objects.filter(dataset_version=dataset)
+        SetupEvent.objects.filter(dataset_version=dataset, strategy_version=strategy)
         .order_by("sweep_h1_timestamp", "pk")
         .values_list("pk", flat=True)[:maximum_setups]
     )
-    evaluations = list(
-        EntryEligibilityEvaluation.objects.filter(setup_id__in=setup_ids)
-        .select_related("setup")
-        .order_by("setup__sweep_h1_timestamp", "setup_id", "book_identity")
-    )
+    evaluations = list(_s1_evaluation_queryset(setup_ids))
     counts = {field: 0 for field in S1_COUNT_FIELDS}
     counts["physical_setups_processed"] = len(setup_ids)
     projections_read = 0
@@ -193,28 +286,68 @@ def run_s1(*, dataset_id: int, maximum_setups: int) -> SignalCountOutput:
     }
     for evaluation in evaluations:
         counts["eligibility_evaluations_processed"] += 1
-        counts[decision_fields[evaluation.decision]] += 1
-        if evaluation.decision == EntryEligibilityEvaluation.Decision.ENTRY_PENDING:
-            projection_key = (evaluation.setup.instrument_id, evaluation.entry_timestamp)
+        counts[decision_fields[evaluation["decision"]]] += 1
+        if evaluation["decision"] == EntryEligibilityEvaluation.Decision.ENTRY_PENDING:
+            projection_key = (
+                evaluation["setup__instrument_id"],
+                evaluation["entry_timestamp"],
+            )
+            entry_ranges = ranges_by_instrument_id.get(evaluation["setup__instrument_id"], ())
+            if not any(
+                required.granularity == "H1"
+                and required.start <= evaluation["entry_timestamp"]
+                and evaluation["entry_timestamp"] + timedelta(hours=1) <= required.end
+                for required in entry_ranges
+            ):
+                raise ReturnBlindViolation("entry projection is outside the frozen S1 range")
             if projection_key not in projected_entries:
                 read_entry_projection(
                     dataset_id=dataset.pk,
-                    instrument_id=evaluation.setup.instrument_id,
-                    theoretical_entry_timestamp=evaluation.entry_timestamp,
-                    as_of=evaluation.entry_timestamp + timedelta(hours=1),
+                    instrument_id=evaluation["setup__instrument_id"],
+                    theoretical_entry_timestamp=evaluation["entry_timestamp"],
+                    as_of=evaluation["entry_timestamp"] + timedelta(hours=1),
                 )
                 projected_entries.add(projection_key)
                 projections_read += 1
-    configuration = {"dataset_id": dataset.pk, "maximum_setups": maximum_setups}
-    return SignalCountOutput(
+    configuration = {
+        "dataset_id": dataset.pk,
+        "dataset_manifest_sha256": dataset.manifest_sha256,
+        "strategy_version_id": strategy.pk,
+        "strategy_content_hash": strategy.content_hash,
+        "maximum_setups": maximum_setups,
+        "as_of": as_of,
+    }
+    output = SignalCountOutput(
         SIGNAL_COUNT_IDENTITY,
         "S1",
         counts,
         {
             "dataset_id": dataset.pk,
+            "strategy_version_id": strategy.pk,
+            "as_of": as_of.isoformat(),
             "bounded": True,
             "maximum_setups": maximum_setups,
             "entry_projections_read": projections_read,
         },
         stable_hash(configuration),
     )
+    values = {
+        "job_name": "failed-break-signal-count-s1",
+        "strategy_version": strategy,
+        "dataset_version": dataset,
+        "config_hash": output.configuration_sha256,
+        "as_of": as_of,
+        "status": JobRun.Status.SUCCEEDED,
+        "evidence": {
+            "report_sha256": output.report_sha256,
+            "counts": output.counts,
+            "coverage": output.coverage,
+        },
+    }
+    job, created = JobRun.objects.get_or_create(
+        idempotency_key=f"s1:{strategy.pk}:{dataset.pk}:{output.configuration_sha256}",
+        defaults=values,
+    )
+    if not created and any(getattr(job, name) != value for name, value in values.items()):
+        raise ValueError("S1 run key resolved to different immutable content")
+    return output

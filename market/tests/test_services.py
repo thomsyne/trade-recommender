@@ -15,7 +15,13 @@ from market.models import (
     SourceRegistry,
     TechnicalSnapshot,
 )
-from market.services import store_ingestion
+from market.services import (
+    DatasetQualityError,
+    RequiredCandleRange,
+    assert_dataset_usable,
+    assert_dataset_window_usable,
+    store_ingestion,
+)
 from market.tests.factories import candle
 
 
@@ -65,6 +71,82 @@ class IngestionServiceTests(TestCase):
         self.assertEqual(run.status, IngestionRun.Status.FAILED)
         self.assertEqual(Candle.objects.count(), 0)
         self.assertIn("incomplete_candle", run.failure_reason)
+
+    def test_empty_governed_dataset_is_not_usable(self):
+        dataset = DatasetVersion.objects.create(
+            name="empty",
+            version="1",
+            source=self.source,
+            manifest_sha256="e" * 64,
+        )
+
+        with self.assertRaisesMessage(DatasetQualityError, "no governed candles"):
+            assert_dataset_usable(dataset)
+
+    def test_required_range_detects_gap_across_successful_manifests(self):
+        dataset = DatasetVersion.objects.create(
+            name="cross-manifest-gap",
+            version="1",
+            source=self.source,
+            manifest_sha256="g" * 64,
+        )
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        for index, timestamp in enumerate((start, start + timedelta(hours=2))):
+            run = store_ingestion(
+                self.source,
+                self.instrument,
+                "H1",
+                timestamp,
+                timestamp + timedelta(hours=1),
+                [candle(timestamp)],
+                {"batch": index},
+                dataset_version=dataset,
+            )
+            self.assertEqual(run.status, IngestionRun.Status.SUCCEEDED)
+
+        with self.assertRaisesMessage(DatasetQualityError, "does not completely cover"):
+            assert_dataset_window_usable(
+                dataset,
+                self.instrument,
+                (RequiredCandleRange("H1", start, start + timedelta(hours=3)),),
+                start + timedelta(hours=3),
+            )
+
+    def test_required_ranges_are_instrument_timeframe_and_as_of_specific(self):
+        dataset = DatasetVersion.objects.create(
+            name="bounded-window",
+            version="1",
+            source=self.source,
+            manifest_sha256="w" * 64,
+        )
+        start = datetime(2026, 1, 5, tzinfo=UTC)
+        store_ingestion(
+            self.source,
+            self.instrument,
+            "H1",
+            start,
+            start + timedelta(hours=2),
+            [candle(start), candle(start + timedelta(hours=1))],
+            {"bounded": True},
+            dataset_version=dataset,
+        )
+        complete_range = (RequiredCandleRange("H1", start, start + timedelta(hours=2)),)
+
+        assert_dataset_window_usable(
+            dataset, self.instrument, complete_range, start + timedelta(hours=2)
+        )
+        with self.assertRaisesMessage(DatasetQualityError, "incomplete at as_of"):
+            assert_dataset_window_usable(
+                dataset, self.instrument, complete_range, start + timedelta(hours=1)
+            )
+        with self.assertRaisesMessage(DatasetQualityError, "does not completely cover"):
+            daily_start = datetime(2026, 1, 4, 22, tzinfo=UTC)
+            assert_dataset_window_usable(
+                dataset,
+                self.instrument,
+                (RequiredCandleRange("D", daily_start, daily_start + timedelta(days=1)),),
+                daily_start + timedelta(days=1),
+            )
 
     def test_real_ingestion_replaces_development_fixtures(self):
         self.source.name = "Development fixtures"

@@ -605,6 +605,7 @@ class EntryEligibilityEvaluation(ImmutableRecord):
     target_level = models.ForeignKey(
         Level, on_delete=models.PROTECT, null=True, blank=True, related_name="entry_evaluations"
     )
+    target_stable_key = models.CharField(max_length=64, blank=True)
     evidence = models.JSONField(default=dict)
     evidence_hash = models.CharField(max_length=64)
 
@@ -629,6 +630,7 @@ class EntryEligibilityEvaluation(ImmutableRecord):
                         conversion_identity__gt="",
                         risk_per_unit_cad__isnull=False,
                         target_level__isnull=False,
+                        target_stable_key__gt="",
                     )
                     | models.Q(
                         decision__in=(
@@ -651,6 +653,7 @@ class EntryEligibilityEvaluation(ImmutableRecord):
                         conversion_identity="",
                         risk_per_unit_cad__isnull=True,
                         target_level__isnull=True,
+                        target_stable_key="",
                     )
                 ),
                 name="eligibility_fields_match_decision",
