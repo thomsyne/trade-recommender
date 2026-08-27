@@ -18,6 +18,67 @@ TABLES = (
 )
 
 
+def preflight_registered_identities(apps, schema_editor):
+    AnalysisRun = apps.get_model("research", "AnalysisRun")
+    SetupTransition = apps.get_model("research", "SetupTransition")
+    EntryEligibilityEvaluation = apps.get_model("research", "EntryEligibilityEvaluation")
+
+    analyses = {}
+    for analysis in AnalysisRun.objects.select_related("strategy_version").order_by("pk"):
+        key = (
+            analysis.instrument_id,
+            analysis.completed_h1_timestamp,
+            analysis.strategy_version.detector_version,
+            analysis.dataset_version_id,
+        )
+        retained = analyses.get(key)
+        if retained and (retained.result, retained.evidence_hash) != (
+            analysis.result,
+            analysis.evidence_hash,
+        ):
+            raise RuntimeError("AnalysisRun rows conflict under detector-version identity")
+        analyses.setdefault(key, analysis)
+
+    if EntryEligibilityEvaluation.objects.filter(decision="ENTRY_PENDING").exists():
+        raise RuntimeError(
+            "existing ENTRY_PENDING evaluations lack registered CAD conversion evidence; "
+            "prove the Phase 2A tables empty or migrate that evidence explicitly"
+        )
+
+    transitions_by_setup = {}
+    for transition in SetupTransition.objects.filter(from_state="CONFIRMED").order_by("pk"):
+        transitions_by_setup.setdefault(transition.setup_id, []).append(transition)
+    setup_ids = set(transitions_by_setup) | set(
+        EntryEligibilityEvaluation.objects.values_list("setup_id", flat=True)
+    )
+    for setup_id in setup_ids:
+        sources = {}
+        for transition in transitions_by_setup.get(setup_id, []):
+            retained = sources.get(transition.to_state)
+            if retained and (
+                retained.effective_at,
+                retained.evidence,
+                retained.evidence_hash,
+                retained.reason,
+                retained.job_run_id,
+            ) != (
+                transition.effective_at,
+                transition.evidence,
+                transition.evidence_hash,
+                transition.reason,
+                transition.job_run_id,
+            ):
+                raise RuntimeError("existing entry transition evidence is ambiguous")
+            sources.setdefault(transition.to_state, transition)
+        decisions = set(
+            EntryEligibilityEvaluation.objects.filter(setup_id=setup_id).values_list(
+                "decision", flat=True
+            )
+        )
+        if set(sources) != decisions:
+            raise RuntimeError("existing entry transitions do not match eligibility evaluations")
+
+
 def drop_append_only_triggers(apps, schema_editor):
     if schema_editor.connection.vendor != "postgresql":
         return
@@ -220,6 +281,11 @@ class Migration(migrations.Migration):
         ("research", "0010_phase_2a_append_only_triggers"),
     ]
     operations = [
+        migrations.RunPython(
+            preflight_registered_identities,
+            migrations.RunPython.noop,
+            atomic=True,
+        ),
         migrations.RunPython(drop_append_only_triggers, restore_original_append_only_triggers),
         migrations.RemoveConstraint(
             model_name="analysisrun",
