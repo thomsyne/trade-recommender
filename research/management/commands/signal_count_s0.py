@@ -1,53 +1,33 @@
 import json
-from decimal import Decimal
 
 from django.core.management.base import BaseCommand, CommandError
+from django.utils.dateparse import parse_datetime
 
-from research.signal_count import (
-    SIGNAL_COUNT_IDENTITY,
-    SignalCountOutput,
-    generate_spread_ceilings,
-    stable_hash,
-)
+from research.signal_count import run_s0
 
 
 class Command(BaseCommand):
-    help = "Plan return-blind S0, or calculate bounded deterministic synthetic spread ceilings"
+    help = "Register a bounded, dataset-backed, return-blind S0 spread audit"
 
     def add_arguments(self, parser):
-        parser.add_argument("--synthetic-spreads", help='JSON object, e.g. {"EUR_USD/NY":[0.1]}')
-        parser.add_argument("--pipettes", help='JSON object, e.g. {"EUR_USD/NY":0.00001}')
-        parser.add_argument("--max-observations", type=int, default=10_000)
+        parser.add_argument("--dataset-id", type=int, required=True)
+        parser.add_argument("--strategy-version-id", type=int, required=True)
+        parser.add_argument("--as-of", required=True)
+        parser.add_argument("--max-observations", type=int, default=1_000_000)
 
     def handle(self, *args, **options):
-        raw = options["synthetic_spreads"]
-        if not raw:
-            self.stdout.write(
-                "DRY RUN: S0 is bounded; no dataset read, download, or freeze performed"
+        try:
+            as_of = parse_datetime(options["as_of"])
+            if as_of is None:
+                raise ValueError("--as-of must be an ISO-8601 timestamp")
+            output, job = run_s0(
+                dataset_id=options["dataset_id"],
+                strategy_version_id=options["strategy_version_id"],
+                maximum_observations=options["max_observations"],
+                as_of=as_of,
             )
-            return
-        try:
-            supplied = json.loads(raw, parse_float=Decimal)
-            pipettes = json.loads(options["pipettes"] or "{}", parse_float=Decimal)
-            if not isinstance(supplied, dict) or not isinstance(pipettes, dict):
-                raise ValueError
-            total = sum(len(values) for values in supplied.values())
-        except (TypeError, ValueError, json.JSONDecodeError) as error:
-            raise CommandError(
-                "synthetic spreads must be a JSON object of numeric arrays"
-            ) from error
-        if total > options["max_observations"]:
-            raise CommandError("synthetic input exceeds --max-observations")
-        try:
-            ceilings = generate_spread_ceilings(supplied, pipettes)
         except ValueError as error:
             raise CommandError(str(error)) from error
-        config = {"source": "synthetic", "maximum_observations": options["max_observations"]}
-        output = SignalCountOutput(
-            SIGNAL_COUNT_IDENTITY,
-            "S0",
-            {"observations": total},
-            {"spread_ceilings": {key: str(value) for key, value in ceilings.items()}},
-            stable_hash(config),
+        self.stdout.write(
+            json.dumps({"job_run_id": job.pk, "report": output.as_dict()}, sort_keys=True)
         )
-        self.stdout.write(json.dumps(output.as_dict(), sort_keys=True))

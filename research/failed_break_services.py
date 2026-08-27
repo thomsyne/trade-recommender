@@ -8,8 +8,12 @@ from dataclasses import asdict
 
 from django.db import transaction
 
-from market.quality import expected_candle_timestamps
-from market.services import DatasetQualityError, assert_dataset_window_usable
+from market.quality import (
+    expected_candle_timestamps,
+    registered_candle_completion,
+    registered_successor,
+)
+from market.services import DatasetQualityError, RequiredCandleRange, assert_dataset_window_usable
 from research.models import (
     AnalysisRun,
     EntryEligibilityEvaluation,
@@ -34,16 +38,30 @@ def evidence_hash(value) -> str:
     ).hexdigest()
 
 
-def _require_history(required_ranges, minimum_candles):
+def _derive_history(
+    required_ranges,
+    minimum_candles,
+    decision_at,
+    *,
+    exact_completion=None,
+    required_timestamps=None,
+    decision_boundaries=None,
+):
     required_ranges = tuple(required_ranges)
+    exact_completion = exact_completion or {}
+    required_timestamps = required_timestamps or {}
+    decision_boundaries = decision_boundaries or {}
     supplied = {required.granularity for required in required_ranges}
     missing = set(minimum_candles) - supplied
     if missing:
         raise DatasetQualityError(
             f"operation is missing required dataset ranges: {', '.join(sorted(missing))}"
         )
-    counts = {
-        granularity: len(
+    derived = []
+    insufficient = []
+    for granularity, minimum in minimum_candles.items():
+        boundary = decision_boundaries.get(granularity, decision_at)
+        timestamps = sorted(
             {
                 timestamp
                 for required in required_ranges
@@ -53,18 +71,47 @@ def _require_history(required_ranges, minimum_candles):
                 )
             }
         )
-        for granularity in minimum_candles
-    }
-    insufficient = [
-        granularity
-        for granularity, minimum in minimum_candles.items()
-        if counts[granularity] < minimum
-    ]
+        eligible = [
+            timestamp
+            for timestamp in timestamps
+            if registered_candle_completion(timestamp, granularity) <= boundary
+        ]
+        if len(eligible) < minimum:
+            insufficient.append(granularity)
+            continue
+        latest = eligible[-1]
+        if (
+            registered_candle_completion(registered_successor(latest, granularity), granularity)
+            <= boundary
+        ):
+            raise DatasetQualityError(
+                f"{granularity} history does not reach the operation decision boundary"
+            )
+        if (
+            granularity in exact_completion
+            and registered_candle_completion(latest, granularity) != exact_completion[granularity]
+        ):
+            raise DatasetQualityError(
+                f"{granularity} history does not terminate at the evidence timestamp"
+            )
+        selected = eligible[-minimum:]
+        required_timestamp = required_timestamps.get(granularity)
+        if required_timestamp is not None and required_timestamp not in selected:
+            raise DatasetQualityError(
+                f"{granularity} history does not contain the required evidence candle"
+            )
+        derived.append(
+            RequiredCandleRange(
+                granularity,
+                selected[0],
+                registered_candle_completion(selected[-1], granularity),
+            )
+        )
     if insufficient:
         raise DatasetQualityError(
             f"operation lacks indicator warm-up history: {', '.join(sorted(insufficient))}"
         )
-    return required_ranges
+    return tuple(derived)
 
 
 @transaction.atomic
@@ -74,13 +121,17 @@ def persist_level(
     minimum_history = (
         {"W": 1, "D": 14}
         if spec.family == Level.Family.WEEKLY
-        else {"D": 20}
+        else {"D": 21}
         if spec.family == Level.Family.BREAKOUT
         else {"D": 14}
     )
-    required_ranges = _require_history(
+    source_granularity = "W" if spec.family == Level.Family.WEEKLY else "D"
+    required_ranges = _derive_history(
         required_ranges,
         minimum_history,
+        spec.activated_at,
+        exact_completion={source_granularity: spec.activated_at},
+        required_timestamps={source_granularity: spec.source_at},
     )
     assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     values = {
@@ -125,7 +176,12 @@ def persist_analysis(
     as_of,
 ) -> AnalysisRun:
     try:
-        required_ranges = _require_history(required_ranges, {"W": 1, "D": 220, "H1": 14})
+        required_ranges = _derive_history(
+            required_ranges,
+            {"W": 1, "D": 220, "H1": 14},
+            completed_h1_timestamp,
+            exact_completion={"H1": completed_h1_timestamp},
+        )
         assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     except DatasetQualityError:
         if result != AnalysisRun.Result.DATA_INCOMPLETE:
@@ -158,7 +214,12 @@ def persist_setup(
     required_ranges,
     as_of,
 ) -> SetupEvent:
-    required_ranges = _require_history(required_ranges, {"W": 1, "D": 220, "H1": 14})
+    required_ranges = _derive_history(
+        required_ranges,
+        {"W": 1, "D": 220, "H1": 14},
+        event.at,
+        exact_completion={"H1": event.at},
+    )
     assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     if set(event.level_keys) != set(level_attributions):
         raise ValueError("setup attributions do not match deterministic sweep keys")
@@ -289,7 +350,12 @@ def persist_confirmation(
         raise ValueError("unsupported Phase 2A confirmation state")
     setup = SetupEvent.objects.select_for_update().get(pk=setup.pk)
     try:
-        required_ranges = _require_history(required_ranges, {"D": 1, "H1": 1})
+        required_ranges = _derive_history(
+            required_ranges,
+            {"D": 1, "H1": 1},
+            confirmation.at,
+            exact_completion={"H1": confirmation.at},
+        )
         assert_dataset_window_usable(
             setup.dataset_version, setup.instrument, required_ranges, as_of
         )
@@ -327,8 +393,18 @@ def persist_entry_evaluation(
     expected_entry_timestamp=None,
 ) -> EntryEligibilityEvaluation:
     setup = SetupEvent.objects.select_for_update().get(pk=setup.pk)
+    entry_timestamp = opening.timestamp if opening else expected_entry_timestamp
+    if entry_timestamp is None:
+        raise ValueError("expected entry timestamp is required when no H1 open exists")
     try:
-        required_ranges = _require_history(required_ranges, {"W": 1, "D": 1, "H1": 15})
+        entry_completion = registered_candle_completion(entry_timestamp, "H1")
+        required_ranges = _derive_history(
+            required_ranges,
+            {"W": 1, "D": 1, "H1": 15},
+            entry_completion,
+            required_timestamps={"H1": entry_timestamp},
+            decision_boundaries={"W": entry_timestamp, "D": entry_timestamp},
+        )
         assert_dataset_window_usable(
             setup.dataset_version, setup.instrument, required_ranges, as_of
         )
@@ -337,8 +413,6 @@ def persist_entry_evaluation(
             raise
     if book_identity not in books_for_setup(setup):
         raise ValueError("book is not attributable to this physical setup")
-    if opening is None and expected_entry_timestamp is None:
-        raise ValueError("expected entry timestamp is required when no H1 open exists")
     permitted = result.decision == EntryEligibilityEvaluation.Decision.ENTRY_PENDING
     if not setup.setuptransition_set.filter(
         from_state=SetupTransition.State.TRIGGER_PENDING,

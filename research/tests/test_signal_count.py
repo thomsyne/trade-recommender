@@ -7,13 +7,14 @@ from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
 
 from market.models import DatasetVersion, Instrument, SourceRegistry, dataset_manifest_sha256
-from market.services import DatasetQualityError, store_ingestion
+from market.services import DatasetQualityError, RequiredCandleRange, store_ingestion
 from market.tests.factories import candle
 from research.models import (
     EntryEligibilityEvaluation,
     JobRun,
     Level,
     SetupEvent,
+    SetupLevelAttribution,
     SetupTransition,
     StrategyDefinition,
     StrategyVersion,
@@ -28,9 +29,11 @@ from research.signal_count import (
     SignalCountOutput,
     _s1_evaluation_queryset,
     _validate_s1_contract,
+    _validated_s0_job,
     enforce_price_cutoff,
     generate_spread_ceilings,
     read_entry_projection,
+    run_s0,
     run_s1,
 )
 
@@ -182,7 +185,6 @@ class SignalCountFunctionalTests(TestCase):
             ("D", datetime(2009, 1, 4, 22, tzinfo=UTC), datetime(2019, 1, 1, 22, tzinfo=UTC)),
             ("H1", datetime(2009, 12, 30, 5, tzinfo=UTC), datetime(2019, 1, 1, 5, tzinfo=UTC)),
         )
-        s0_report_sha256 = "a" * 64
         dataset = DatasetVersion.objects.create(
             name="bounded",
             version="1",
@@ -203,16 +205,28 @@ class SignalCountFunctionalTests(TestCase):
                 ],
             },
         )
-        store_ingestion(
-            source,
-            instrument,
-            "H1",
-            entry_at,
-            entry_at + timedelta(hours=1),
-            [candle(entry_at)],
-            {"bounded": True},
-            dataset_version=dataset,
-        )
+        fixture_ranges = {}
+        for code, registered_instrument in instruments.items():
+            raw_ranges = (
+                ("W", datetime(2017, 12, 29, 22, tzinfo=UTC), datetime(2018, 1, 5, 22, tzinfo=UTC)),
+                ("D", datetime(2018, 1, 1, 22, tzinfo=UTC), datetime(2018, 1, 2, 22, tzinfo=UTC)),
+                ("H1", entry_at, entry_at + timedelta(hours=1)),
+            )
+            fixture_ranges[code] = [
+                RequiredCandleRange(granularity, start, end)
+                for granularity, start, end in raw_ranges
+            ]
+            for granularity, start, end in raw_ranges:
+                store_ingestion(
+                    source,
+                    registered_instrument,
+                    granularity,
+                    start,
+                    end,
+                    [candle(start)],
+                    {"bounded": True, "instrument": code, "granularity": granularity},
+                    dataset_version=dataset,
+                )
         definition = StrategyDefinition.objects.create(key="s1-test", name="S1 test")
         strategy = StrategyVersion.objects.create(
             definition=definition,
@@ -226,16 +240,46 @@ class SignalCountFunctionalTests(TestCase):
             pair_metadata={"instruments": sorted(FROZEN_INSTRUMENTS)},
             content_hash=PHASE1_MANIFEST_SHA256,
         )
-        s0_job = JobRun.objects.create(
+        as_of = datetime(2019, 1, 4, 22, tzinfo=UTC)
+        arbitrary_s0 = JobRun.objects.create(
             job_name=S0_JOB_NAME,
             strategy_version=strategy,
             dataset_version=dataset,
-            config_hash="b" * 64,
-            idempotency_key="bounded-s0",
-            as_of=datetime(2019, 1, 4, 22, tzinfo=UTC),
+            config_hash="a" * 64,
+            idempotency_key="arbitrary-s0",
+            as_of=as_of,
             status=JobRun.Status.SUCCEEDED,
-            evidence={"report_sha256": s0_report_sha256},
+            evidence={"report_sha256": "b" * 64},
         )
+        with self.assertRaisesMessage(ReturnBlindViolation, "genuine immutable S0 audit"):
+            _validated_s0_job(
+                s0_job_id=arbitrary_s0.pk,
+                dataset=dataset,
+                strategy=strategy,
+            )
+        with patch("research.signal_count._validate_dataset_contract", return_value=fixture_ranges):
+            s0_output, s0_job = run_s0(
+                dataset_id=dataset.pk,
+                strategy_version_id=strategy.pk,
+                maximum_observations=10,
+                as_of=as_of,
+            )
+            s0_replay, replay_job = run_s0(
+                dataset_id=dataset.pk,
+                strategy_version_id=strategy.pk,
+                maximum_observations=10,
+                as_of=as_of,
+            )
+            with self.assertRaisesMessage(ReturnBlindViolation, "would truncate"):
+                run_s0(
+                    dataset_id=dataset.pk,
+                    strategy_version_id=strategy.pk,
+                    maximum_observations=5,
+                    as_of=as_of,
+                )
+        self.assertEqual(s0_output.counts["observations"], 6)
+        self.assertEqual(s0_replay.report_sha256, s0_output.report_sha256)
+        self.assertEqual(replay_job.pk, s0_job.pk)
         setup = SetupEvent.objects.create(
             instrument=instrument,
             direction=SetupEvent.Direction.LONG,
@@ -247,11 +291,12 @@ class SignalCountFunctionalTests(TestCase):
             bias_evidence={},
             provisional_swing_evidence={},
             threshold_evidence={},
+            attribution_keys=["4" * 64],
             evidence_hash="3" * 64,
         )
         level = Level.objects.create(
             family=Level.Family.WEEKLY,
-            role=Level.Role.RESISTANCE,
+            role=Level.Role.SUPPORT,
             instrument=instrument,
             strategy_version=strategy,
             dataset_version=dataset,
@@ -264,6 +309,7 @@ class SignalCountFunctionalTests(TestCase):
             activated_at=entry_at - timedelta(days=1),
             stable_key="4" * 64,
         )
+        SetupLevelAttribution.objects.create(setup=setup, level=level)
         SetupTransition.objects.create(
             setup=setup,
             from_state=SetupTransition.State.TRIGGER_PENDING,
@@ -273,6 +319,44 @@ class SignalCountFunctionalTests(TestCase):
             strategy_version=strategy,
             dataset_version=dataset,
             execution_identity=strategy.execution_identity,
+        )
+        SetupTransition.objects.create(
+            setup=setup,
+            book_identity="failed-break-any-level-deduplicated-v1",
+            from_state=SetupTransition.State.CONFIRMED,
+            to_state=SetupTransition.State.ENTRY_PENDING,
+            effective_at=entry_at,
+            evidence_hash="7" * 64,
+            strategy_version=strategy,
+            dataset_version=dataset,
+            execution_identity=strategy.execution_identity,
+        )
+        SetupTransition.objects.create(
+            setup=setup,
+            book_identity="failed-break-weekly-extreme-v1",
+            from_state=SetupTransition.State.CONFIRMED,
+            to_state=SetupTransition.State.NO_TARGET,
+            effective_at=entry_at,
+            reason="NO_ACTIVE_OPPOSING_LEVEL",
+            evidence_hash="8" * 64,
+            strategy_version=strategy,
+            dataset_version=dataset,
+            execution_identity=strategy.execution_identity,
+        )
+        target_level = Level.objects.create(
+            family=Level.Family.WEEKLY,
+            role=Level.Role.RESISTANCE,
+            instrument=instrument,
+            strategy_version=strategy,
+            dataset_version=dataset,
+            source_timeframe="W",
+            source_candle_timestamp=entry_at - timedelta(weeks=1),
+            central_price=Decimal("1.2"),
+            zone_lower=Decimal("1.19"),
+            zone_upper=Decimal("1.21"),
+            atr_at_activation=Decimal("0.1"),
+            activated_at=entry_at - timedelta(days=1),
+            stable_key="a" * 64,
         )
         EntryEligibilityEvaluation.objects.create(
             setup=setup,
@@ -288,10 +372,52 @@ class SignalCountFunctionalTests(TestCase):
             conversion_effective_at=entry_at,
             conversion_identity="USD_CAD@entry",
             risk_per_unit_cad=Decimal("0.01377"),
-            target_level=level,
-            target_stable_key=level.stable_key,
+            target_level=target_level,
+            target_stable_key=target_level.stable_key,
             evidence_hash="6" * 64,
         )
+        EntryEligibilityEvaluation.objects.create(
+            setup=setup,
+            book_identity="failed-break-weekly-extreme-v1",
+            decision=EntryEligibilityEvaluation.Decision.NO_TARGET,
+            terminal_reason="NO_ACTIVE_OPPOSING_LEVEL",
+            evidence_hash="9" * 64,
+        )
+        for index, (sweep_at, confirmed_at) in enumerate(
+            (
+                (
+                    datetime(2009, 12, 20, 12, tzinfo=UTC),
+                    datetime(2009, 12, 20, 13, tzinfo=UTC),
+                ),
+                (
+                    datetime(2019, 1, 2, 12, tzinfo=UTC),
+                    datetime(2019, 1, 2, 13, tzinfo=UTC),
+                ),
+            )
+        ):
+            excluded = SetupEvent.objects.create(
+                instrument=instrument,
+                direction=SetupEvent.Direction.LONG,
+                sweep_h1_timestamp=sweep_at,
+                detector_version=strategy.detector_version,
+                dataset_version=dataset,
+                strategy_version=strategy,
+                sweep_evidence={},
+                bias_evidence={},
+                provisional_swing_evidence={},
+                threshold_evidence={},
+                evidence_hash=str(index + 1) * 64,
+            )
+            SetupTransition.objects.create(
+                setup=excluded,
+                from_state=SetupTransition.State.TRIGGER_PENDING,
+                to_state=SetupTransition.State.CONFIRMED,
+                effective_at=confirmed_at,
+                evidence_hash=str(index + 2) * 64,
+                strategy_version=strategy,
+                dataset_version=dataset,
+                execution_identity=strategy.execution_identity,
+            )
 
         with self.assertRaises(DatasetQualityError):
             run_s1(
@@ -299,7 +425,7 @@ class SignalCountFunctionalTests(TestCase):
                 strategy_version_id=strategy.pk,
                 s0_job_id=s0_job.pk,
                 maximum_setups=1,
-                as_of=datetime(2019, 1, 4, 22, tzinfo=UTC),
+                as_of=as_of,
             )
 
         with patch("research.signal_count.assert_dataset_window_usable"):
@@ -308,24 +434,124 @@ class SignalCountFunctionalTests(TestCase):
                 strategy_version_id=strategy.pk,
                 s0_job_id=s0_job.pk,
                 maximum_setups=1,
-                as_of=datetime(2019, 1, 4, 22, tzinfo=UTC),
+                as_of=as_of,
             )
             replay = run_s1(
                 dataset_id=dataset.pk,
                 strategy_version_id=strategy.pk,
                 s0_job_id=s0_job.pk,
                 maximum_setups=1,
-                as_of=datetime(2019, 1, 4, 22, tzinfo=UTC),
+                as_of=as_of,
             )
 
         self.assertEqual(output.counts["physical_setups_processed"], 1)
-        self.assertEqual(output.counts["eligibility_evaluations_processed"], 1)
+        self.assertEqual(output.counts["eligibility_evaluations_processed"], 2)
         self.assertEqual(output.counts["entry_eligible"], 1)
+        self.assertEqual(output.coverage["by_confirmation_year"], {"2018": 1})
         self.assertEqual(output.coverage["entry_projections_read"], 1)
+        self.assertEqual(output.coverage["by_pair"], {"EUR_USD": 1})
+        self.assertTrue(output.coverage["complete"])
         self.assertEqual(replay.report_sha256, output.report_sha256)
         job = JobRun.objects.get(job_name="failed-break-signal-count-s1")
-        self.assertEqual(job.evidence["report_sha256"], output.report_sha256)
+        self.assertEqual(job.evidence["report"]["report_sha256"], output.report_sha256)
         self.assertEqual(JobRun.objects.filter(job_name="failed-break-signal-count-s1").count(), 1)
+
+        second = SetupEvent.objects.create(
+            instrument=instrument,
+            direction=SetupEvent.Direction.LONG,
+            sweep_h1_timestamp=entry_at + timedelta(days=1, hours=-2),
+            detector_version=strategy.detector_version,
+            dataset_version=dataset,
+            strategy_version=strategy,
+            sweep_evidence={},
+            bias_evidence={},
+            provisional_swing_evidence={},
+            threshold_evidence={},
+            attribution_keys=[level.stable_key],
+            evidence_hash="b" * 64,
+        )
+        SetupLevelAttribution.objects.create(setup=second, level=level)
+        SetupTransition.objects.create(
+            setup=second,
+            from_state=SetupTransition.State.TRIGGER_PENDING,
+            to_state=SetupTransition.State.CONFIRMED,
+            effective_at=entry_at + timedelta(days=1, hours=-1),
+            evidence_hash="c" * 64,
+            strategy_version=strategy,
+            dataset_version=dataset,
+            execution_identity=strategy.execution_identity,
+        )
+        for index, book in enumerate(
+            ("failed-break-any-level-deduplicated-v1", "failed-break-weekly-extreme-v1")
+        ):
+            SetupTransition.objects.create(
+                setup=second,
+                book_identity=book,
+                from_state=SetupTransition.State.CONFIRMED,
+                to_state=SetupTransition.State.NO_TARGET,
+                effective_at=entry_at + timedelta(days=1),
+                reason="NO_ACTIVE_OPPOSING_LEVEL",
+                evidence_hash=str(index + 5) * 64,
+                strategy_version=strategy,
+                dataset_version=dataset,
+                execution_identity=strategy.execution_identity,
+            )
+            EntryEligibilityEvaluation.objects.create(
+                setup=second,
+                book_identity=book,
+                decision=EntryEligibilityEvaluation.Decision.NO_TARGET,
+                terminal_reason="NO_ACTIVE_OPPOSING_LEVEL",
+                evidence_hash=str(index + 7) * 64,
+            )
+        with (
+            patch("research.signal_count.assert_dataset_window_usable"),
+            self.assertRaisesMessage(ReturnBlindViolation, "would truncate"),
+        ):
+            run_s1(
+                dataset_id=dataset.pk,
+                strategy_version_id=strategy.pk,
+                s0_job_id=s0_job.pk,
+                maximum_setups=1,
+                as_of=as_of,
+            )
+
+        incomplete = SetupEvent.objects.create(
+            instrument=instrument,
+            direction=SetupEvent.Direction.LONG,
+            sweep_h1_timestamp=entry_at + timedelta(days=2, hours=-2),
+            detector_version=strategy.detector_version,
+            dataset_version=dataset,
+            strategy_version=strategy,
+            sweep_evidence={},
+            bias_evidence={},
+            provisional_swing_evidence={},
+            threshold_evidence={},
+            attribution_keys=[level.stable_key],
+            evidence_hash="d" * 64,
+        )
+        SetupLevelAttribution.objects.create(setup=incomplete, level=level)
+        SetupTransition.objects.create(
+            setup=incomplete,
+            from_state=SetupTransition.State.TRIGGER_PENDING,
+            to_state=SetupTransition.State.CONFIRMED,
+            effective_at=entry_at + timedelta(days=2, hours=-1),
+            evidence_hash="e" * 64,
+            strategy_version=strategy,
+            dataset_version=dataset,
+            execution_identity=strategy.execution_identity,
+        )
+        with (
+            patch("research.signal_count.assert_dataset_window_usable"),
+            self.assertRaisesMessage(ReturnBlindViolation, "lifecycle is incomplete"),
+        ):
+            run_s1(
+                dataset_id=dataset.pk,
+                strategy_version_id=strategy.pk,
+                s0_job_id=s0_job.pk,
+                maximum_setups=10,
+                as_of=as_of,
+            )
+
         job.evidence = {"report_sha256": "tampered"}
         with self.assertRaisesMessage(ValidationError, "immutable"):
             job.save()

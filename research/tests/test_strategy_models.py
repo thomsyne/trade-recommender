@@ -69,13 +69,15 @@ class StrategyPersistenceTests(TestCase):
             manifest={"fixture": "strategy-persistence"},
         )
         h1_at = self.at - timedelta(hours=15)
+        h1_end = self.at + timedelta(hours=4)
         daily_at = datetime(2025, 1, 5, 22, tzinfo=UTC)
         daily_end = datetime(2025, 12, 31, 22, tzinfo=UTC)
         weekly_at = datetime(2025, 12, 19, 22, tzinfo=UTC)
+        weekly_end = weekly_at + timedelta(weeks=1)
         ranges = (
-            ("H1", h1_at, self.at),
+            ("H1", h1_at, h1_end),
             ("D", daily_at, daily_end),
-            ("W", weekly_at, weekly_at + timedelta(weeks=1)),
+            ("W", weekly_at, weekly_end),
         )
         for granularity, start, end in ranges:
             store_ingestion(
@@ -94,6 +96,10 @@ class StrategyPersistenceTests(TestCase):
         self.required_ranges = tuple(
             RequiredCandleRange(granularity, start, end) for granularity, start, end in ranges
         )
+        self.daily_source = datetime(2025, 12, 30, 22, tzinfo=UTC)
+        self.daily_activation = daily_end
+        self.weekly_source = weekly_at
+        self.weekly_activation = weekly_end
         self.as_of = self.at + timedelta(days=1)
         definition = StrategyDefinition.objects.create(key="phase-1", name="Phase 1")
         self.strategy = StrategyVersion.objects.create(
@@ -377,14 +383,24 @@ class StrategyPersistenceTests(TestCase):
                 Role.SUPPORT,
                 Decimal("1.1"),
                 Decimal("0.1"),
-                self.at,
-                self.at,
+                activated_at,
+                source_at,
                 Decimal("0.00001"),
                 context,
             )
-            for key, family in (
-                ("weekly", Level.Family.WEEKLY),
-                ("swing", Level.Family.DAILY_SWING),
+            for key, family, activated_at, source_at in (
+                (
+                    "weekly",
+                    Level.Family.WEEKLY,
+                    self.weekly_activation,
+                    self.weekly_source,
+                ),
+                (
+                    "swing",
+                    Level.Family.DAILY_SWING,
+                    self.daily_activation,
+                    self.daily_source,
+                ),
             )
         ]
         levels = [
@@ -553,6 +569,28 @@ class StrategyPersistenceTests(TestCase):
                 dataset_version=self.dataset,
                 spec=spec,
                 required_ranges=h1_only,
+                as_of=self.as_of,
+            )
+
+    def test_analysis_rejects_count_equivalent_history_from_before_decision_boundary(self):
+        stale_h1 = RequiredCandleRange(
+            "H1",
+            self.at - timedelta(hours=15),
+            self.at - timedelta(hours=1),
+        )
+        stale_ranges = tuple(
+            required for required in self.required_ranges if required.granularity != "H1"
+        ) + (stale_h1,)
+
+        with self.assertRaisesMessage(ValueError, "does not reach the operation decision boundary"):
+            persist_analysis(
+                instrument=self.instrument,
+                strategy_version=self.strategy,
+                dataset_version=self.dataset,
+                completed_h1_timestamp=self.at,
+                result=AnalysisRun.Result.NO_SETUP,
+                evidence={},
+                required_ranges=stale_ranges,
                 as_of=self.as_of,
             )
 
@@ -740,8 +778,8 @@ class StrategyPersistenceTests(TestCase):
             Role.SUPPORT,
             Decimal("1.1"),
             Decimal("0.1"),
-            self.at,
-            self.at,
+            self.daily_activation,
+            self.daily_source,
             Decimal("0.00001"),
             Context(self.as_of, "strategy", "dataset"),
         )
@@ -798,9 +836,10 @@ class TransitionConcurrencyTests(TransactionTestCase):
             manifest={"fixture": "concurrency"},
         )
         h1_at = at - timedelta(hours=1)
+        h1_end = at + timedelta(hours=1)
         daily_at = datetime(2025, 12, 30, 22, tzinfo=UTC)
         ranges = (
-            ("H1", h1_at, at),
+            ("H1", h1_at, h1_end),
             ("D", daily_at, daily_at + timedelta(days=1)),
         )
         for granularity, start, end in ranges:
@@ -810,7 +849,10 @@ class TransitionConcurrencyTests(TransactionTestCase):
                 granularity,
                 start,
                 end,
-                [candle(start)],
+                [
+                    candle(timestamp)
+                    for timestamp in expected_candle_timestamps(start, end, granularity)
+                ],
                 {"bounded": True, "granularity": granularity},
                 dataset_version=dataset,
             )

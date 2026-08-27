@@ -7,7 +7,7 @@ from research.signal_count import run_s1
 
 
 class Command(BaseCommand):
-    help = "Expose a bounded, dry-by-default return-blind S1 signal-count interface"
+    help = "Register a complete bounded development S1 return-blind signal-count audit"
 
     def add_arguments(self, parser):
         parser.add_argument("--dataset-id", type=int, required=True)
