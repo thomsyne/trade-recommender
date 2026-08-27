@@ -25,7 +25,10 @@ python manage.py signal_count_s0 \
   --max-observations MAXIMUM
 ```
 
-S0 fails rather than truncating. Its output includes the immutable `JobRun` ID required by S1:
+S0 trims every declared W/D/H1 range to candles completing strictly before the development
+boundary. Its row-count and lineage checks do not require post-boundary D/W records, and its spread
+population excludes an H1 open when that H1 candle completes at or after the boundary. S0 fails
+rather than truncating. Its output includes the immutable `JobRun` ID required by S1:
 
 ```text
 python manage.py signal_count_s1 \
@@ -55,7 +58,8 @@ America/New_York`. The detector computes that horizon from timestamps and the re
 calendar (including Friday-to-Sunday alignment), without reading a 2019 candle. Its immutable
 detector report records canonical, individually hashed evidence for every censored setup. The final
 S1 audit reconstructs that evidence and fails if it is absent, forged, or attached to a setup with a
-strategy transition.
+strategy transition. The censorship-rule identity is also included unconditionally in both detector
+and final S1 audit configurations, including when no setup is censored.
 
 Censored setups remain in raw sweep and attribution diagnostics but are excluded from confirmation,
 eligibility, book, concurrency, proposed-M1-window, and later return populations. They are distinct

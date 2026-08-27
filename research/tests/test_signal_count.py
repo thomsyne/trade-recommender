@@ -36,6 +36,7 @@ from research.signal_count import (
     _s1_evaluation_queryset,
     _validate_s1_contract,
     _validated_s0_job,
+    development_candle_range,
     enforce_price_cutoff,
     generate_spread_ceilings,
     partition_boundary_censorship,
@@ -46,6 +47,37 @@ from research.signal_count import (
 
 
 class SignalCountBoundaryTests(SimpleTestCase):
+    def test_development_ranges_exclude_boundary_and_post_boundary_completions(self):
+        ranges = {
+            "H1": RequiredCandleRange(
+                "H1",
+                datetime(2019, 1, 1, 3, tzinfo=UTC),
+                datetime(2019, 1, 1, 5, tzinfo=UTC),
+            ),
+            "D": RequiredCandleRange(
+                "D",
+                datetime(2018, 12, 30, 22, tzinfo=UTC),
+                datetime(2019, 1, 1, 22, tzinfo=UTC),
+            ),
+            "W": RequiredCandleRange(
+                "W",
+                datetime(2018, 12, 21, 22, tzinfo=UTC),
+                datetime(2019, 1, 4, 22, tzinfo=UTC),
+            ),
+        }
+        self.assertEqual(
+            development_candle_range(ranges["H1"]).end,
+            datetime(2019, 1, 1, 4, tzinfo=UTC),
+        )
+        self.assertEqual(
+            development_candle_range(ranges["D"]).end,
+            datetime(2018, 12, 31, 22, tzinfo=UTC),
+        )
+        self.assertEqual(
+            development_candle_range(ranges["W"]).end,
+            datetime(2018, 12, 28, 22, tzinfo=UTC),
+        )
+
     def test_partition_boundary_censorship_is_strict_and_timestamp_only(self):
         new_york = ZoneInfo("America/New_York")
         fully_observable = datetime(2018, 12, 31, 19, tzinfo=new_york)
@@ -289,6 +321,29 @@ class SignalCountFunctionalTests(TestCase):
                     {"bounded": True, "instrument": code, "granularity": granularity},
                     dataset_version=dataset,
                 )
+            boundary_open = datetime(2019, 1, 1, 4, tzinfo=UTC)
+            store_ingestion(
+                source,
+                registered_instrument,
+                "H1",
+                boundary_open,
+                boundary_open + timedelta(hours=1),
+                [
+                    candle(
+                        boundary_open,
+                        bid_open=Decimal("1"),
+                        bid_high=Decimal("1"),
+                        bid_low=Decimal("1"),
+                        bid_close=Decimal("1"),
+                        ask_open=Decimal("1.5"),
+                        ask_high=Decimal("1.5"),
+                        ask_low=Decimal("1.5"),
+                        ask_close=Decimal("1.5"),
+                    )
+                ],
+                {"boundary-completing": True, "instrument": code},
+                dataset_version=dataset,
+            )
         definition = StrategyDefinition.objects.create(key="s1-test", name="S1 test")
         strategy = StrategyVersion.objects.create(
             definition=definition,

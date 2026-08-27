@@ -23,6 +23,7 @@ from research.models import (
 )
 from research.signal_count import (
     FROZEN_INSTRUMENTS,
+    PARTITION_BOUNDARY_CENSOR_RULE,
     PHASE1_MANIFEST_SHA256,
     S1_DETECTOR_JOB_NAME,
     ReturnBlindViolation,
@@ -172,7 +173,13 @@ class BoundedS1DetectorTests(TestCase):
         rows[sweep_index + 2] = _candle(timestamps[sweep_index + 2], "1.025")
         return rows
 
-    def _fake_detector_job(self, *, omit_analysis=0, censored_evidence=()):
+    def _fake_detector_job(
+        self,
+        *,
+        omit_analysis=0,
+        censored_evidence=(),
+        censor_rule=PARTITION_BOUNDARY_CENSOR_RULE,
+    ):
         expected = expected_analysis_keys(self.ranges)
         observed = expected[:-omit_analysis] if omit_analysis else expected
         AnalysisRun.objects.bulk_create(
@@ -194,10 +201,16 @@ class BoundedS1DetectorTests(TestCase):
             "strategy_version_id": self.strategy.pk,
             "strategy_content_hash": self.strategy.content_hash,
             "detector_version": self.strategy.detector_version,
-            "s0_job_id": 1,
-            "s0_report_sha256": self.s0_output.report_sha256,
-            "as_of": self.as_of.isoformat(),
         }
+        if censor_rule is not None:
+            configuration["partition_boundary_censor_rule"] = censor_rule
+        configuration.update(
+            {
+                "s0_job_id": 1,
+                "s0_report_sha256": self.s0_output.report_sha256,
+                "as_of": self.as_of.isoformat(),
+            }
+        )
         report_body = {
             "expected_analysis_count": len(expected),
             "expected_analysis_sha256": stable_hash(expected),
@@ -212,7 +225,7 @@ class BoundedS1DetectorTests(TestCase):
             strategy_version=self.strategy,
             dataset_version=self.dataset,
             config_hash=stable_hash(configuration),
-            idempotency_key=f"fake-detector-{omit_analysis}",
+            idempotency_key=f"fake-detector-{stable_hash(configuration)}",
             as_of=self.as_of,
             status=JobRun.Status.SUCCEEDED,
             evidence={"configuration": configuration, "report": report},
@@ -245,6 +258,7 @@ class BoundedS1DetectorTests(TestCase):
             "strategy_version_id": self.strategy.pk,
             "strategy_content_hash": self.strategy.content_hash,
             "detector_version": self.strategy.detector_version,
+            "partition_boundary_censor_rule": PARTITION_BOUNDARY_CENSOR_RULE,
             "s0_job_id": 1,
             "s0_report_sha256": self.s0_output.report_sha256,
             "as_of": self.as_of.isoformat(),
@@ -310,6 +324,32 @@ class BoundedS1DetectorTests(TestCase):
                 detector_job_id=job.pk,
                 dataset=self.dataset,
                 strategy=sibling,
+                ranges_by_instrument=self.ranges,
+                s0_job_id=1,
+                s0_report_sha256=self.s0_output.report_sha256,
+                as_of=self.as_of,
+            )
+
+    def test_zero_censorship_audit_rejects_changed_rule_identity(self):
+        job = self._fake_detector_job(censor_rule="changed-censorship-rule")
+        with self.assertRaisesMessage(ReturnBlindViolation, "identities do not verify"):
+            _validate_detector_coverage(
+                detector_job_id=job.pk,
+                dataset=self.dataset,
+                strategy=self.strategy,
+                ranges_by_instrument=self.ranges,
+                s0_job_id=1,
+                s0_report_sha256=self.s0_output.report_sha256,
+                as_of=self.as_of,
+            )
+
+    def test_zero_censorship_audit_rejects_missing_rule_identity(self):
+        job = self._fake_detector_job(censor_rule=None)
+        with self.assertRaisesMessage(ReturnBlindViolation, "identities do not verify"):
+            _validate_detector_coverage(
+                detector_job_id=job.pk,
+                dataset=self.dataset,
+                strategy=self.strategy,
                 ranges_by_instrument=self.ranges,
                 s0_job_id=1,
                 s0_report_sha256=self.s0_output.report_sha256,
@@ -387,6 +427,10 @@ class BoundedS1DetectorTests(TestCase):
         self.assertEqual(output.counts["partition_boundary_purged"], 0)
         self.assertEqual(output.counts["confirmations"], 0)
         self.assertEqual(output.counts["eligibility_evaluations_processed"], 0)
+        self.assertEqual(
+            output.coverage["partition_boundary_censor_rule"],
+            PARTITION_BOUNDARY_CENSOR_RULE,
+        )
         self.assertTrue(output.coverage["complete"])
 
     def test_unresolved_trigger_pending_setup_fails_detector_lifecycle(self):

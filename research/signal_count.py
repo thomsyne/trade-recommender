@@ -135,6 +135,7 @@ S1_COVERAGE_FIELDS = frozenset(
         "s0_report_sha256",
         "detector_job_id",
         "detector_report_sha256",
+        "partition_boundary_censor_rule",
         "as_of",
         "bounded",
         "complete",
@@ -446,12 +447,15 @@ def run_s0(
 
     row_counts = {}
     missingness = {}
+    development_ranges_by_instrument = {}
     for code, ranges in ranges_by_instrument.items():
         instrument = instruments[code]
-        assert_dataset_window_usable(dataset, instrument, ranges, as_of)
+        development_ranges = tuple(development_candle_range(required) for required in ranges)
+        development_ranges_by_instrument[code] = development_ranges
+        assert_dataset_window_usable(dataset, instrument, development_ranges, as_of)
         row_counts[code] = {}
         missingness[code] = {}
-        for required in ranges:
+        for required in development_ranges:
             expected = len(
                 expected_candle_timestamps(required.start, required.end, required.granularity)
             )
@@ -472,17 +476,28 @@ def run_s0(
 
     development_start = DEVELOPMENT_START.astimezone(UTC)
     development_end = DEVELOPMENT_END.astimezone(UTC)
-    opening_rows = Candle.objects.filter(
-        dataset_version=dataset,
-        instrument__code__in=FROZEN_INSTRUMENTS,
-        granularity="H1",
-        timestamp__gte=development_start,
-        timestamp__lt=development_end,
-        complete=True,
-        ingestion_run__dataset_version=dataset,
-        ingestion_run__status=IngestionRun.Status.SUCCEEDED,
-    ).values("instrument__code", "timestamp", "bid_open", "ask_open")
-    if opening_rows.count() > maximum_observations:
+    opening_queries = []
+    for code, ranges in development_ranges_by_instrument.items():
+        h1_range = next(required for required in ranges if required.granularity == "H1")
+        timestamps = tuple(
+            timestamp
+            for timestamp in expected_candle_timestamps(
+                h1_range.start, h1_range.end, h1_range.granularity
+            )
+            if development_start <= registered_candle_completion(timestamp, "H1") < development_end
+        )
+        opening_queries.append(
+            Candle.objects.filter(
+                dataset_version=dataset,
+                instrument=instruments[code],
+                granularity="H1",
+                timestamp__in=timestamps,
+                complete=True,
+                ingestion_run__dataset_version=dataset,
+                ingestion_run__status=IngestionRun.Status.SUCCEEDED,
+            ).values("instrument__code", "timestamp", "bid_open", "ask_open")
+        )
+    if sum(query.count() for query in opening_queries) > maximum_observations:
         raise ReturnBlindViolation("S0 observation bound would truncate the registered audit")
 
     pair_spreads = {code: [] for code in sorted(FROZEN_INSTRUMENTS)}
@@ -496,13 +511,14 @@ def run_s0(
             "outside_registered_union",
         )
     }
-    for row in opening_rows.iterator(chunk_size=10_000):
-        label = _session_label(row["timestamp"])
-        spread = row["ask_open"] - row["bid_open"]
-        group = f"{row['instrument__code']}/{label}"
-        distributions[group].append(spread)
-        if label != "outside_registered_union":
-            pair_spreads[row["instrument__code"]].append(spread)
+    for query in opening_queries:
+        for row in query.iterator(chunk_size=10_000):
+            label = _session_label(row["timestamp"])
+            spread = row["ask_open"] - row["bid_open"]
+            group = f"{row['instrument__code']}/{label}"
+            distributions[group].append(spread)
+            if label != "outside_registered_union":
+                pair_spreads[row["instrument__code"]].append(spread)
     ceilings = generate_spread_ceilings(pair_spreads, PIPETTES)
     distribution_hashes = {
         group: stable_hash([str(value) for value in sorted(values)])
@@ -720,6 +736,7 @@ def _validate_detector_coverage(
             "strategy_version_id",
             "strategy_content_hash",
             "detector_version",
+            "partition_boundary_censor_rule",
             "s0_job_id",
             "s0_report_sha256",
             "as_of",
@@ -730,6 +747,7 @@ def _validate_detector_coverage(
         or configuration.get("strategy_version_id") != strategy.pk
         or configuration.get("strategy_content_hash") != strategy.content_hash
         or configuration.get("detector_version") != strategy.detector_version
+        or configuration.get("partition_boundary_censor_rule") != PARTITION_BOUNDARY_CENSOR_RULE
         or configuration.get("s0_job_id") != s0_job_id
         or configuration.get("s0_report_sha256") != s0_report_sha256
         or configuration.get("as_of") != as_of.isoformat()
@@ -1234,6 +1252,7 @@ def run_s1(
         "s0_report_sha256": s0_report_sha256,
         "detector_job_id": detector_job.pk,
         "detector_report_sha256": detector_report_sha256,
+        "partition_boundary_censor_rule": PARTITION_BOUNDARY_CENSOR_RULE,
         "maximum_setups": maximum_setups,
         "as_of": as_of.isoformat(),
     }
@@ -1247,6 +1266,7 @@ def run_s1(
             "s0_report_sha256": s0_report_sha256,
             "detector_job_id": detector_job.pk,
             "detector_report_sha256": detector_report_sha256,
+            "partition_boundary_censor_rule": PARTITION_BOUNDARY_CENSOR_RULE,
             "as_of": as_of.isoformat(),
             "bounded": True,
             "complete": True,
