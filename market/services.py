@@ -45,9 +45,16 @@ def assert_dataset_usable(dataset_version) -> None:
     if dataset_version.conflicts.exists() or dataset_version.incidents.exists():
         raise DatasetQualityError("dataset has unresolved conflict or data-quality incident")
     runs = dataset_version.ingestion_runs.all()
-    if runs.exclude(status=IngestionRun.Status.SUCCEEDED).exists():
+    registration = getattr(dataset_version, "registration", None)
+    if registration:
+        if runs.filter(historical_attempt__isnull=True).exists():
+            raise DatasetQualityError("registered dataset contains an unplanned ingestion")
+        if runs.filter(status=IngestionRun.Status.RUNNING).exists():
+            raise DatasetQualityError("registered dataset has an unfinished ingestion")
+    elif runs.exclude(status=IngestionRun.Status.SUCCEEDED).exists():
         raise DatasetQualityError("dataset has an unsuccessful or unfinished ingestion manifest")
-    if runs.filter(ingestion_manifest__isnull=True).exists():
+    manifest_runs = runs.filter(status=IngestionRun.Status.SUCCEEDED) if registration else runs
+    if manifest_runs.filter(ingestion_manifest__isnull=True).exists():
         raise DatasetQualityError("dataset ingestion run has no governed manifest")
     candles = dataset_version.candles.all()
     if candles.exclude(ingestion_run__status=IngestionRun.Status.SUCCEEDED).exists():
@@ -120,23 +127,44 @@ def assert_dataset_window_usable(dataset_version, instrument, required_ranges, a
 
 @transaction.atomic
 def store_ingestion(
-    source, instrument, granularity, start, end, candle_data, manifest, dataset_version=None
+    source,
+    instrument,
+    granularity,
+    start,
+    end,
+    candle_data,
+    manifest,
+    dataset_version=None,
+    ingestion_run=None,
 ):
     digest = manifest_hash(manifest)
-    run, created = IngestionRun.objects.get_or_create(
-        request_manifest_hash=digest,
-        dataset_version=dataset_version,
-        defaults={
-            "source": source,
-            "instrument": instrument,
-            "granularity": granularity,
-            "requested_from": start,
-            "requested_to": end,
-            "parameters": {key: value for key, value in manifest.items() if key != "requests"},
-        },
-    )
-    if not created:
-        return run
+    if ingestion_run is None:
+        run, created = IngestionRun.objects.get_or_create(
+            request_manifest_hash=digest,
+            dataset_version=dataset_version,
+            defaults={
+                "source": source,
+                "instrument": instrument,
+                "granularity": granularity,
+                "requested_from": start,
+                "requested_to": end,
+                "parameters": {key: value for key, value in manifest.items() if key != "requests"},
+            },
+        )
+        if not created:
+            return run
+    else:
+        run = ingestion_run
+        if (
+            run.status != IngestionRun.Status.RUNNING
+            or run.source_id != source.pk
+            or run.instrument_id != instrument.pk
+            or run.dataset_version_id != getattr(dataset_version, "pk", None)
+            or run.granularity != granularity
+            or run.requested_from != start
+            or run.requested_to != end
+        ):
+            raise DatasetQualityError("preallocated ingestion run does not match request lineage")
     ingestion_manifest = None
     if dataset_version:
         ingestion_manifest = IngestionManifest.objects.create(

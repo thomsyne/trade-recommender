@@ -58,6 +58,7 @@ class SourceRegistry(models.Model):
 
 
 GRANULARITIES = (("W", "Weekly"), ("D", "Daily"), ("H4", "Four-hour"), ("H1", "Hourly"))
+HISTORICAL_GRANULARITIES = (("W", "Weekly"), ("D", "Daily"), ("H1", "Hourly"))
 
 
 class ImmutableModel(models.Model):
@@ -94,6 +95,81 @@ class DatasetVersion(ImmutableModel):
             raise ValidationError("dataset manifest SHA-256 does not match canonical manifest JSON")
         self.manifest_sha256 = expected_hash
         return super().save(*args, **kwargs)
+
+
+class HistoricalDatasetPlan(ImmutableModel):
+    PRICE_COMPONENT = "COMBINED_BID_ASK"
+
+    identity = models.CharField(max_length=160)
+    source = models.ForeignKey(SourceRegistry, on_delete=models.PROTECT)
+    strategy_version = models.ForeignKey("research.StrategyVersion", on_delete=models.PROTECT)
+    instruments = models.JSONField()
+    granularities = models.JSONField()
+    ranges = models.JSONField()
+    alignment = models.JSONField()
+    price_component = models.CharField(max_length=32, default=PRICE_COMPONENT)
+    complete_only = models.BooleanField(default=True)
+    chunk_size = models.PositiveIntegerField(default=4999)
+    phase1_spec_hash = models.CharField(max_length=64)
+    phase1_manifest_hash = models.CharField(max_length=64)
+    payload = models.JSONField()
+    sha256 = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(price_component="COMBINED_BID_ASK"),
+                name="historical_plan_combined_bid_ask",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(complete_only=True), name="historical_plan_complete_only"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(chunk_size__gte=1) & models.Q(chunk_size__lte=4999),
+                name="historical_plan_chunk_size",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        expected_hash = dataset_manifest_sha256(self.payload)
+        if self.sha256 and self.sha256 != expected_hash:
+            raise ValidationError("historical plan SHA-256 does not match canonical payload")
+        self.sha256 = expected_hash
+        return super().save(*args, **kwargs)
+
+
+class HistoricalIngestionChunk(ImmutableModel):
+    plan = models.ForeignKey(HistoricalDatasetPlan, on_delete=models.PROTECT, related_name="chunks")
+    dataset_version = models.ForeignKey(
+        DatasetVersion, on_delete=models.PROTECT, related_name="historical_chunks"
+    )
+    instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
+    granularity = models.CharField(max_length=3, choices=HISTORICAL_GRANULARITIES)
+    requested_from = models.DateTimeField()
+    requested_to = models.DateTimeField()
+    canonical_request = models.JSONField()
+    canonical_request_sha256 = models.CharField(max_length=64)
+    logical_key = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=(
+                    "plan",
+                    "instrument",
+                    "granularity",
+                    "requested_from",
+                    "requested_to",
+                ),
+                name="unique_historical_logical_chunk",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(requested_from__lt=models.F("requested_to")),
+                name="historical_chunk_increasing_range",
+            ),
+        ]
 
 
 class IngestionRun(models.Model):
@@ -139,6 +215,50 @@ class IngestionRun(models.Model):
                 name="unique_legacy_ingestion_manifest_hash",
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            previous = type(self).objects.only("status").get(pk=self.pk)
+            if previous.status != self.Status.RUNNING:
+                raise ValidationError("terminal ingestion runs are immutable")
+            if self.status not in {
+                self.Status.SUCCEEDED,
+                self.Status.FAILED,
+                self.Status.QUARANTINED,
+            }:
+                raise ValidationError("ingestion runs may only transition from running to terminal")
+        return super().save(*args, **kwargs)
+
+
+class HistoricalIngestionAttempt(ImmutableModel):
+    chunk = models.ForeignKey(
+        HistoricalIngestionChunk, on_delete=models.PROTECT, related_name="attempts"
+    )
+    ingestion_run = models.OneToOneField(
+        IngestionRun, on_delete=models.PROTECT, related_name="historical_attempt"
+    )
+    attempt_number = models.PositiveIntegerField()
+    idempotency_key = models.CharField(max_length=200, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("chunk", "attempt_number"), name="unique_historical_chunk_attempt"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(attempt_number__gte=1), name="historical_attempt_number_positive"
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        expected_key = (
+            f"failed-break-ingestion-attempt:{self.chunk.logical_key}:{self.attempt_number}"
+        )
+        if self.idempotency_key and self.idempotency_key != expected_key:
+            raise ValidationError("historical attempt idempotency key does not match its chunk")
+        self.idempotency_key = expected_key
+        return super().save(*args, **kwargs)
 
 
 class Candle(models.Model):
@@ -299,6 +419,61 @@ class DataQualityIncident(ImmutableModel):
                 name="unique_dataset_quality_incident",
             )
         ]
+
+
+class DatasetRegistration(ImmutableModel):
+    dataset_version = models.OneToOneField(
+        DatasetVersion, on_delete=models.PROTECT, related_name="registration"
+    )
+    plan = models.OneToOneField(
+        HistoricalDatasetPlan, on_delete=models.PROTECT, related_name="registration"
+    )
+    series_manifest = models.JSONField()
+    row_counts = models.JSONField()
+    first_last_timestamps = models.JSONField()
+    missingness = models.JSONField()
+    conflict_count = models.PositiveIntegerField()
+    incident_count = models.PositiveIntegerField()
+    logical_chunk_set_hash = models.CharField(max_length=64)
+    successful_attempt_set_hash = models.CharField(max_length=64)
+    ingestion_manifest_set_hash = models.CharField(max_length=64)
+    candle_key_hash = models.CharField(max_length=64)
+    candle_payload_hash = models.CharField(max_length=64)
+    configuration_sha256 = models.CharField(max_length=64)
+    report_sha256 = models.CharField(max_length=64, unique=True)
+    registered_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        configuration = {
+            "identity": "failed-break-historical-dataset-registration-v1",
+            "plan_sha256": self.plan.sha256,
+            "dataset_manifest_sha256": self.dataset_version.manifest_sha256,
+            "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
+            "logical_chunk_set_hash": self.logical_chunk_set_hash,
+        }
+        expected_configuration = dataset_manifest_sha256(configuration)
+        if self.configuration_sha256 and self.configuration_sha256 != expected_configuration:
+            raise ValidationError("dataset registration configuration SHA-256 does not match")
+        self.configuration_sha256 = expected_configuration
+        report = {
+            "configuration_sha256": expected_configuration,
+            "series_manifest": self.series_manifest,
+            "row_counts": self.row_counts,
+            "first_last_timestamps": self.first_last_timestamps,
+            "missingness": self.missingness,
+            "conflict_count": self.conflict_count,
+            "incident_count": self.incident_count,
+            "logical_chunk_set_hash": self.logical_chunk_set_hash,
+            "successful_attempt_set_hash": self.successful_attempt_set_hash,
+            "ingestion_manifest_set_hash": self.ingestion_manifest_set_hash,
+            "candle_key_hash": self.candle_key_hash,
+            "candle_payload_hash": self.candle_payload_hash,
+        }
+        expected_report = dataset_manifest_sha256(report)
+        if self.report_sha256 and self.report_sha256 != expected_report:
+            raise ValidationError("dataset registration report SHA-256 does not match")
+        self.report_sha256 = expected_report
+        return super().save(*args, **kwargs)
 
 
 class TechnicalSnapshot(models.Model):

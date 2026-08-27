@@ -10,6 +10,7 @@ class Phase2ADataMigrationTests(TransactionTestCase):
     migrate_from = [("research", "0010_phase_2a_append_only_triggers")]
     prepared = [("research", "0011_phase_2a_review_corrections")]
     migrate_to = [("research", "0014_enforce_entry_boundary")]
+    latest = [("market", "0010_dataset_registration_enforcement")]
 
     def setUp(self):
         super().setUp()
@@ -49,7 +50,7 @@ class Phase2ADataMigrationTests(TransactionTestCase):
         self.at = datetime(2026, 1, 1, tzinfo=UTC)
 
     def _restore_latest_schema(self):
-        MigrationExecutor(connection).migrate(self.migrate_to)
+        MigrationExecutor(connection).migrate(self.latest)
 
     @staticmethod
     def _strategy(Version, definition, version, content_hash):
