@@ -22,6 +22,7 @@ from django.utils.dateparse import parse_datetime
 
 from market.models import (
     Candle,
+    DatasetRegistration,
     DatasetVersion,
     IngestionRun,
     Instrument,
@@ -51,6 +52,7 @@ S0_JOB_NAME = "failed-break-signal-count-s0"
 S1_DETECTOR_JOB_NAME = "failed-break-signal-count-s1-detector"
 PARTITION_BOUNDARY_CENSOR_RULE = "development-sweep-three-h1-plus-entry-v1"
 PHASE1_MANIFEST_SHA256 = "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
+PHASE1_SPEC_SHA256 = "47d0346bcf723cb78a71763df43f6b092b0c235bb1d17ccbe69f17d9550203cd"
 FROZEN_INSTRUMENTS = frozenset({"EUR_USD", "GBP_USD", "EUR_GBP", "USD_CAD", "USD_JPY", "AUD_USD"})
 S1_GRANULARITIES = frozenset({"W", "D", "H1"})
 DEVELOPMENT_START = datetime(2010, 1, 1, tzinfo=ZoneInfo("America/New_York"))
@@ -347,6 +349,16 @@ def _validate_dataset_contract(dataset, strategy, as_of):
     if (
         manifest.get("strategy_manifest_sha256") != PHASE1_MANIFEST_SHA256
         or set(manifest.get("instruments", ())) != FROZEN_INSTRUMENTS
+        or set(manifest.get("granularities", ())) != S1_GRANULARITIES
+        or manifest.get("price_component") != "COMBINED_BID_ASK"
+        or manifest.get("complete_only") is not True
+        or manifest.get("alignment")
+        != {
+            "timezone": "America/New_York",
+            "daily_hour": 17,
+            "weekly_day": "Friday",
+            "smooth": False,
+        }
         or manifest.get("partition")
         != {"name": "development", "start_year": 2010, "end_year": 2018}
     ):
@@ -383,6 +395,52 @@ def _validate_dataset_contract(dataset, strategy, as_of):
                 raise ReturnBlindViolation(
                     "signal-count as_of precedes required development coverage"
                 )
+    registrations = DatasetRegistration.objects.filter(
+        dataset_version_id=dataset.pk
+    ).select_related("plan__strategy_version__strategyparametermanifest")
+    if registrations.count() != 1:
+        raise ReturnBlindViolation("S0/S1 requires exactly one immutable dataset registration")
+    registration = registrations.get()
+    plan = registration.plan
+    parameter = plan.strategy_version.strategyparametermanifest
+    configuration = {
+        "identity": "failed-break-historical-dataset-registration-v1",
+        "plan_sha256": plan.sha256,
+        "dataset_manifest_sha256": dataset.manifest_sha256,
+        "price_component": "COMBINED_BID_ASK",
+        "logical_chunk_set_hash": registration.logical_chunk_set_hash,
+    }
+    report = {
+        "configuration_sha256": registration.configuration_sha256,
+        "series_manifest": registration.series_manifest,
+        "row_counts": registration.row_counts,
+        "first_last_timestamps": registration.first_last_timestamps,
+        "missingness": registration.missingness,
+        "conflict_count": registration.conflict_count,
+        "incident_count": registration.incident_count,
+        "logical_chunk_set_hash": registration.logical_chunk_set_hash,
+        "successful_attempt_set_hash": registration.successful_attempt_set_hash,
+        "ingestion_manifest_set_hash": registration.ingestion_manifest_set_hash,
+        "candle_key_hash": registration.candle_key_hash,
+        "candle_payload_hash": registration.candle_payload_hash,
+    }
+    if (
+        registration.dataset_version_id != dataset.pk
+        or plan.strategy_version_id != strategy.pk
+        or plan.identity != strategy.data_identity
+        or plan.source_id != dataset.source_id
+        or plan.sha256 != dataset_manifest_sha256(plan.payload)
+        or plan.phase1_spec_hash != PHASE1_SPEC_SHA256
+        or plan.phase1_manifest_hash != PHASE1_MANIFEST_SHA256
+        or plan.strategy_version.content_hash != PHASE1_MANIFEST_SHA256
+        or parameter.sha256 != PHASE1_MANIFEST_SHA256
+        or parameter.phase1_spec_hash != PHASE1_SPEC_SHA256
+        or parameter.phase1_manifest_hash != PHASE1_MANIFEST_SHA256
+        or manifest.get("historical_plan_sha256") != plan.sha256
+        or registration.configuration_sha256 != stable_hash(configuration)
+        or registration.report_sha256 != stable_hash(report)
+    ):
+        raise ReturnBlindViolation("dataset registration hashes or identities do not verify")
     return grouped
 
 

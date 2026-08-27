@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
@@ -18,6 +19,7 @@ from market.models import (
     IngestionRun,
     Instrument,
     SourceRegistry,
+    validate_historical_ingestion_manifest,
 )
 from market.quality import (
     expected_candle_timestamps,
@@ -436,6 +438,19 @@ def register_historical_dataset(dataset_id, plan_sha256):
             raise DatasetQualityError(
                 "every historical chunk requires exactly one successful attempt"
             )
+        try:
+            manifest = succeeded[0].ingestion_run.ingestion_manifest
+            validate_historical_ingestion_manifest(
+                ingestion_run=succeeded[0].ingestion_run,
+                dataset_version=dataset,
+                payload=manifest.payload,
+            )
+            if manifest.sha256 != stable_hash(manifest.payload):
+                raise ValueError
+        except (AttributeError, ValidationError, ValueError) as error:
+            raise DatasetQualityError(
+                "successful historical attempt has an invalid ingestion manifest"
+            ) from error
         successful_attempts.extend(succeeded)
     if dataset.conflicts.exists() or dataset.incidents.exists():
         raise DatasetQualityError("dataset has a conflict or data-quality incident")

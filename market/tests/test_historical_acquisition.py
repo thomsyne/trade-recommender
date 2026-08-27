@@ -2,6 +2,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -28,6 +29,7 @@ from market.models import (
     HistoricalDatasetPlan,
     HistoricalIngestionAttempt,
     HistoricalIngestionChunk,
+    IngestionManifest,
     IngestionRun,
     Instrument,
     SourceRegistry,
@@ -160,6 +162,26 @@ class HistoricalFixtureMixin:
     def plan(self):
         return create_historical_dataset_plan(self.payload())
 
+    def manifest_payload(self, attempt):
+        chunk = attempt.chunk
+        return {
+            "instrument": chunk.instrument.code,
+            "granularity": chunk.granularity,
+            "from": chunk.requested_from.isoformat(),
+            "to": chunk.requested_to.isoformat(),
+            "price": "BA",
+            "price_component": "COMBINED_BID_ASK",
+            "smooth": False,
+            "dailyAlignment": 17,
+            "alignmentTimezone": "America/New_York",
+            "weeklyAlignment": "Friday",
+            "includeFirst": True,
+            "complete_only": True,
+            "historical_logical_key": chunk.logical_key,
+            "historical_attempt": attempt.attempt_number,
+            "requests": [{"url": "https://example.invalid", "status": 200}],
+        }
+
 
 class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
     def test_plan_is_idempotent_and_materializes_frozen_bid_ask_chunks(self):
@@ -178,7 +200,7 @@ class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
             self.assertEqual(chunk.canonical_request["price_component"], "COMBINED_BID_ASK")
             self.assertLess(chunk.requested_to, datetime(2019, 1, 1, 5, tzinfo=UTC))
 
-    def test_generated_manifest_is_accepted_by_existing_return_blind_validator(self):
+    def test_generated_manifest_is_compatible_but_requires_registration_for_admission(self):
         ranges = {
             "H1": {
                 "from": datetime(2009, 12, 30, 10, tzinfo=self.new_york).isoformat(),
@@ -193,14 +215,110 @@ class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
                 "to": datetime(2018, 12, 28, 17, tzinfo=self.new_york).isoformat(),
             },
         }
-        _, dataset = create_historical_dataset_plan(self.payload(ranges=ranges))
+        plan, dataset = create_historical_dataset_plan(self.payload(ranges=ranges))
 
-        grouped = _validate_dataset_contract(
-            dataset, self.strategy, datetime(2019, 1, 1, tzinfo=self.new_york)
-        )
-
-        self.assertEqual(set(grouped), set(INSTRUMENTS))
+        with (
+            self.assertRaisesMessage(ValueError, "exactly one immutable dataset registration"),
+            patch("research.signal_count.Candle.objects") as candles,
+        ):
+            _validate_dataset_contract(
+                dataset, self.strategy, datetime(2019, 1, 1, tzinfo=self.new_york)
+            )
+        candles.assert_not_called()
         self.assertEqual(len(dataset.manifest["required_ranges"]), 18)
+        self.assertEqual(dataset.manifest["granularities"], ["D", "H1", "W"])
+        self.assertEqual(dataset.manifest["price_component"], "COMBINED_BID_ASK")
+
+        registration = SimpleNamespace(
+            dataset_version_id=dataset.pk,
+            plan=plan,
+            series_manifest=[],
+            row_counts={},
+            first_last_timestamps={},
+            missingness={},
+            conflict_count=0,
+            incident_count=0,
+            logical_chunk_set_hash="1" * 64,
+            successful_attempt_set_hash="2" * 64,
+            ingestion_manifest_set_hash="3" * 64,
+            candle_key_hash="4" * 64,
+            candle_payload_hash="5" * 64,
+        )
+        configuration = {
+            "identity": "failed-break-historical-dataset-registration-v1",
+            "plan_sha256": plan.sha256,
+            "dataset_manifest_sha256": dataset.manifest_sha256,
+            "price_component": "COMBINED_BID_ASK",
+            "logical_chunk_set_hash": registration.logical_chunk_set_hash,
+        }
+        registration.configuration_sha256 = stable_hash(configuration)
+        report = {
+            "configuration_sha256": registration.configuration_sha256,
+            "series_manifest": registration.series_manifest,
+            "row_counts": registration.row_counts,
+            "first_last_timestamps": registration.first_last_timestamps,
+            "missingness": registration.missingness,
+            "conflict_count": registration.conflict_count,
+            "incident_count": registration.incident_count,
+            "logical_chunk_set_hash": registration.logical_chunk_set_hash,
+            "successful_attempt_set_hash": registration.successful_attempt_set_hash,
+            "ingestion_manifest_set_hash": registration.ingestion_manifest_set_hash,
+            "candle_key_hash": registration.candle_key_hash,
+            "candle_payload_hash": registration.candle_payload_hash,
+        }
+        registration.report_sha256 = stable_hash(report)
+        with (
+            patch("research.signal_count.DatasetRegistration.objects") as registrations,
+            patch("research.signal_count.Candle.objects") as candles,
+        ):
+            queryset = registrations.filter.return_value.select_related.return_value
+            queryset.count.return_value = 1
+            queryset.get.return_value = registration
+            grouped = _validate_dataset_contract(
+                dataset, self.strategy, datetime(2019, 1, 1, tzinfo=self.new_york)
+            )
+        self.assertEqual(set(grouped), set(INSTRUMENTS))
+        candles.assert_not_called()
+
+        sibling_strategy = SimpleNamespace(
+            pk=self.strategy.pk + 1000,
+            content_hash=self.strategy.content_hash,
+            pair_metadata=self.strategy.pair_metadata,
+            data_identity=self.strategy.data_identity,
+        )
+        original_identity = plan.identity
+        original_dataset_id = registration.dataset_version_id
+        original_report_hash = registration.report_sha256
+        cases = (
+            ("strategy", sibling_strategy),
+            ("plan", self.strategy),
+            ("dataset", self.strategy),
+            ("hash", self.strategy),
+        )
+        for case, supplied_strategy in cases:
+            plan.identity = "wrong" if case == "plan" else original_identity
+            registration.dataset_version_id = (
+                dataset.pk + 1000 if case == "dataset" else original_dataset_id
+            )
+            registration.report_sha256 = "0" * 64 if case == "hash" else original_report_hash
+            with (
+                self.subTest(case=case),
+                patch("research.signal_count.DatasetRegistration.objects") as registrations,
+                patch("research.signal_count.Candle.objects") as candles,
+            ):
+                queryset = registrations.filter.return_value.select_related.return_value
+                queryset.count.return_value = 1
+                queryset.get.return_value = registration
+                with self.assertRaisesMessage(ValueError, "hashes or identities"):
+                    _validate_dataset_contract(
+                        dataset,
+                        supplied_strategy,
+                        datetime(2019, 1, 1, tzinfo=self.new_york),
+                    )
+                candles.assert_not_called()
+        plan.identity = original_identity
+        registration.dataset_version_id = original_dataset_id
+        registration.report_sha256 = original_report_hash
 
     def test_boundary_completing_h1_and_post_boundary_daily_weekly_are_rejected(self):
         for granularity, start, end in (
@@ -367,6 +485,105 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
             digest_function, database_hash = cursor.fetchone()
         self.assertIsNotNone(digest_function)
         self.assertEqual(database_hash, stable_hash(payload))
+
+    def test_historical_manifest_semantics_are_enforced_across_write_paths(self):
+        plan, dataset = self.plan()
+        chunks = list(plan.chunks.order_by("logical_key"))
+        canonical_attempt, _ = begin_historical_attempt(chunks.pop().logical_key)
+        canonical = self.manifest_payload(canonical_attempt)
+        manifest = IngestionManifest.objects.create(
+            ingestion_run=canonical_attempt.ingestion_run,
+            dataset_version=dataset,
+            payload=canonical,
+            sha256=stable_hash(canonical),
+        )
+        self.assertEqual(manifest.sha256, stable_hash(canonical))
+
+        changed = {**canonical, "price": "M"}
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            IngestionManifest.objects.filter(pk=manifest.pk).update(
+                payload=changed, sha256=stable_hash(changed)
+            )
+
+        normal_attempt, _ = begin_historical_attempt(chunks.pop().logical_key)
+        changed = {**self.manifest_payload(normal_attempt), "includeFirst": False}
+        with self.assertRaises(ValidationError):
+            IngestionManifest.objects.create(
+                ingestion_run=normal_attempt.ingestion_run,
+                dataset_version=dataset,
+                payload=changed,
+                sha256=stable_hash(changed),
+            )
+
+        raw_attempt, _ = begin_historical_attempt(chunks.pop().logical_key)
+        changed = {**self.manifest_payload(raw_attempt), "complete_only": False}
+        with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO market_ingestionmanifest
+                   (ingestion_run_id,dataset_version_id,payload,sha256,created_at)
+                   VALUES (%s,%s,%s::jsonb,%s,now())""",
+                [
+                    raw_attempt.ingestion_run_id,
+                    dataset.pk,
+                    json.dumps(changed),
+                    stable_hash(changed),
+                ],
+            )
+
+        mutations = (
+            ("instrument", "NOT_A_PAIR"),
+            ("granularity", "H4"),
+            ("from", "2018-01-01T00:00:00+00:00"),
+            ("to", "2018-01-01T01:00:00+00:00"),
+            ("price", "M"),
+            ("price_component", "MID"),
+            ("smooth", True),
+            ("dailyAlignment", 0),
+            ("alignmentTimezone", "UTC"),
+            ("weeklyAlignment", "Monday"),
+            ("historical_logical_key", "0" * 64),
+            ("historical_attempt", 99),
+            ("requests", [{"status": 200}, {"status": 200}]),
+            ("requests", [{"status": 500}]),
+        )
+        for (field, value), chunk in zip(mutations, chunks):
+            attempt, _ = begin_historical_attempt(chunk.logical_key)
+            changed = {**self.manifest_payload(attempt), field: value}
+            false_manifest = IngestionManifest(
+                ingestion_run=attempt.ingestion_run,
+                dataset_version=dataset,
+                payload=changed,
+                sha256=stable_hash(changed),
+            )
+            with (
+                self.subTest(field=field, value=value),
+                self.assertRaises(DatabaseError),
+                transaction.atomic(),
+            ):
+                IngestionManifest.objects.bulk_create([false_manifest])
+
+    def test_registration_revalidates_successful_manifest_semantics_in_database(self):
+        plan, dataset = self.plan()
+        for chunk in plan.chunks.order_by("logical_key"):
+            run_historical_chunk(chunk.logical_key, FakeClient())
+        manifest = dataset.manifests.first()
+        changed = {**manifest.payload, "weeklyAlignment": "Monday"}
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("ALTER TABLE market_ingestionmanifest DISABLE TRIGGER USER")
+                cursor.execute(
+                    "UPDATE market_ingestionmanifest SET payload=%s::jsonb,sha256=%s WHERE id=%s",
+                    [json.dumps(changed), stable_hash(changed), manifest.pk],
+                )
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute("ALTER TABLE market_ingestionmanifest ENABLE TRIGGER USER")
+
+        with (
+            patch("market.historical_acquisition.validate_historical_ingestion_manifest"),
+            self.assertRaises(DatabaseError),
+        ):
+            register_historical_dataset(dataset.pk, plan.sha256)
 
     def test_database_rejects_duplicate_attempt_number_and_terminal_run_mutation(self):
         plan, _ = self.plan()

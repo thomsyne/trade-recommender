@@ -1,13 +1,61 @@
 import hashlib
 import json
+from datetime import UTC
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils.dateparse import parse_datetime
 
 
 def dataset_manifest_sha256(manifest):
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_historical_ingestion_manifest(*, ingestion_run, dataset_version, payload):
+    """Validate a persisted provider manifest against its frozen historical attempt."""
+    if "historical_plan_sha256" not in dataset_version.manifest:
+        return
+    try:
+        attempt = ingestion_run.historical_attempt
+        chunk = attempt.chunk
+        requested_from = parse_datetime(payload["from"]).astimezone(UTC)
+        requested_to = parse_datetime(payload["to"]).astimezone(UTC)
+        requests = payload["requests"]
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
+        raise ValidationError("historical manifest lacks canonical attempt lineage") from error
+    required = {
+        "instrument": chunk.instrument.code,
+        "granularity": chunk.granularity,
+        "price": "BA",
+        "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
+        "smooth": False,
+        "dailyAlignment": 17,
+        "alignmentTimezone": "America/New_York",
+        "weeklyAlignment": "Friday",
+        "includeFirst": True,
+        "complete_only": True,
+        "historical_logical_key": chunk.logical_key,
+        "historical_attempt": attempt.attempt_number,
+    }
+    if (
+        any(payload.get(key) != value for key, value in required.items())
+        or requested_from != chunk.requested_from.astimezone(UTC)
+        or requested_to != chunk.requested_to.astimezone(UTC)
+        or type(requests) is not list
+        or len(requests) != 1
+        or type(requests[0]) is not dict
+        or requests[0].get("status") != 200
+        or chunk.dataset_version_id != dataset_version.pk
+        or ingestion_run.dataset_version_id != dataset_version.pk
+        or ingestion_run.source_id != chunk.plan.source_id
+        or ingestion_run.instrument_id != chunk.instrument_id
+        or ingestion_run.granularity != chunk.granularity
+        or ingestion_run.requested_from != chunk.requested_from
+        or ingestion_run.requested_to != chunk.requested_to
+        or ingestion_run.parameters != chunk.canonical_request
+    ):
+        raise ValidationError("historical manifest conflicts with canonical attempt semantics")
 
 
 class Instrument(models.Model):
@@ -371,6 +419,18 @@ class IngestionManifest(ImmutableModel):
                 fields=("dataset_version", "sha256"), name="unique_dataset_manifest_hash"
             )
         ]
+
+    def save(self, *args, **kwargs):
+        validate_historical_ingestion_manifest(
+            ingestion_run=self.ingestion_run,
+            dataset_version=self.dataset_version,
+            payload=self.payload,
+        )
+        expected_hash = dataset_manifest_sha256(self.payload)
+        if self.sha256 and self.sha256 != expected_hash:
+            raise ValidationError("ingestion manifest SHA-256 does not match canonical JSON")
+        self.sha256 = expected_hash
+        return super().save(*args, **kwargs)
 
 
 class CandleConflict(ImmutableModel):
