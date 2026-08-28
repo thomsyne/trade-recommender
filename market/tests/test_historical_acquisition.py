@@ -15,7 +15,9 @@ from django.test import TestCase, TransactionTestCase
 from market.historical_acquisition import (
     ACQUISITION_CONTRACT,
     ACQUISITION_VERSION,
+    ALIGNMENT,
     FROZEN_RANGES,
+    GRANULARITIES,
     INSTRUMENTS,
     PHASE1_MANIFEST_SHA256,
     PHASE1_SPEC_SHA256,
@@ -210,6 +212,72 @@ class HistoricalFixtureMixin:
 
     def plan(self):
         return create_historical_dataset_plan(self.payload())
+
+    def plan_without_dataset(self):
+        payload = self.payload()
+        normalized = {
+            "acquisition_contract": ACQUISITION_CONTRACT,
+            "acquisition_version": ACQUISITION_VERSION,
+            "source": payload["source"],
+            "strategy": payload["strategy"],
+            "data_identity": payload["data_identity"],
+            "dataset": payload["dataset"],
+            "instruments": list(INSTRUMENTS),
+            "granularities": list(GRANULARITIES),
+            "ranges": FROZEN_RANGES,
+            "alignment": ALIGNMENT,
+            "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
+            "complete_only": True,
+            "chunk_size": payload["chunk_size"],
+            "phase1_spec_hash": PHASE1_SPEC_SHA256,
+            "phase1_manifest_hash": PHASE1_MANIFEST_SHA256,
+        }
+        return HistoricalDatasetPlan.objects.create(
+            identity=normalized["data_identity"],
+            source=self.source,
+            strategy_version=self.strategy,
+            instruments=normalized["instruments"],
+            granularities=normalized["granularities"],
+            ranges=normalized["ranges"],
+            alignment=normalized["alignment"],
+            chunk_size=normalized["chunk_size"],
+            phase1_spec_hash=normalized["phase1_spec_hash"],
+            phase1_manifest_hash=normalized["phase1_manifest_hash"],
+            payload=normalized,
+            sha256=stable_hash(normalized),
+        )
+
+    def canonical_dataset_manifest(self, plan):
+        return {
+            "strategy_manifest_sha256": plan.strategy_version.content_hash,
+            "partition": {"name": "development", "start_year": 2010, "end_year": 2018},
+            "required_ranges": [
+                {
+                    "instrument": instrument,
+                    "granularity": granularity,
+                    "start": plan.ranges[granularity]["from"],
+                    "end": plan.ranges[granularity]["to"],
+                }
+                for instrument in plan.instruments
+                for granularity in plan.granularities
+            ],
+            "historical_plan_sha256": plan.sha256,
+            "price_component": plan.price_component,
+            "complete_only": plan.complete_only,
+            "instruments": plan.instruments,
+            "granularities": plan.granularities,
+            "alignment": plan.alignment,
+        }
+
+    @contextmanager
+    def assert_database_trigger_error(self, message, function):
+        with self.assertRaises(DatabaseError) as raised, transaction.atomic():
+            yield
+        cause = raised.exception.__cause__
+        self.assertIsNotNone(cause)
+        self.assertEqual(cause.sqlstate, "P0001")
+        self.assertEqual(cause.diag.message_primary, message)
+        self.assertIn(f"PL/pgSQL function {function}()", cause.diag.context)
 
     def condensed_expected_timestamps(self, plan):
         series_starts = {
@@ -745,49 +813,42 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
         self.assertIsNotNone(digest_function)
         self.assertEqual(database_hash, stable_hash(payload))
 
-    def test_historical_dataset_manifest_is_exact_across_database_write_paths(self):
-        plan, dataset = self.plan()
-
-        missing_range = {**dataset.manifest}
+    def test_historical_dataset_insert_requires_exact_complete_canonical_manifest(self):
+        plan = self.plan_without_dataset()
+        canonical_dataset = self.canonical_dataset_manifest(plan)
+        missing_range = {**canonical_dataset}
         missing_range["required_ranges"] = missing_range["required_ranges"][:-1]
-        with self.assertRaises(DatabaseError), transaction.atomic():
+        with self.assert_database_trigger_error(
+            "historical dataset conflicts with portable plan identity",
+            "market_validate_historical_dataset",
+        ):
             DatasetVersion.objects.create(
-                name=dataset.name,
-                version=dataset.version,
-                description=dataset.description,
-                source=dataset.source,
+                name=plan.payload["dataset"]["name"],
+                version=plan.payload["dataset"]["version"],
+                description=plan.payload["dataset"]["description"],
+                source=plan.source,
                 manifest=missing_range,
             )
 
-        altered_range = {**dataset.manifest}
-        altered_range["required_ranges"] = [*altered_range["required_ranges"]]
-        altered_range["required_ranges"][0] = {
-            **altered_range["required_ranges"][0],
-            "start": "2009-02-25T22:00:00+00:00",
-        }
-        with self.assertRaises(DatabaseError), transaction.atomic():
-            DatasetVersion.objects.filter(pk=dataset.pk).update(
-                manifest=altered_range,
-                manifest_sha256=stable_hash(altered_range),
-            )
-
-        duplicated_range = {**dataset.manifest}
+        duplicated_range = {**canonical_dataset}
         duplicated_range["required_ranges"] = [*duplicated_range["required_ranges"]]
         duplicated_range["required_ranges"][-1] = duplicated_range["required_ranges"][0]
-        additional_field = {**dataset.manifest, "unapproved": True}
+        additional_field = {**canonical_dataset, "unapproved": True}
         for case, manifest in (("duplicate", duplicated_range), ("extra", additional_field)):
             with (
                 self.subTest(case=case),
-                self.assertRaises(DatabaseError),
-                transaction.atomic(),
+                self.assert_database_trigger_error(
+                    "historical dataset conflicts with portable plan identity",
+                    "market_validate_historical_dataset",
+                ),
             ):
                 DatasetVersion.objects.bulk_create(
                     [
                         DatasetVersion(
-                            name=dataset.name,
-                            version=dataset.version,
-                            description=dataset.description,
-                            source=dataset.source,
+                            name=plan.payload["dataset"]["name"],
+                            version=plan.payload["dataset"]["version"],
+                            description=plan.payload["dataset"]["description"],
+                            source=plan.source,
                             manifest=manifest,
                             manifest_sha256=stable_hash(manifest),
                         )
@@ -796,12 +857,14 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
 
         for case, manifest, manifest_hash in (
             ("missing", missing_range, stable_hash(missing_range)),
-            ("wrong_hash", dataset.manifest, "0" * 64),
+            ("wrong_hash", canonical_dataset, "0" * 64),
         ):
             with (
                 self.subTest(case=case),
-                self.assertRaises(DatabaseError),
-                transaction.atomic(),
+                self.assert_database_trigger_error(
+                    "historical dataset conflicts with portable plan identity",
+                    "market_validate_historical_dataset",
+                ),
                 connection.cursor() as cursor,
             ):
                 cursor.execute(
@@ -809,14 +872,66 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
                        (name,version,description,source_id,manifest,manifest_sha256,created_at)
                        VALUES (%s,%s,%s,%s,%s::jsonb,%s,now())""",
                     [
-                        dataset.name,
-                        dataset.version,
-                        dataset.description,
+                        plan.payload["dataset"]["name"],
+                        plan.payload["dataset"]["version"],
+                        plan.payload["dataset"]["description"],
                         plan.source_id,
                         json.dumps(manifest),
                         manifest_hash,
                     ],
                 )
+
+        self.assertFalse(
+            DatasetVersion.objects.filter(
+                name=plan.payload["dataset"]["name"],
+                version=plan.payload["dataset"]["version"],
+            ).exists()
+        )
+
+    def test_historical_dataset_is_immutable_across_database_write_paths(self):
+        _, dataset = self.plan()
+        dataset.description = "normal-save mutation"
+        with self.assertRaisesMessage(ValidationError, "DatasetVersion records are immutable"):
+            dataset.save()
+
+        operations = (
+            (
+                "queryset_update",
+                lambda: DatasetVersion.objects.filter(pk=dataset.pk).update(
+                    description="queryset mutation"
+                ),
+            ),
+            (
+                "bulk_update",
+                lambda: DatasetVersion.objects.bulk_update([dataset], ["description"]),
+            ),
+        )
+        for case, operation in operations:
+            with (
+                self.subTest(case=case),
+                self.assert_database_trigger_error(
+                    "historical dataset manifests are immutable",
+                    "market_validate_historical_dataset",
+                ),
+            ):
+                operation()
+
+        for case, statement in (
+            (
+                "raw_update",
+                "UPDATE market_datasetversion SET description='raw mutation' WHERE id=%s",
+            ),
+            ("raw_delete", "DELETE FROM market_datasetversion WHERE id=%s"),
+        ):
+            with (
+                self.subTest(case=case),
+                self.assert_database_trigger_error(
+                    "historical dataset manifests are immutable",
+                    "market_validate_historical_dataset",
+                ),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(statement, [dataset.pk])
 
     def test_historical_manifest_semantics_are_enforced_across_write_paths(self):
         plan, dataset = self.plan()
@@ -832,7 +947,10 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
         self.assertEqual(manifest.sha256, stable_hash(canonical))
 
         changed = {**canonical, "price": "M"}
-        with self.assertRaises(DatabaseError), transaction.atomic():
+        with self.assert_database_trigger_error(
+            "historical ingestion manifests are append-only",
+            "market_historical_manifest_insert",
+        ):
             IngestionManifest.objects.filter(pk=manifest.pk).update(
                 payload=changed, sha256=stable_hash(changed)
             )
@@ -849,7 +967,13 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
 
         raw_attempt, _ = begin_historical_attempt(chunks.pop().logical_key)
         changed = {**self.manifest_payload(raw_attempt), "complete_only": False}
-        with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
+        with (
+            self.assert_database_trigger_error(
+                "historical manifest conflicts with canonical attempt semantics",
+                "market_historical_manifest_insert",
+            ),
+            connection.cursor() as cursor,
+        ):
             cursor.execute(
                 """INSERT INTO market_ingestionmanifest
                    (ingestion_run_id,dataset_version_id,payload,sha256,created_at)
@@ -889,8 +1013,10 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
             )
             with (
                 self.subTest(field=field, value=value),
-                self.assertRaises(DatabaseError),
-                transaction.atomic(),
+                self.assert_database_trigger_error(
+                    "historical manifest conflicts with canonical attempt semantics",
+                    "market_historical_manifest_insert",
+                ),
             ):
                 IngestionManifest.objects.bulk_create([false_manifest])
 
@@ -909,7 +1035,13 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
             attempt, _ = begin_historical_attempt(next(chunks).logical_key)
             payload = self.manifest_payload(attempt)
             payload["requests"][0][field] = value
-            with self.subTest(field=field), self.assertRaises(DatabaseError), transaction.atomic():
+            with (
+                self.subTest(field=field),
+                self.assert_database_trigger_error(
+                    "historical manifest conflicts with canonical attempt semantics",
+                    "market_historical_manifest_insert",
+                ),
+            ):
                 IngestionManifest.objects.bulk_create(
                     [
                         IngestionManifest(
@@ -930,8 +1062,10 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
                 payload["includeFirst"] = include_first
             with (
                 self.subTest(include_first=include_first),
-                self.assertRaises(DatabaseError),
-                transaction.atomic(),
+                self.assert_database_trigger_error(
+                    "historical manifest conflicts with canonical attempt semantics",
+                    "market_historical_manifest_insert",
+                ),
             ):
                 IngestionManifest.objects.bulk_create(
                     [
