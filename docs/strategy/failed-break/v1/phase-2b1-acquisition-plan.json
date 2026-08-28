@@ -1,0 +1,49 @@
+{
+  "acquisition_contract": "failed-break-historical-acquisition",
+  "acquisition_version": "phase-2b1-v1",
+  "source": {
+    "name": "OANDA v20",
+    "governed_identity": "oanda-v20-market-candles-v1"
+  },
+  "strategy": {
+    "definition_key": "top-down-failed-break-continuation",
+    "version": "failed-break-phase-1-freeze-v1",
+    "content_hash": "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
+  },
+  "data_identity": "oanda-ba-ny17-friday-v1",
+  "phase1_spec_hash": "47d0346bcf723cb78a71763df43f6b092b0c235bb1d17ccbe69f17d9550203cd",
+  "phase1_manifest_hash": "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882",
+  "dataset": {
+    "name": "failed-break-history",
+    "version": "development-2010-2018-v1",
+    "description": "Frozen return-blind W/D/H1 development history for Phase 2B.1."
+  },
+  "instruments": [
+    "AUD_USD",
+    "EUR_GBP",
+    "EUR_USD",
+    "GBP_USD",
+    "USD_CAD",
+    "USD_JPY"
+  ],
+  "granularities": [
+    "D",
+    "H1",
+    "W"
+  ],
+  "ranges": {
+    "H1": {
+      "from": "2009-12-31T10:00:00-05:00",
+      "to": "2018-12-31T23:00:00-05:00"
+    },
+    "D": {
+      "from": "2009-02-26T17:00:00-05:00",
+      "to": "2018-12-31T17:00:00-05:00"
+    },
+    "W": {
+      "from": "2009-12-18T17:00:00-05:00",
+      "to": "2018-12-28T17:00:00-05:00"
+    }
+  },
+  "chunk_size": 4999
+}

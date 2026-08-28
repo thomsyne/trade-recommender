@@ -127,6 +127,20 @@ class OandaClient:
             "weeklyAlignment": "Friday",
             "includeFirst": "true",
         }
+        canonical_request = {
+            "instrument": instrument,
+            "granularity": granularity,
+            "from": start.isoformat(),
+            "to": end.isoformat(),
+            "price": "BA",
+            "price_component": "COMBINED_BID_ASK",
+            "smooth": False,
+            "dailyAlignment": 17,
+            "alignmentTimezone": "America/New_York",
+            "weeklyAlignment": "Friday",
+            "includeFirst": True,
+            "complete_only": True,
+        }
         response = self.client.get(f"/instruments/{instrument}/candles", params=params)
         payload = _response_json(response)
         try:
@@ -144,7 +158,18 @@ class OandaClient:
             "dailyAlignment": 17,
             "weeklyAlignment": "Friday",
             "includeFirst": True,
-            "requests": [{"url": str(response.request.url), "status": response.status_code}],
+            "requests": [
+                {
+                    "endpoint_identity": (
+                        f"oanda-v20-{self.environment}:GET:/v3/instruments/{instrument}/candles"
+                    ),
+                    "http_method": "GET",
+                    "oanda_environment": self.environment,
+                    "canonical_request_sha256": manifest_hash(canonical_request),
+                    "provider_request_id": response.headers.get("RequestID", ""),
+                    "http_status": response.status_code,
+                }
+            ],
         }
         return candles, manifest
 

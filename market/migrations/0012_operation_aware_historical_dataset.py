@@ -1,0 +1,201 @@
+from importlib import import_module
+
+from django.db import migrations
+
+HISTORICAL_DATASET_FUNCTION = """
+CREATE OR REPLACE FUNCTION market_validate_historical_dataset() RETURNS trigger AS $$
+DECLARE plan record; strategy record; expected_manifest jsonb; required_ranges jsonb;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    IF OLD.manifest ? 'historical_plan_sha256' THEN
+      RAISE EXCEPTION 'historical dataset manifests are immutable';
+    END IF;
+    RAISE EXCEPTION 'market_datasetversion is append-only';
+  END IF;
+  IF TG_OP='UPDATE' THEN
+    IF OLD.manifest ? 'historical_plan_sha256'
+       OR NEW.manifest ? 'historical_plan_sha256' THEN
+      RAISE EXCEPTION 'historical dataset manifests are immutable';
+    END IF;
+    RAISE EXCEPTION 'market_datasetversion is append-only';
+  END IF;
+  IF NOT NEW.manifest ? 'historical_plan_sha256' THEN RETURN NEW; END IF;
+  SELECT * INTO STRICT plan FROM market_historicaldatasetplan
+    WHERE sha256=NEW.manifest->>'historical_plan_sha256';
+  SELECT * INTO STRICT strategy FROM research_strategyversion
+    WHERE id=plan.strategy_version_id;
+  SELECT jsonb_agg(jsonb_build_object(
+           'instrument',instrument.value,
+           'granularity',granularity.value,
+           'start',plan.ranges->granularity.value->'from',
+           'end',plan.ranges->granularity.value->'to')
+           ORDER BY instrument.ordinality,granularity.ordinality)
+    INTO required_ranges
+    FROM jsonb_array_elements_text(plan.instruments)
+           WITH ORDINALITY AS instrument(value,ordinality)
+    CROSS JOIN jsonb_array_elements_text(plan.granularities)
+           WITH ORDINALITY AS granularity(value,ordinality);
+  expected_manifest := jsonb_build_object(
+    'strategy_manifest_sha256',strategy.content_hash,
+    'partition',jsonb_build_object('name','development','start_year',2010,'end_year',2018),
+    'required_ranges',required_ranges,
+    'historical_plan_sha256',plan.sha256,
+    'price_component',plan.price_component,
+    'complete_only',plan.complete_only,
+    'instruments',plan.instruments,
+    'granularities',plan.granularities,
+    'alignment',plan.alignment);
+  IF NEW.source_id IS DISTINCT FROM plan.source_id
+     OR NEW.name IS DISTINCT FROM plan.payload->'dataset'->>'name'
+     OR NEW.version IS DISTINCT FROM plan.payload->'dataset'->>'version'
+     OR NEW.description IS DISTINCT FROM plan.payload->'dataset'->>'description'
+     OR NEW.manifest IS DISTINCT FROM expected_manifest
+     OR NEW.manifest_sha256 IS DISTINCT FROM market_sha256(expected_manifest)
+  THEN RAISE EXCEPTION 'historical dataset conflicts with portable plan identity'; END IF;
+  RETURN NEW;
+EXCEPTION WHEN NO_DATA_FOUND THEN
+  RAISE EXCEPTION 'historical dataset lacks its canonical plan';
+END $$ LANGUAGE plpgsql;
+"""
+
+HISTORICAL_DATASET_FUNCTION_0011 = """
+CREATE OR REPLACE FUNCTION market_validate_historical_dataset() RETURNS trigger AS $$
+DECLARE plan record; strategy record; expected_manifest jsonb; required_ranges jsonb;
+BEGIN
+  IF NOT NEW.manifest ? 'historical_plan_sha256' THEN RETURN NEW; END IF;
+  SELECT * INTO STRICT plan FROM market_historicaldatasetplan
+    WHERE sha256=NEW.manifest->>'historical_plan_sha256';
+  SELECT * INTO STRICT strategy FROM research_strategyversion
+    WHERE id=plan.strategy_version_id;
+  SELECT jsonb_agg(jsonb_build_object(
+           'instrument',instrument.value,
+           'granularity',granularity.value,
+           'start',plan.ranges->granularity.value->'from',
+           'end',plan.ranges->granularity.value->'to')
+           ORDER BY instrument.ordinality,granularity.ordinality)
+    INTO required_ranges
+    FROM jsonb_array_elements_text(plan.instruments)
+           WITH ORDINALITY AS instrument(value,ordinality)
+    CROSS JOIN jsonb_array_elements_text(plan.granularities)
+           WITH ORDINALITY AS granularity(value,ordinality);
+  expected_manifest := jsonb_build_object(
+    'strategy_manifest_sha256',strategy.content_hash,
+    'partition',jsonb_build_object('name','development','start_year',2010,'end_year',2018),
+    'required_ranges',required_ranges,
+    'historical_plan_sha256',plan.sha256,
+    'price_component',plan.price_component,
+    'complete_only',plan.complete_only,
+    'instruments',plan.instruments,
+    'granularities',plan.granularities,
+    'alignment',plan.alignment);
+  IF NEW.source_id<>plan.source_id OR NEW.name<>plan.payload->'dataset'->>'name'
+     OR NEW.version<>plan.payload->'dataset'->>'version'
+     OR NEW.description<>plan.payload->'dataset'->>'description'
+     OR NEW.manifest<>expected_manifest
+     OR NEW.manifest_sha256<>market_sha256(expected_manifest)
+  THEN RAISE EXCEPTION 'historical dataset conflicts with portable plan identity'; END IF;
+  RETURN NEW;
+EXCEPTION WHEN NO_DATA_FOUND THEN
+  RAISE EXCEPTION 'historical dataset lacks its canonical plan';
+END $$ LANGUAGE plpgsql;
+"""
+
+
+def validate_existing_historical_datasets(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute("LOCK TABLE market_datasetversion IN SHARE ROW EXCLUSIVE MODE")
+        cursor.execute(
+            """
+            SELECT dataset.id
+            FROM market_datasetversion dataset
+            LEFT JOIN market_historicaldatasetplan plan
+              ON plan.sha256=dataset.manifest->>'historical_plan_sha256'
+            LEFT JOIN research_strategyversion strategy ON strategy.id=plan.strategy_version_id
+            LEFT JOIN LATERAL (
+              SELECT jsonb_agg(jsonb_build_object(
+                       'instrument',instrument.value,
+                       'granularity',granularity.value,
+                       'start',plan.ranges->granularity.value->'from',
+                       'end',plan.ranges->granularity.value->'to')
+                       ORDER BY instrument.ordinality,granularity.ordinality) AS value
+              FROM jsonb_array_elements_text(plan.instruments)
+                     WITH ORDINALITY AS instrument(value,ordinality)
+              CROSS JOIN jsonb_array_elements_text(plan.granularities)
+                     WITH ORDINALITY AS granularity(value,ordinality)
+            ) required_ranges ON true
+            CROSS JOIN LATERAL (
+              SELECT jsonb_build_object(
+                'strategy_manifest_sha256',strategy.content_hash,
+                'partition',jsonb_build_object(
+                  'name','development','start_year',2010,'end_year',2018),
+                'required_ranges',required_ranges.value,
+                'historical_plan_sha256',plan.sha256,
+                'price_component',plan.price_component,
+                'complete_only',plan.complete_only,
+                'instruments',plan.instruments,
+                'granularities',plan.granularities,
+                'alignment',plan.alignment) AS value
+            ) expected_manifest
+            WHERE dataset.manifest ? 'historical_plan_sha256'
+              AND (plan.id IS NULL
+                OR strategy.id IS NULL
+                OR dataset.source_id IS DISTINCT FROM plan.source_id
+                OR dataset.name IS DISTINCT FROM plan.payload->'dataset'->>'name'
+                OR dataset.version IS DISTINCT FROM plan.payload->'dataset'->>'version'
+                OR dataset.description IS DISTINCT FROM plan.payload->'dataset'->>'description'
+                OR dataset.manifest IS DISTINCT FROM expected_manifest.value
+                OR dataset.manifest_sha256 IS DISTINCT FROM market_sha256(expected_manifest.value))
+            ORDER BY dataset.id
+            LIMIT 1
+            """
+        )
+        invalid = cursor.fetchone()
+    if invalid is not None:
+        raise RuntimeError(
+            f"historical DatasetVersion {invalid[0]} conflicts with its canonical plan"
+        )
+
+
+def install_operation_aware_trigger(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+    schema_editor.execute(
+        "DROP TRIGGER market_historical_dataset_validate ON market_datasetversion;"
+        "DROP TRIGGER market_datasetversion_append_only ON market_datasetversion;"
+        + HISTORICAL_DATASET_FUNCTION
+        + "DROP FUNCTION market_datasetversion_reject_mutation();"
+        "CREATE TRIGGER market_historical_dataset_validate BEFORE INSERT OR UPDATE OR DELETE "
+        "ON market_datasetversion FOR EACH ROW "
+        "EXECUTE FUNCTION market_validate_historical_dataset();"
+    )
+
+
+def restore_0011_triggers(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+    migration_0011 = import_module("market.migrations.0011_portable_acquisition_identities")
+    migration_0011.require_empty_phase2b(apps, schema_editor)
+    schema_editor.execute(
+        "DROP TRIGGER market_historical_dataset_validate ON market_datasetversion;"
+        + HISTORICAL_DATASET_FUNCTION_0011
+        + "CREATE TRIGGER market_historical_dataset_validate BEFORE INSERT "
+        "ON market_datasetversion FOR EACH ROW "
+        "EXECUTE FUNCTION market_validate_historical_dataset();"
+        "CREATE FUNCTION market_datasetversion_reject_mutation() RETURNS trigger AS $$"
+        "BEGIN RAISE EXCEPTION 'market_datasetversion is append-only'; END;"
+        "$$ LANGUAGE plpgsql;"
+        "CREATE TRIGGER market_datasetversion_append_only BEFORE UPDATE OR DELETE "
+        "ON market_datasetversion FOR EACH ROW "
+        "EXECUTE FUNCTION market_datasetversion_reject_mutation();"
+    )
+
+
+class Migration(migrations.Migration):
+    atomic = True
+    dependencies = [("market", "0011_portable_acquisition_identities")]
+    operations = [
+        migrations.RunPython(validate_existing_historical_datasets, migrations.RunPython.noop),
+        migrations.RunPython(install_operation_aware_trigger, restore_0011_triggers),
+    ]
