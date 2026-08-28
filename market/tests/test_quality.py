@@ -3,11 +3,31 @@ from zoneinfo import ZoneInfo
 
 from django.test import SimpleTestCase
 
-from market.quality import expected_candle_timestamps, validate_candles
+from market.quality import (
+    expected_candle_timestamps,
+    final_registered_completion_before,
+    validate_candles,
+)
 from market.tests.factories import candle
 
 
 class CandleQualityTests(SimpleTestCase):
+    def test_final_development_completions_are_strictly_before_new_york_boundary(self):
+        new_york = ZoneInfo("America/New_York")
+        boundary = datetime(2019, 1, 1, tzinfo=new_york)
+        expected = {
+            "H1": datetime(2018, 12, 31, 23, tzinfo=new_york),
+            "D": datetime(2018, 12, 31, 17, tzinfo=new_york),
+            "W": datetime(2018, 12, 28, 17, tzinfo=new_york),
+        }
+        for granularity, completion in expected.items():
+            with self.subTest(granularity=granularity):
+                self.assertEqual(
+                    final_registered_completion_before(boundary, granularity),
+                    completion.astimezone(UTC),
+                )
+                self.assertLess(completion, boundary)
+
     def test_valid_complete_bid_ask_candles_pass(self):
         start = datetime(2026, 1, 5, tzinfo=UTC)
         candles = [candle(start + timedelta(hours=4 * index)) for index in range(4)]

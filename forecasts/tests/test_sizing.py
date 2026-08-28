@@ -93,9 +93,5 @@ class CadConversionTests(TestCase):
         self.assertEqual([item["instrument"] for item in gbp_path], ["GBP_USD", "USD_CAD"])
 
     def test_conversion_never_uses_ingestion_completed_after_sizing_time(self):
-        IngestionRun.objects.filter(instrument=self.usd_cad).update(
-            finished_at=self.as_of + timedelta(minutes=1)
-        )
-
         with self.assertRaisesMessage(ValidationError, "No point-in-time USD/CAD"):
-            quote_to_cad("USD", as_of=self.as_of)
+            quote_to_cad("USD", as_of=self.as_of - timedelta(minutes=2))

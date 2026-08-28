@@ -8,7 +8,7 @@ from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
 
 from market.models import DatasetVersion, Instrument, SourceRegistry, dataset_manifest_sha256
-from market.services import DatasetQualityError, RequiredCandleRange, store_ingestion
+from market.services import RequiredCandleRange, store_ingestion
 from market.tests.factories import candle
 from research.models import (
     AnalysisRun,
@@ -201,6 +201,15 @@ class SignalCountBoundaryTests(SimpleTestCase):
         manifest = {
             "strategy_manifest_sha256": PHASE1_MANIFEST_SHA256,
             "instruments": sorted(FROZEN_INSTRUMENTS),
+            "granularities": ["D", "H1", "W"],
+            "price_component": "COMBINED_BID_ASK",
+            "complete_only": True,
+            "alignment": {
+                "timezone": "America/New_York",
+                "daily_hour": 17,
+                "weekly_day": "Friday",
+                "smooth": False,
+            },
             "partition": {"name": "development", "start_year": 2010, "end_year": 2018},
             "required_ranges": [
                 {
@@ -275,9 +284,9 @@ class SignalCountFunctionalTests(TestCase):
             )
         instrument = instruments["EUR_USD"]
         range_specs = (
-            ("W", datetime(2009, 12, 18, 22, tzinfo=UTC), datetime(2019, 1, 4, 22, tzinfo=UTC)),
-            ("D", datetime(2009, 1, 4, 22, tzinfo=UTC), datetime(2019, 1, 1, 22, tzinfo=UTC)),
-            ("H1", datetime(2009, 12, 30, 5, tzinfo=UTC), datetime(2019, 1, 1, 5, tzinfo=UTC)),
+            ("W", datetime(2009, 12, 18, 22, tzinfo=UTC), datetime(2018, 12, 28, 22, tzinfo=UTC)),
+            ("D", datetime(2009, 1, 4, 22, tzinfo=UTC), datetime(2018, 12, 31, 22, tzinfo=UTC)),
+            ("H1", datetime(2009, 12, 30, 5, tzinfo=UTC), datetime(2019, 1, 1, 4, tzinfo=UTC)),
         )
         dataset = DatasetVersion.objects.create(
             name="bounded",
@@ -286,6 +295,15 @@ class SignalCountFunctionalTests(TestCase):
             manifest={
                 "strategy_manifest_sha256": PHASE1_MANIFEST_SHA256,
                 "instruments": sorted(FROZEN_INSTRUMENTS),
+                "granularities": ["D", "H1", "W"],
+                "price_component": "COMBINED_BID_ASK",
+                "complete_only": True,
+                "alignment": {
+                    "timezone": "America/New_York",
+                    "daily_hour": 17,
+                    "weekly_day": "Friday",
+                    "smooth": False,
+                },
                 "partition": {"name": "development", "start_year": 2010, "end_year": 2018},
                 "required_ranges": [
                     {
@@ -570,7 +588,13 @@ class SignalCountFunctionalTests(TestCase):
                 execution_identity=strategy.execution_identity,
             )
 
-        with self.assertRaises(DatasetQualityError):
+        with (
+            patch(
+                "research.signal_count._validate_s1_contract",
+                return_value=(fixture_ranges, s0_output),
+            ),
+            self.assertRaisesMessage(ReturnBlindViolation, "registered detector JobRun"),
+        ):
             run_s1(
                 dataset_id=dataset.pk,
                 strategy_version_id=strategy.pk,
@@ -582,6 +606,10 @@ class SignalCountFunctionalTests(TestCase):
 
         detector = type("Detector", (), {"pk": 17})()
         with (
+            patch(
+                "research.signal_count._validate_s1_contract",
+                return_value=(fixture_ranges, s0_output),
+            ),
             patch("research.signal_count.assert_dataset_window_usable"),
             patch(
                 "research.signal_count._validate_detector_coverage",
@@ -694,6 +722,10 @@ class SignalCountFunctionalTests(TestCase):
                 evidence_hash=str(index + 7) * 64,
             )
         with (
+            patch(
+                "research.signal_count._validate_s1_contract",
+                return_value=(fixture_ranges, s0_output),
+            ),
             patch("research.signal_count.assert_dataset_window_usable"),
             patch(
                 "research.signal_count._validate_detector_coverage",
@@ -736,6 +768,10 @@ class SignalCountFunctionalTests(TestCase):
             execution_identity=strategy.execution_identity,
         )
         with (
+            patch(
+                "research.signal_count._validate_s1_contract",
+                return_value=(fixture_ranges, s0_output),
+            ),
             patch("research.signal_count.assert_dataset_window_usable"),
             patch(
                 "research.signal_count._validate_detector_coverage",
