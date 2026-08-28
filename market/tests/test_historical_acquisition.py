@@ -888,6 +888,53 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
             ).exists()
         )
 
+    def test_historical_dataset_insert_rejects_null_source_in_historical_validator(self):
+        plan = self.plan_without_dataset()
+        manifest = self.canonical_dataset_manifest(plan)
+        with (
+            self.assert_database_trigger_error(
+                "historical dataset conflicts with portable plan identity",
+                "market_validate_historical_dataset",
+            ),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """INSERT INTO market_datasetversion
+                   (name,version,description,source_id,manifest,manifest_sha256,created_at)
+                   VALUES (%s,%s,%s,NULL,%s::jsonb,%s,now())""",
+                [
+                    plan.payload["dataset"]["name"],
+                    plan.payload["dataset"]["version"],
+                    plan.payload["dataset"]["description"],
+                    json.dumps(manifest),
+                    stable_hash(manifest),
+                ],
+            )
+
+    def test_nonhistorical_dataset_update_and_delete_remain_append_only(self):
+        dataset = DatasetVersion.objects.create(
+            name="nonhistorical",
+            version="1",
+            description="ordinary governed dataset",
+            manifest={"kind": "nonhistorical"},
+        )
+        for operation, statement in (
+            (
+                "update",
+                "UPDATE market_datasetversion SET description='mutation' WHERE id=%s",
+            ),
+            ("delete", "DELETE FROM market_datasetversion WHERE id=%s"),
+        ):
+            with (
+                self.subTest(operation=operation),
+                self.assert_database_trigger_error(
+                    "market_datasetversion is append-only",
+                    "market_validate_historical_dataset",
+                ),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(statement, [dataset.pk])
+
     def test_historical_dataset_is_immutable_across_database_write_paths(self):
         _, dataset = self.plan()
         dataset.description = "normal-save mutation"

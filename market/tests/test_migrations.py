@@ -3,13 +3,14 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from django.db import connection
+from django.db import DatabaseError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
 
 class Phase2BMigrationSafetyTests(TransactionTestCase):
-    latest = [("market", "0011_portable_acquisition_identities")]
+    latest = [("market", "0012_operation_aware_historical_dataset")]
+    portable_identities = [("market", "0011_portable_acquisition_identities")]
     before_enforcement = [("market", "0009_historical_dataset_governance")]
 
     def setUp(self):
@@ -32,6 +33,178 @@ class Phase2BMigrationSafetyTests(TransactionTestCase):
             migration.dependencies,
             [("market", "0010_dataset_registration_enforcement")],
         )
+
+    def test_operation_aware_dataset_trigger_depends_exactly_on_0011(self):
+        migration = __import__(
+            "market.migrations.0012_operation_aware_historical_dataset", fromlist=["Migration"]
+        ).Migration
+        self.assertEqual(
+            migration.dependencies,
+            [("market", "0011_portable_acquisition_identities")],
+        )
+
+    def dataset_trigger_catalog(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT trigger_name,event_manipulation,action_statement
+                   FROM information_schema.triggers
+                   WHERE event_object_schema=current_schema()
+                     AND event_object_table='market_datasetversion'
+                   ORDER BY trigger_name,event_manipulation"""
+            )
+            return cursor.fetchall()
+
+    def function_definition(self, name):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT pg_get_functiondef(p.oid)
+                   FROM pg_proc p
+                   JOIN pg_namespace n ON n.oid=p.pronamespace
+                   WHERE n.nspname=current_schema() AND p.proname=%s""",
+                [name],
+            )
+            row = cursor.fetchone()
+        return None if row is None else row[0]
+
+    def test_applied_0011_is_upgraded_to_operation_aware_historical_enforcement(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.portable_identities)
+        self.assertEqual(
+            self.dataset_trigger_catalog(),
+            [
+                (
+                    "market_datasetversion_append_only",
+                    "DELETE",
+                    "EXECUTE FUNCTION market_datasetversion_reject_mutation()",
+                ),
+                (
+                    "market_datasetversion_append_only",
+                    "UPDATE",
+                    "EXECUTE FUNCTION market_datasetversion_reject_mutation()",
+                ),
+                (
+                    "market_historical_dataset_validate",
+                    "INSERT",
+                    "EXECUTE FUNCTION market_validate_historical_dataset()",
+                ),
+            ],
+        )
+        old_definition = self.function_definition("market_validate_historical_dataset")
+        self.assertNotIn("TG_OP", old_definition)
+        self.assertIn("historical dataset conflicts with portable plan identity", old_definition)
+
+        apps = executor.loader.project_state(self.portable_identities).apps
+        Dataset = apps.get_model("market", "DatasetVersion")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "ALTER TABLE market_datasetversion DISABLE TRIGGER "
+                "market_historical_dataset_validate"
+            )
+        try:
+            dataset = Dataset.objects.create(
+                name="upgrade-fixture",
+                version="1",
+                manifest={"historical_plan_sha256": "upgrade-fixture"},
+                manifest_sha256="8" * 64,
+            )
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "ALTER TABLE market_datasetversion ENABLE TRIGGER "
+                    "market_historical_dataset_validate"
+                )
+
+        MigrationExecutor(connection).migrate(self.latest)
+        self.assertEqual(
+            self.dataset_trigger_catalog(),
+            [
+                (
+                    "market_historical_dataset_validate",
+                    "DELETE",
+                    "EXECUTE FUNCTION market_validate_historical_dataset()",
+                ),
+                (
+                    "market_historical_dataset_validate",
+                    "INSERT",
+                    "EXECUTE FUNCTION market_validate_historical_dataset()",
+                ),
+                (
+                    "market_historical_dataset_validate",
+                    "UPDATE",
+                    "EXECUTE FUNCTION market_validate_historical_dataset()",
+                ),
+            ],
+        )
+        definition = self.function_definition("market_validate_historical_dataset")
+        self.assertIn("TG_OP='UPDATE'", definition)
+        self.assertIn("TG_OP='DELETE'", definition)
+        self.assertIsNone(self.function_definition("market_datasetversion_reject_mutation"))
+        with self.assertRaises(DatabaseError) as raised, transaction.atomic():
+            Dataset.objects.filter(pk=dataset.pk).update(description="mutation")
+        self.assertEqual(raised.exception.__cause__.sqlstate, "P0001")
+        self.assertEqual(
+            raised.exception.__cause__.diag.message_primary,
+            "historical dataset manifests are immutable",
+        )
+        self.assertIn(
+            "PL/pgSQL function market_validate_historical_dataset()",
+            raised.exception.__cause__.diag.context,
+        )
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_datasetversion DISABLE TRIGGER USER")
+            cursor.execute("DELETE FROM market_datasetversion WHERE id=%s", [dataset.pk])
+            cursor.execute("ALTER TABLE market_datasetversion ENABLE TRIGGER USER")
+
+    def test_safe_reverse_restores_exact_0011_dataset_trigger_set(self):
+        MigrationExecutor(connection).migrate(self.portable_identities)
+        self.assertEqual(
+            self.dataset_trigger_catalog(),
+            [
+                (
+                    "market_datasetversion_append_only",
+                    "DELETE",
+                    "EXECUTE FUNCTION market_datasetversion_reject_mutation()",
+                ),
+                (
+                    "market_datasetversion_append_only",
+                    "UPDATE",
+                    "EXECUTE FUNCTION market_datasetversion_reject_mutation()",
+                ),
+                (
+                    "market_historical_dataset_validate",
+                    "INSERT",
+                    "EXECUTE FUNCTION market_validate_historical_dataset()",
+                ),
+            ],
+        )
+        historical_definition = self.function_definition("market_validate_historical_dataset")
+        self.assertNotIn("TG_OP", historical_definition)
+        self.assertIn(
+            "historical dataset conflicts with portable plan identity", historical_definition
+        )
+        generic_definition = self.function_definition("market_datasetversion_reject_mutation")
+        self.assertIn("market_datasetversion is append-only", generic_definition)
+
+        apps = MigrationExecutor(connection).loader.project_state(self.portable_identities).apps
+        Dataset = apps.get_model("market", "DatasetVersion")
+        dataset = Dataset.objects.create(
+            name="reverse-fixture", version="1", manifest={}, manifest_sha256="7" * 64
+        )
+        with self.assertRaises(DatabaseError) as raised, transaction.atomic():
+            Dataset.objects.filter(pk=dataset.pk).update(description="mutation")
+        self.assertEqual(raised.exception.__cause__.sqlstate, "P0001")
+        self.assertEqual(
+            raised.exception.__cause__.diag.message_primary,
+            "market_datasetversion is append-only",
+        )
+        self.assertIn(
+            "PL/pgSQL function market_datasetversion_reject_mutation()",
+            raised.exception.__cause__.diag.context,
+        )
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_datasetversion DISABLE TRIGGER USER")
+            cursor.execute("DELETE FROM market_datasetversion WHERE id=%s", [dataset.pk])
+            cursor.execute("ALTER TABLE market_datasetversion ENABLE TRIGGER USER")
 
     def test_reverse_migration_rejects_historical_dataset_evidence(self):
         executor = MigrationExecutor(connection)

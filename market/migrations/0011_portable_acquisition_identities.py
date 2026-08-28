@@ -92,19 +92,6 @@ def apply_correction(apps, schema_editor):
         CREATE FUNCTION market_validate_historical_dataset() RETURNS trigger AS $$
         DECLARE plan record; strategy record; expected_manifest jsonb; required_ranges jsonb;
         BEGIN
-          IF TG_OP='DELETE' THEN
-            IF OLD.manifest ? 'historical_plan_sha256' THEN
-              RAISE EXCEPTION 'historical dataset manifests are immutable';
-            END IF;
-            RAISE EXCEPTION 'market_datasetversion is append-only';
-          END IF;
-          IF TG_OP='UPDATE' THEN
-            IF OLD.manifest ? 'historical_plan_sha256'
-               OR NEW.manifest ? 'historical_plan_sha256' THEN
-              RAISE EXCEPTION 'historical dataset manifests are immutable';
-            END IF;
-            RAISE EXCEPTION 'market_datasetversion is append-only';
-          END IF;
           IF NOT NEW.manifest ? 'historical_plan_sha256' THEN RETURN NEW; END IF;
           SELECT * INTO STRICT plan FROM market_historicaldatasetplan
             WHERE sha256=NEW.manifest->>'historical_plan_sha256';
@@ -141,10 +128,7 @@ def apply_correction(apps, schema_editor):
         EXCEPTION WHEN NO_DATA_FOUND THEN
           RAISE EXCEPTION 'historical dataset lacks its canonical plan';
         END $$ LANGUAGE plpgsql;
-        DROP TRIGGER market_datasetversion_append_only ON market_datasetversion;
-        DROP FUNCTION market_datasetversion_reject_mutation();
-        CREATE TRIGGER market_historical_dataset_validate BEFORE INSERT OR UPDATE OR DELETE
-          ON market_datasetversion
+        CREATE TRIGGER market_historical_dataset_validate BEFORE INSERT ON market_datasetversion
           FOR EACH ROW EXECUTE FUNCTION market_validate_historical_dataset();
 
         CREATE OR REPLACE FUNCTION market_validate_historical_chunk() RETURNS trigger AS $$
@@ -251,12 +235,6 @@ def reverse_correction(apps, schema_editor):
     schema_editor.execute(
         "DROP TRIGGER IF EXISTS market_historical_dataset_validate ON market_datasetversion;"
         "DROP FUNCTION IF EXISTS market_validate_historical_dataset();"
-        "CREATE FUNCTION market_datasetversion_reject_mutation() RETURNS trigger AS $$"
-        "BEGIN RAISE EXCEPTION 'market_datasetversion is append-only'; END;"
-        "$$ LANGUAGE plpgsql;"
-        "CREATE TRIGGER market_datasetversion_append_only BEFORE UPDATE OR DELETE "
-        "ON market_datasetversion FOR EACH ROW "
-        "EXECUTE FUNCTION market_datasetversion_reject_mutation();"
     )
     migration_0010 = import_module("market.migrations.0010_dataset_registration_enforcement")
     migration_0010.drop_governance_triggers(apps, schema_editor)
