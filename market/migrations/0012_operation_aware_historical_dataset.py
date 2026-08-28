@@ -101,6 +101,62 @@ END $$ LANGUAGE plpgsql;
 """
 
 
+def validate_existing_historical_datasets(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT dataset.id
+            FROM market_datasetversion dataset
+            LEFT JOIN market_historicaldatasetplan plan
+              ON plan.sha256=dataset.manifest->>'historical_plan_sha256'
+            LEFT JOIN research_strategyversion strategy ON strategy.id=plan.strategy_version_id
+            LEFT JOIN LATERAL (
+              SELECT jsonb_agg(jsonb_build_object(
+                       'instrument',instrument.value,
+                       'granularity',granularity.value,
+                       'start',plan.ranges->granularity.value->'from',
+                       'end',plan.ranges->granularity.value->'to')
+                       ORDER BY instrument.ordinality,granularity.ordinality) AS value
+              FROM jsonb_array_elements_text(plan.instruments)
+                     WITH ORDINALITY AS instrument(value,ordinality)
+              CROSS JOIN jsonb_array_elements_text(plan.granularities)
+                     WITH ORDINALITY AS granularity(value,ordinality)
+            ) required_ranges ON true
+            CROSS JOIN LATERAL (
+              SELECT jsonb_build_object(
+                'strategy_manifest_sha256',strategy.content_hash,
+                'partition',jsonb_build_object(
+                  'name','development','start_year',2010,'end_year',2018),
+                'required_ranges',required_ranges.value,
+                'historical_plan_sha256',plan.sha256,
+                'price_component',plan.price_component,
+                'complete_only',plan.complete_only,
+                'instruments',plan.instruments,
+                'granularities',plan.granularities,
+                'alignment',plan.alignment) AS value
+            ) expected_manifest
+            WHERE dataset.manifest ? 'historical_plan_sha256'
+              AND (plan.id IS NULL
+                OR strategy.id IS NULL
+                OR dataset.source_id IS DISTINCT FROM plan.source_id
+                OR dataset.name IS DISTINCT FROM plan.payload->'dataset'->>'name'
+                OR dataset.version IS DISTINCT FROM plan.payload->'dataset'->>'version'
+                OR dataset.description IS DISTINCT FROM plan.payload->'dataset'->>'description'
+                OR dataset.manifest IS DISTINCT FROM expected_manifest.value
+                OR dataset.manifest_sha256 IS DISTINCT FROM market_sha256(expected_manifest.value))
+            ORDER BY dataset.id
+            LIMIT 1
+            """
+        )
+        invalid = cursor.fetchone()
+    if invalid is not None:
+        raise RuntimeError(
+            f"historical DatasetVersion {invalid[0]} conflicts with its canonical plan"
+        )
+
+
 def install_operation_aware_trigger(apps, schema_editor):
     if schema_editor.connection.vendor != "postgresql":
         return
@@ -136,5 +192,9 @@ def restore_0011_triggers(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    atomic = True
     dependencies = [("market", "0011_portable_acquisition_identities")]
-    operations = [migrations.RunPython(install_operation_aware_trigger, restore_0011_triggers)]
+    operations = [
+        migrations.RunPython(validate_existing_historical_datasets, migrations.RunPython.noop),
+        migrations.RunPython(install_operation_aware_trigger, restore_0011_triggers),
+    ]

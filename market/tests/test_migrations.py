@@ -66,6 +66,205 @@ class Phase2BMigrationSafetyTests(TransactionTestCase):
             row = cursor.fetchone()
         return None if row is None else row[0]
 
+    def create_0011_historical_dataset(self, invalid=None):
+        executor = MigrationExecutor(connection)
+        apps = executor.loader.project_state(self.portable_identities).apps
+        Source = apps.get_model("market", "SourceRegistry")
+        Definition = apps.get_model("research", "StrategyDefinition")
+        Version = apps.get_model("research", "StrategyVersion")
+        Parameter = apps.get_model("research", "StrategyParameterManifest")
+        Plan = apps.get_model("market", "HistoricalDatasetPlan")
+        Dataset = apps.get_model("market", "DatasetVersion")
+        spec_hash = "47d0346bcf723cb78a71763df43f6b092b0c235bb1d17ccbe69f17d9550203cd"
+        manifest_hash = "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
+        instruments = ["AUD_USD", "EUR_GBP", "EUR_USD", "GBP_USD", "USD_CAD", "USD_JPY"]
+        granularities = ["D", "H1", "W"]
+        ranges = {
+            "D": {
+                "from": "2009-02-26T22:00:00+00:00",
+                "to": "2018-12-31T22:00:00+00:00",
+                "expected_count_per_instrument": 2567,
+            },
+            "H1": {
+                "from": "2009-12-31T15:00:00+00:00",
+                "to": "2019-01-01T04:00:00+00:00",
+                "expected_count_per_instrument": 56341,
+            },
+            "W": {
+                "from": "2009-12-18T22:00:00+00:00",
+                "to": "2018-12-28T22:00:00+00:00",
+                "expected_count_per_instrument": 471,
+            },
+        }
+        alignment = {
+            "timezone": "America/New_York",
+            "daily_hour": 17,
+            "weekly_day": "Friday",
+            "smooth": False,
+        }
+        source = Source.objects.create(
+            name="OANDA v20",
+            tier="established",
+            base_url="https://example.invalid",
+            acquisition_method="v20 REST API",
+            retention_policy="migration test",
+            enabled=True,
+        )
+        definition = Definition.objects.create(
+            key="migration-preflight", name="Migration preflight"
+        )
+        strategy = Version.objects.create(
+            definition=definition,
+            version="v1",
+            detector_version="failed-break-detector-v1",
+            data_identity="oanda-ba-ny17-friday-v1",
+            event_identity="event-policy-none-v1",
+            execution_identity="execution-h1-stop-first-v1",
+            cost_identity="cost-observed-spread-only-v1",
+            portfolio_identity="portfolio-common-fraction-025-100-050-v1",
+            pair_metadata={
+                "instruments": [
+                    "EUR_USD",
+                    "GBP_USD",
+                    "EUR_GBP",
+                    "USD_CAD",
+                    "USD_JPY",
+                    "AUD_USD",
+                ]
+            },
+            content_hash=manifest_hash,
+        )
+        Parameter.objects.create(
+            strategy_version=strategy,
+            payload={},
+            sha256=manifest_hash,
+            phase1_spec_hash=spec_hash,
+            phase1_manifest_hash=manifest_hash,
+        )
+        dataset_identity = {
+            "name": "migration-history",
+            "version": "v1",
+            "description": "canonical migration fixture",
+        }
+        payload = {
+            "acquisition_contract": "failed-break-historical-acquisition",
+            "acquisition_version": "phase-2b1-v1",
+            "source": {
+                "name": "OANDA v20",
+                "governed_identity": "oanda-v20-market-candles-v1",
+            },
+            "strategy": {
+                "definition_key": definition.key,
+                "version": strategy.version,
+                "content_hash": strategy.content_hash,
+            },
+            "data_identity": strategy.data_identity,
+            "dataset": dataset_identity,
+            "instruments": instruments,
+            "granularities": granularities,
+            "ranges": ranges,
+            "alignment": alignment,
+            "price_component": "COMBINED_BID_ASK",
+            "complete_only": True,
+            "chunk_size": 4999,
+            "phase1_spec_hash": spec_hash,
+            "phase1_manifest_hash": manifest_hash,
+        }
+        plan_sha = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        plan = Plan.objects.create(
+            identity=strategy.data_identity,
+            source=source,
+            strategy_version=strategy,
+            instruments=instruments,
+            granularities=granularities,
+            ranges=ranges,
+            alignment=alignment,
+            chunk_size=4999,
+            phase1_spec_hash=spec_hash,
+            phase1_manifest_hash=manifest_hash,
+            payload=payload,
+            sha256=plan_sha,
+        )
+        dataset_manifest = {
+            "strategy_manifest_sha256": strategy.content_hash,
+            "partition": {"name": "development", "start_year": 2010, "end_year": 2018},
+            "required_ranges": [
+                {
+                    "instrument": instrument,
+                    "granularity": granularity,
+                    "start": ranges[granularity]["from"],
+                    "end": ranges[granularity]["to"],
+                }
+                for instrument in instruments
+                for granularity in granularities
+            ],
+            "historical_plan_sha256": plan.sha256,
+            "price_component": plan.price_component,
+            "complete_only": plan.complete_only,
+            "instruments": instruments,
+            "granularities": granularities,
+            "alignment": alignment,
+        }
+        if invalid == "missing_plan":
+            dataset_manifest["historical_plan_sha256"] = "f" * 64
+        elif invalid == "malformed":
+            dataset_manifest["unexpected"] = True
+        dataset_manifest_sha = hashlib.sha256(
+            json.dumps(dataset_manifest, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if invalid in {"missing_plan", "malformed"}:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "ALTER TABLE market_datasetversion DISABLE TRIGGER "
+                    "market_historical_dataset_validate"
+                )
+        try:
+            dataset = Dataset.objects.create(
+                **dataset_identity,
+                source=None if invalid == "null_source" else source,
+                manifest=dataset_manifest,
+                manifest_sha256=dataset_manifest_sha,
+            )
+        finally:
+            if invalid in {"missing_plan", "malformed"}:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "ALTER TABLE market_datasetversion ENABLE TRIGGER "
+                        "market_historical_dataset_validate"
+                    )
+        return dataset
+
+    def assert_failed_0012_preflight_preserves_0011(self, dataset):
+        trigger_catalog = self.dataset_trigger_catalog()
+        historical_function = self.function_definition("market_validate_historical_dataset")
+        append_only_function = self.function_definition("market_datasetversion_reject_mutation")
+        with self.assertRaisesMessage(
+            RuntimeError,
+            f"historical DatasetVersion {dataset.pk} conflicts with its canonical plan",
+        ):
+            MigrationExecutor(connection).migrate(self.latest)
+        self.assertEqual(self.dataset_trigger_catalog(), trigger_catalog)
+        self.assertEqual(
+            self.function_definition("market_validate_historical_dataset"), historical_function
+        )
+        self.assertEqual(
+            self.function_definition("market_datasetversion_reject_mutation"), append_only_function
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT EXISTS(SELECT 1 FROM django_migrations
+                   WHERE app='market' AND name='0012_operation_aware_historical_dataset')"""
+            )
+            self.assertFalse(cursor.fetchone()[0])
+
+    def delete_dataset_without_triggers(self, dataset):
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_datasetversion DISABLE TRIGGER USER")
+            cursor.execute("DELETE FROM market_datasetversion WHERE id=%s", [dataset.pk])
+            cursor.execute("ALTER TABLE market_datasetversion ENABLE TRIGGER USER")
+
     def test_applied_0011_is_upgraded_to_operation_aware_historical_enforcement(self):
         executor = MigrationExecutor(connection)
         executor.migrate(self.portable_identities)
@@ -93,26 +292,8 @@ class Phase2BMigrationSafetyTests(TransactionTestCase):
         self.assertNotIn("TG_OP", old_definition)
         self.assertIn("historical dataset conflicts with portable plan identity", old_definition)
 
-        apps = executor.loader.project_state(self.portable_identities).apps
-        Dataset = apps.get_model("market", "DatasetVersion")
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "ALTER TABLE market_datasetversion DISABLE TRIGGER "
-                "market_historical_dataset_validate"
-            )
-        try:
-            dataset = Dataset.objects.create(
-                name="upgrade-fixture",
-                version="1",
-                manifest={"historical_plan_sha256": "upgrade-fixture"},
-                manifest_sha256="8" * 64,
-            )
-        finally:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "ALTER TABLE market_datasetversion ENABLE TRIGGER "
-                    "market_historical_dataset_validate"
-                )
+        dataset = self.create_0011_historical_dataset()
+        Dataset = type(dataset)
 
         MigrationExecutor(connection).migrate(self.latest)
         self.assertEqual(
@@ -150,10 +331,25 @@ class Phase2BMigrationSafetyTests(TransactionTestCase):
             "PL/pgSQL function market_validate_historical_dataset()",
             raised.exception.__cause__.diag.context,
         )
-        with connection.cursor() as cursor:
-            cursor.execute("ALTER TABLE market_datasetversion DISABLE TRIGGER USER")
-            cursor.execute("DELETE FROM market_datasetversion WHERE id=%s", [dataset.pk])
-            cursor.execute("ALTER TABLE market_datasetversion ENABLE TRIGGER USER")
+        self.delete_dataset_without_triggers(dataset)
+
+    def test_null_source_historical_dataset_aborts_0012_without_partial_installation(self):
+        MigrationExecutor(connection).migrate(self.portable_identities)
+        dataset = self.create_0011_historical_dataset(invalid="null_source")
+        self.assert_failed_0012_preflight_preserves_0011(dataset)
+        self.delete_dataset_without_triggers(dataset)
+
+    def test_missing_plan_historical_dataset_aborts_0012_without_partial_installation(self):
+        MigrationExecutor(connection).migrate(self.portable_identities)
+        dataset = self.create_0011_historical_dataset(invalid="missing_plan")
+        self.assert_failed_0012_preflight_preserves_0011(dataset)
+        self.delete_dataset_without_triggers(dataset)
+
+    def test_malformed_historical_dataset_aborts_0012_without_partial_installation(self):
+        MigrationExecutor(connection).migrate(self.portable_identities)
+        dataset = self.create_0011_historical_dataset(invalid="malformed")
+        self.assert_failed_0012_preflight_preserves_0011(dataset)
+        self.delete_dataset_without_triggers(dataset)
 
     def test_safe_reverse_restores_exact_0011_dataset_trigger_set(self):
         MigrationExecutor(connection).migrate(self.portable_identities)
