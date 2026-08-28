@@ -1,9 +1,12 @@
 import hashlib
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from queue import Queue
 
-from django.db import DatabaseError, connection, transaction
+from django.db import DatabaseError, close_old_connections, connection, connections, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
@@ -350,6 +353,91 @@ class Phase2BMigrationSafetyTests(TransactionTestCase):
         dataset = self.create_0011_historical_dataset(invalid="malformed")
         self.assert_failed_0012_preflight_preserves_0011(dataset)
         self.delete_dataset_without_triggers(dataset)
+
+    def test_preflight_lock_blocks_concurrent_historical_insert_until_0012_is_active(self):
+        MigrationExecutor(connection).migrate(self.portable_identities)
+        migration = __import__(
+            "market.migrations.0012_operation_aware_historical_dataset",
+            fromlist=["Migration"],
+        )
+        backend_pids = Queue()
+
+        def insert_invalid_historical_dataset():
+            close_old_connections()
+            worker_connection = connections["default"]
+            try:
+                with worker_connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_backend_pid()")
+                    backend_pid = cursor.fetchone()[0]
+                    backend_pids.put(backend_pid)
+                    cursor.execute(
+                        """INSERT INTO market_datasetversion
+                           (name,version,description,source_id,manifest,
+                            manifest_sha256,created_at)
+                           VALUES ('concurrent-invalid','1','invalid',NULL,
+                             '{"historical_plan_sha256":"missing"}'::jsonb,%s,now())""",
+                        ["9" * 64],
+                    )
+            except DatabaseError as error:
+                cause = error.__cause__
+                return backend_pid, cause.sqlstate, cause.diag.message_primary, cause.diag.context
+            finally:
+                worker_connection.close()
+            return backend_pid, None, None, None
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with transaction.atomic(), connection.schema_editor() as schema_editor:
+                migration.validate_existing_historical_datasets(None, schema_editor)
+                future = pool.submit(insert_invalid_historical_dataset)
+                backend_pid = backend_pids.get(timeout=5)
+                deadline = time.monotonic() + 5
+                blocked = False
+                while time.monotonic() < deadline:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """SELECT EXISTS(
+                                 SELECT 1 FROM pg_locks
+                                 WHERE pid=%s
+                                   AND relation='market_datasetversion'::regclass
+                                   AND mode='RowExclusiveLock' AND NOT granted)""",
+                            [backend_pid],
+                        )
+                        blocked = cursor.fetchone()[0]
+                    if blocked:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(blocked, "concurrent INSERT did not wait on the preflight lock")
+                self.assertFalse(future.done())
+                migration.install_operation_aware_trigger(None, schema_editor)
+
+            backend_pid, sqlstate, message, context = future.result(timeout=5)
+
+        self.assertIsInstance(backend_pid, int)
+        self.assertEqual(sqlstate, "P0001")
+        self.assertEqual(message, "historical dataset lacks its canonical plan")
+        self.assertIn("PL/pgSQL function market_validate_historical_dataset()", context)
+        self.assertEqual(
+            self.dataset_trigger_catalog(),
+            [
+                (
+                    "market_historical_dataset_validate",
+                    "DELETE",
+                    "EXECUTE FUNCTION market_validate_historical_dataset()",
+                ),
+                (
+                    "market_historical_dataset_validate",
+                    "INSERT",
+                    "EXECUTE FUNCTION market_validate_historical_dataset()",
+                ),
+                (
+                    "market_historical_dataset_validate",
+                    "UPDATE",
+                    "EXECUTE FUNCTION market_validate_historical_dataset()",
+                ),
+            ],
+        )
+        with transaction.atomic(), connection.schema_editor() as schema_editor:
+            migration.restore_0011_triggers(None, schema_editor)
 
     def test_safe_reverse_restores_exact_0011_dataset_trigger_set(self):
         MigrationExecutor(connection).migrate(self.portable_identities)

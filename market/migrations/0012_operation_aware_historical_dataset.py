@@ -105,6 +105,7 @@ def validate_existing_historical_datasets(apps, schema_editor):
     if schema_editor.connection.vendor != "postgresql":
         return
     with schema_editor.connection.cursor() as cursor:
+        cursor.execute("LOCK TABLE market_datasetversion IN SHARE ROW EXCLUSIVE MODE")
         cursor.execute(
             """
             SELECT dataset.id
