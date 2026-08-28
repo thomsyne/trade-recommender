@@ -45,7 +45,21 @@ def validate_historical_ingestion_manifest(*, ingestion_run, dataset_version, pa
         or type(requests) is not list
         or len(requests) != 1
         or type(requests[0]) is not dict
-        or requests[0].get("status") != 200
+        or requests[0]
+        != {
+            "endpoint_identity": (
+                f"oanda-v20-{requests[0].get('oanda_environment')}:GET:"
+                f"/v3/instruments/{chunk.instrument.code}/candles"
+            ),
+            "http_method": "GET",
+            "oanda_environment": requests[0].get("oanda_environment"),
+            "canonical_request_sha256": chunk.canonical_request_sha256,
+            "provider_request_id": requests[0].get("provider_request_id"),
+            "http_status": 200,
+        }
+        or requests[0].get("oanda_environment") not in {"practice", "live"}
+        or not isinstance(requests[0].get("provider_request_id"), str)
+        or not requests[0]["provider_request_id"].strip()
         or chunk.dataset_version_id != dataset_version.pk
         or ingestion_run.dataset_version_id != dataset_version.pk
         or ingestion_run.source_id != chunk.plan.source_id

@@ -12,9 +12,12 @@ from django.db import DatabaseError, close_old_connections, connection, transact
 from django.test import TestCase, TransactionTestCase
 
 from market.historical_acquisition import (
+    ACQUISITION_CONTRACT,
+    ACQUISITION_VERSION,
     INSTRUMENTS,
     PHASE1_MANIFEST_SHA256,
     PHASE1_SPEC_SHA256,
+    SOURCE_IDENTITY,
     begin_historical_attempt,
     create_historical_dataset_plan,
     register_historical_dataset,
@@ -57,7 +60,33 @@ class FakeClient:
             "dailyAlignment": 17,
             "weeklyAlignment": "Friday",
             "includeFirst": True,
-            "requests": [{"status": 200}],
+            "requests": [
+                {
+                    "endpoint_identity": (
+                        f"oanda-v20-practice:GET:/v3/instruments/{instrument}/candles"
+                    ),
+                    "http_method": "GET",
+                    "oanda_environment": "practice",
+                    "canonical_request_sha256": stable_hash(
+                        {
+                            "instrument": instrument,
+                            "granularity": granularity,
+                            "from": start.isoformat(),
+                            "to": end.isoformat(),
+                            "price": "BA",
+                            "price_component": "COMBINED_BID_ASK",
+                            "smooth": False,
+                            "dailyAlignment": 17,
+                            "alignmentTimezone": "America/New_York",
+                            "weeklyAlignment": "Friday",
+                            "includeFirst": True,
+                            "complete_only": True,
+                        }
+                    ),
+                    "provider_request_id": "test-request-id",
+                    "http_status": 200,
+                }
+            ],
         }
 
 
@@ -145,9 +174,17 @@ class HistoricalFixtureMixin:
             },
         }
         return {
-            "identity": "oanda-ba-ny17-friday-v1",
-            "source_id": self.source.pk,
-            "strategy_version_id": self.strategy.pk,
+            "acquisition_contract": ACQUISITION_CONTRACT,
+            "acquisition_version": ACQUISITION_VERSION,
+            "source": {"name": "OANDA v20", "governed_identity": SOURCE_IDENTITY},
+            "strategy": {
+                "definition_key": self.strategy.definition.key,
+                "version": self.strategy.version,
+                "content_hash": self.strategy.content_hash,
+            },
+            "data_identity": "oanda-ba-ny17-friday-v1",
+            "phase1_spec_hash": PHASE1_SPEC_SHA256,
+            "phase1_manifest_hash": PHASE1_MANIFEST_SHA256,
             "dataset": {
                 "name": "failed-break-history",
                 "version": "test-v1",
@@ -179,7 +216,18 @@ class HistoricalFixtureMixin:
             "complete_only": True,
             "historical_logical_key": chunk.logical_key,
             "historical_attempt": attempt.attempt_number,
-            "requests": [{"url": "https://example.invalid", "status": 200}],
+            "requests": [
+                {
+                    "endpoint_identity": (
+                        f"oanda-v20-practice:GET:/v3/instruments/{chunk.instrument.code}/candles"
+                    ),
+                    "http_method": "GET",
+                    "oanda_environment": "practice",
+                    "canonical_request_sha256": chunk.canonical_request_sha256,
+                    "provider_request_id": "test-request-id",
+                    "http_status": 200,
+                }
+            ],
         }
 
 
@@ -198,7 +246,34 @@ class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
         for chunk in first_plan.chunks.all():
             self.assertEqual(chunk.canonical_request["price"], "BA")
             self.assertEqual(chunk.canonical_request["price_component"], "COMBINED_BID_ASK")
+            self.assertIs(chunk.canonical_request["includeFirst"], True)
             self.assertLess(chunk.requested_to, datetime(2019, 1, 1, 5, tzinfo=UTC))
+
+    def test_plan_and_chunk_hashes_contain_only_portable_identities(self):
+        plan, dataset = self.plan()
+        chunk = plan.chunks.first()
+        serialized = json.dumps(
+            {"plan": plan.payload, "dataset": dataset.manifest, "request": chunk.canonical_request}
+        )
+
+        self.assertNotIn('"source_id"', serialized)
+        self.assertNotIn('"strategy_version_id"', serialized)
+        without_include_first = {**chunk.canonical_request}
+        without_include_first.pop("includeFirst")
+        false_include_first = {**chunk.canonical_request, "includeFirst": False}
+        self.assertNotEqual(stable_hash(without_include_first), chunk.canonical_request_sha256)
+        self.assertNotEqual(stable_hash(false_include_first), chunk.canonical_request_sha256)
+        for changed_hash in map(stable_hash, (without_include_first, false_include_first)):
+            self.assertNotEqual(
+                stable_hash(
+                    {
+                        "plan_sha256": plan.sha256,
+                        "dataset_manifest_sha256": dataset.manifest_sha256,
+                        "canonical_request_sha256": changed_hash,
+                    }
+                ),
+                chunk.logical_key,
+            )
 
     def test_generated_manifest_is_compatible_but_requires_registration_for_admission(self):
         ranges = {
@@ -543,8 +618,8 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
             ("weeklyAlignment", "Monday"),
             ("historical_logical_key", "0" * 64),
             ("historical_attempt", 99),
-            ("requests", [{"status": 200}, {"status": 200}]),
-            ("requests", [{"status": 500}]),
+            ("requests", [{"http_status": 200}, {"http_status": 200}]),
+            ("requests", [{"http_status": 500}]),
         )
         for (field, value), chunk in zip(mutations, chunks):
             attempt, _ = begin_historical_attempt(chunk.logical_key)
@@ -561,6 +636,56 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
                 transaction.atomic(),
             ):
                 IngestionManifest.objects.bulk_create([false_manifest])
+
+    def test_database_rejects_each_request_evidence_mismatch_and_include_first_absence(self):
+        plan, dataset = self.plan()
+        chunks = iter(plan.chunks.order_by("logical_key"))
+        cases = (
+            ("endpoint_identity", "oanda-v20-live:GET:/wrong"),
+            ("http_method", "POST"),
+            ("oanda_environment", "sandbox"),
+            ("canonical_request_sha256", "0" * 64),
+            ("provider_request_id", ""),
+            ("http_status", 201),
+        )
+        for field, value in cases:
+            attempt, _ = begin_historical_attempt(next(chunks).logical_key)
+            payload = self.manifest_payload(attempt)
+            payload["requests"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(DatabaseError), transaction.atomic():
+                IngestionManifest.objects.bulk_create(
+                    [
+                        IngestionManifest(
+                            ingestion_run=attempt.ingestion_run,
+                            dataset_version=dataset,
+                            payload=payload,
+                            sha256=stable_hash(payload),
+                        )
+                    ]
+                )
+
+        for include_first in (None, False):
+            attempt, _ = begin_historical_attempt(next(chunks).logical_key)
+            payload = self.manifest_payload(attempt)
+            if include_first is None:
+                payload.pop("includeFirst")
+            else:
+                payload["includeFirst"] = include_first
+            with (
+                self.subTest(include_first=include_first),
+                self.assertRaises(DatabaseError),
+                transaction.atomic(),
+            ):
+                IngestionManifest.objects.bulk_create(
+                    [
+                        IngestionManifest(
+                            ingestion_run=attempt.ingestion_run,
+                            dataset_version=dataset,
+                            payload=payload,
+                            sha256=stable_hash(payload),
+                        )
+                    ]
+                )
 
     def test_registration_revalidates_successful_manifest_semantics_in_database(self):
         plan, dataset = self.plan()
@@ -682,6 +807,55 @@ class HistoricalAcquisitionDatabaseTests(HistoricalFixtureMixin, TransactionTest
         )
         with self.assertRaises(DatabaseError), transaction.atomic():
             HistoricalDatasetPlan.objects.bulk_create([tampered_plan])
+
+        wrong_source = SourceRegistry.objects.create(
+            name="shaped-but-wrong-source",
+            tier=SourceRegistry.Tier.ESTABLISHED,
+            base_url="https://example.invalid",
+            acquisition_method="v20 REST API",
+            retention_policy="test",
+            enabled=True,
+        )
+        wrong_definition = StrategyDefinition.objects.create(
+            key="shaped-but-wrong-strategy", name="Wrong strategy"
+        )
+        wrong_strategy = StrategyVersion.objects.create(
+            definition=wrong_definition,
+            version="v1",
+            detector_version="failed-break-detector-v1",
+            data_identity=plan.identity,
+            event_identity="event-policy-none-v1",
+            execution_identity="execution-h1-stop-first-v1",
+            cost_identity="cost-observed-spread-only-v1",
+            portfolio_identity="portfolio-common-fraction-025-100-050-v1",
+            pair_metadata=self.strategy.pair_metadata,
+            content_hash="9" * 64,
+        )
+        StrategyParameterManifest.objects.create(
+            strategy_version=wrong_strategy,
+            payload={},
+            sha256="9" * 64,
+            phase1_spec_hash=PHASE1_SPEC_SHA256,
+            phase1_manifest_hash=PHASE1_MANIFEST_SHA256,
+        )
+        for field, relation in (("source", wrong_source), ("strategy_version", wrong_strategy)):
+            shaped = HistoricalDatasetPlan(
+                identity=plan.identity,
+                source=plan.source,
+                strategy_version=plan.strategy_version,
+                instruments=plan.instruments,
+                granularities=plan.granularities,
+                ranges=plan.ranges,
+                alignment=plan.alignment,
+                chunk_size=plan.chunk_size,
+                phase1_spec_hash=plan.phase1_spec_hash,
+                phase1_manifest_hash=plan.phase1_manifest_hash,
+                payload=plan.payload,
+                sha256=plan.sha256,
+            )
+            setattr(shaped, field, relation)
+            with self.subTest(field=field), self.assertRaises(DatabaseError), transaction.atomic():
+                HistoricalDatasetPlan.objects.bulk_create([shaped])
 
         chunk = plan.chunks.first()
         tampered_chunk = HistoricalIngestionChunk(

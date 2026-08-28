@@ -9,7 +9,7 @@ from django.test import TransactionTestCase
 
 
 class Phase2BMigrationSafetyTests(TransactionTestCase):
-    latest = [("market", "0010_dataset_registration_enforcement")]
+    latest = [("market", "0011_portable_acquisition_identities")]
     before_enforcement = [("market", "0009_historical_dataset_governance")]
 
     def setUp(self):
@@ -24,27 +24,28 @@ class Phase2BMigrationSafetyTests(TransactionTestCase):
         MigrationExecutor(connection).migrate(self.before_enforcement)
         MigrationExecutor(connection).migrate(self.latest)
 
+    def test_portable_identity_correction_depends_exactly_on_0010(self):
+        migration = __import__(
+            "market.migrations.0011_portable_acquisition_identities", fromlist=["Migration"]
+        ).Migration
+        self.assertEqual(
+            migration.dependencies,
+            [("market", "0010_dataset_registration_enforcement")],
+        )
+
     def test_reverse_migration_rejects_historical_dataset_evidence(self):
         executor = MigrationExecutor(connection)
         apps = executor.loader.project_state(self.latest).apps
-        Source = apps.get_model("market", "SourceRegistry")
-        Dataset = apps.get_model("market", "DatasetVersion")
-        source = Source.objects.create(
-            name="rollback-evidence",
-            tier="quarantine",
-            base_url="https://example.invalid",
-            acquisition_method="test",
-            retention_policy="test",
-        )
-        Dataset.objects.create(
-            name="rollback-evidence",
-            version="1",
-            source=source,
-            manifest={"historical_plan_sha256": "0" * 64},
-            manifest_sha256="0" * 64,
+        AuditEvent = apps.get_model("market", "AuditEvent")
+        AuditEvent.objects.create(
+            event_type="market.historical_attempt_test_evidence",
+            actor="migration-test",
+            subject_type="HistoricalIngestionAttempt",
+            subject_id="1",
+            payload={},
         )
 
-        with self.assertRaisesMessage(RuntimeError, "rollback is forbidden"):
+        with self.assertRaisesMessage(RuntimeError, "requires an empty historical evidence set"):
             MigrationExecutor(connection).migrate(self.before_enforcement)
 
     def test_forward_preflight_rejects_all_partial_0009_evidence_categories(self):

@@ -6,7 +6,7 @@ import httpx
 from django.test import SimpleTestCase
 
 from market.historical_acquisition import _validate_chunk_response
-from market.oanda import OandaClient, OandaError
+from market.oanda import OandaClient, OandaError, manifest_hash
 from market.quality import (
     expected_candle_timestamps,
     registered_candle_completion,
@@ -116,6 +116,7 @@ class OandaClientTests(SimpleTestCase):
             self.assertEqual(request.url.params["weeklyAlignment"], "Friday")
             return httpx.Response(
                 200,
+                headers={"RequestID": "provider-request-4999"},
                 json={
                     "candles": [
                         _payload(timestamp.isoformat().replace("+00:00", "Z"), complete=True)
@@ -139,6 +140,35 @@ class OandaClientTests(SimpleTestCase):
         self.assertEqual(candles[0].timestamp, start)
         self.assertEqual(candles[-1].timestamp, timestamps[-1])
         self.assertEqual(len({item.timestamp for item in candles}), 4999)
+        canonical_request_sha256 = manifest_hash(
+            {
+                "instrument": "EUR_USD",
+                "granularity": "H1",
+                "from": start.isoformat(),
+                "to": end.isoformat(),
+                "price": "BA",
+                "price_component": "COMBINED_BID_ASK",
+                "smooth": False,
+                "dailyAlignment": 17,
+                "alignmentTimezone": "America/New_York",
+                "weeklyAlignment": "Friday",
+                "includeFirst": True,
+                "complete_only": True,
+            }
+        )
+        self.assertEqual(
+            manifest["requests"],
+            [
+                {
+                    "endpoint_identity": ("oanda-v20-practice:GET:/v3/instruments/EUR_USD/candles"),
+                    "http_method": "GET",
+                    "oanda_environment": "practice",
+                    "canonical_request_sha256": canonical_request_sha256,
+                    "provider_request_id": "provider-request-4999",
+                    "http_status": 200,
+                }
+            ],
+        )
 
     def test_historical_response_rejects_missing_duplicate_incomplete_crossed_and_misaligned(self):
         start = datetime(2018, 12, 30, 22, tzinfo=UTC)

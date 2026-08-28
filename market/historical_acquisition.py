@@ -42,6 +42,9 @@ ALIGNMENT = {
 PHASE1_SPEC_SHA256 = "47d0346bcf723cb78a71763df43f6b092b0c235bb1d17ccbe69f17d9550203cd"
 PHASE1_MANIFEST_SHA256 = "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
 PARTITION = {"name": "development", "start_year": 2010, "end_year": 2018}
+ACQUISITION_CONTRACT = "failed-break-historical-acquisition"
+ACQUISITION_VERSION = "phase-2b1-v1"
+SOURCE_IDENTITY = "oanda-v20-market-candles-v1"
 
 
 def stable_hash(payload):
@@ -60,9 +63,13 @@ def parse_timestamp(value):
 @transaction.atomic
 def create_historical_dataset_plan(payload):
     required = {
-        "identity",
-        "source_id",
-        "strategy_version_id",
+        "acquisition_contract",
+        "acquisition_version",
+        "source",
+        "strategy",
+        "data_identity",
+        "phase1_spec_hash",
+        "phase1_manifest_hash",
         "dataset",
         "instruments",
         "granularities",
@@ -71,6 +78,11 @@ def create_historical_dataset_plan(payload):
     }
     if set(payload) != required:
         raise ValueError(f"historical plan fields must be exactly {sorted(required)}")
+    if (
+        payload["acquisition_contract"] != ACQUISITION_CONTRACT
+        or payload["acquisition_version"] != ACQUISITION_VERSION
+    ):
+        raise ValueError("historical plan requires the approved acquisition contract")
     if tuple(sorted(payload["instruments"])) != INSTRUMENTS:
         raise ValueError("historical plan must contain exactly the frozen six instruments")
     if tuple(sorted(payload["granularities"])) != GRANULARITIES:
@@ -81,24 +93,38 @@ def create_historical_dataset_plan(payload):
     if not 1 <= chunk_size <= 4999:
         raise ValueError("historical chunk_size must be between 1 and 4999")
 
-    source = SourceRegistry.objects.get(pk=payload["source_id"])
-    if source.name != "OANDA v20" or not source.enabled:
-        raise ValueError("historical plans require the enabled OANDA v20 source")
-    strategy = source_plan_strategy(payload["strategy_version_id"])
+    source_selector = payload["source"]
+    if source_selector != {"name": "OANDA v20", "governed_identity": SOURCE_IDENTITY}:
+        raise ValueError("historical plan requires the governed OANDA source identity")
+    source = SourceRegistry.objects.get(name=source_selector["name"])
     if (
-        strategy.data_identity != payload["identity"]
+        not source.enabled
+        or source.tier != SourceRegistry.Tier.ESTABLISHED
+        or source.acquisition_method != "v20 REST API"
+        or source.llm_processing_allowed
+    ):
+        raise ValueError("historical plans require the enabled OANDA v20 source")
+    strategy = source_plan_strategy(payload["strategy"])
+    if (
+        strategy.data_identity != payload["data_identity"]
         or strategy.data_identity != "oanda-ba-ny17-friday-v1"
+        or strategy.content_hash != payload["strategy"]["content_hash"]
         or strategy.content_hash != PHASE1_MANIFEST_SHA256
         or strategy.pair_metadata != {"instruments": list(STRATEGY_INSTRUMENTS)}
     ):
         raise ValueError("historical plan identity must match the strategy data identity")
     parameter_manifest = strategy.strategyparametermanifest
     if (
-        parameter_manifest.sha256 != PHASE1_MANIFEST_SHA256
-        or parameter_manifest.phase1_manifest_hash != PHASE1_MANIFEST_SHA256
-        or parameter_manifest.phase1_spec_hash != PHASE1_SPEC_SHA256
+        parameter_manifest.sha256 != payload["strategy"]["content_hash"]
+        or parameter_manifest.phase1_manifest_hash != payload["phase1_manifest_hash"]
+        or parameter_manifest.phase1_spec_hash != payload["phase1_spec_hash"]
+        or payload["phase1_manifest_hash"] != PHASE1_MANIFEST_SHA256
+        or payload["phase1_spec_hash"] != PHASE1_SPEC_SHA256
     ):
         raise ValueError("historical plan requires the exact approved Phase 1 artifacts")
+    dataset_fields = payload["dataset"]
+    if set(dataset_fields) != {"name", "version", "description"}:
+        raise ValueError("dataset fields must be exactly name, version and description")
     normalized_ranges = {}
     for granularity in GRANULARITIES:
         raw = payload["ranges"][granularity]
@@ -121,10 +147,12 @@ def create_historical_dataset_plan(payload):
         }
 
     normalized = {
-        "identity": payload["identity"],
-        "source_id": source.pk,
-        "strategy_version_id": strategy.pk,
-        "dataset": payload["dataset"],
+        "acquisition_contract": ACQUISITION_CONTRACT,
+        "acquisition_version": ACQUISITION_VERSION,
+        "source": source_selector,
+        "strategy": payload["strategy"],
+        "data_identity": payload["data_identity"],
+        "dataset": dataset_fields,
         "instruments": list(INSTRUMENTS),
         "granularities": list(GRANULARITIES),
         "ranges": normalized_ranges,
@@ -139,7 +167,7 @@ def create_historical_dataset_plan(payload):
     plan, created = HistoricalDatasetPlan.objects.get_or_create(
         sha256=digest,
         defaults={
-            "identity": normalized["identity"],
+            "identity": normalized["data_identity"],
             "source": source,
             "strategy_version": strategy,
             "instruments": normalized["instruments"],
@@ -156,9 +184,6 @@ def create_historical_dataset_plan(payload):
         dataset = DatasetVersion.objects.get(manifest__historical_plan_sha256=plan.sha256)
         return plan, dataset
 
-    dataset_fields = payload["dataset"]
-    if set(dataset_fields) != {"name", "version", "description"}:
-        raise ValueError("dataset fields must be exactly name, version and description")
     required_ranges = [
         {
             "instrument": code,
@@ -191,10 +216,16 @@ def create_historical_dataset_plan(payload):
     return plan, dataset
 
 
-def source_plan_strategy(strategy_id):
+def source_plan_strategy(selector):
     from research.models import StrategyVersion
 
-    return StrategyVersion.objects.select_related("strategyparametermanifest").get(pk=strategy_id)
+    if set(selector) != {"definition_key", "version", "content_hash"}:
+        raise ValueError("strategy selector requires definition_key, version and content_hash")
+    return StrategyVersion.objects.select_related("strategyparametermanifest").get(
+        definition__key=selector["definition_key"],
+        version=selector["version"],
+        content_hash=selector["content_hash"],
+    )
 
 
 def materialize_historical_chunks(plan, dataset):
@@ -225,6 +256,7 @@ def materialize_historical_chunks(plan, dataset):
                     "dailyAlignment": 17,
                     "alignmentTimezone": "America/New_York",
                     "weeklyAlignment": "Friday",
+                    "includeFirst": True,
                     "complete_only": True,
                 }
                 request_hash = stable_hash(canonical_request)
@@ -553,3 +585,35 @@ def register_historical_dataset(dataset_id, plan_sha256):
 
 def load_plan(path):
     return json.loads(Path(path).read_text())
+
+
+def offline_acquisition_report(plan, dataset):
+    """Render deterministic acquisition intent without contacting the provider."""
+    chunks = []
+    queryset = plan.chunks.select_related("instrument").order_by(
+        "instrument__code", "granularity", "requested_from"
+    )
+    for index, chunk in enumerate(queryset, 1):
+        chunks.append(
+            {
+                "order": index,
+                "expected_candle_count": len(
+                    expected_candle_timestamps(
+                        chunk.requested_from, chunk.requested_to, chunk.granularity
+                    )
+                ),
+                "canonical_request": chunk.canonical_request,
+                "canonical_request_sha256": chunk.canonical_request_sha256,
+                "logical_key": chunk.logical_key,
+            }
+        )
+    return {
+        "report_identity": "failed-break-phase-2b1-offline-acquisition-report-v1",
+        "offline_only": True,
+        "provider_requests_performed": 0,
+        "plan_sha256": plan.sha256,
+        "dataset_manifest_sha256": dataset.manifest_sha256,
+        "logical_chunk_count": len(chunks),
+        "ordered_manifest_sha256": stable_hash(chunks),
+        "chunks": chunks,
+    }
