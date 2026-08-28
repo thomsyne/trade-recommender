@@ -45,6 +45,23 @@ PARTITION = {"name": "development", "start_year": 2010, "end_year": 2018}
 ACQUISITION_CONTRACT = "failed-break-historical-acquisition"
 ACQUISITION_VERSION = "phase-2b1-v1"
 SOURCE_IDENTITY = "oanda-v20-market-candles-v1"
+FROZEN_RANGES = {
+    "D": {
+        "from": "2009-02-26T22:00:00+00:00",
+        "to": "2018-12-31T22:00:00+00:00",
+        "expected_count_per_instrument": 2567,
+    },
+    "H1": {
+        "from": "2009-12-31T15:00:00+00:00",
+        "to": "2019-01-01T04:00:00+00:00",
+        "expected_count_per_instrument": 56341,
+    },
+    "W": {
+        "from": "2009-12-18T22:00:00+00:00",
+        "to": "2018-12-28T22:00:00+00:00",
+        "expected_count_per_instrument": 471,
+    },
+}
 
 
 def stable_hash(payload):
@@ -145,6 +162,10 @@ def create_historical_dataset_plan(payload):
             "to": end.isoformat(),
             "expected_count_per_instrument": len(timestamps),
         }
+        if normalized_ranges[granularity] != FROZEN_RANGES[granularity]:
+            raise ValueError(
+                f"historical {granularity} range must equal the frozen acquisition range"
+            )
 
     normalized = {
         "acquisition_contract": ACQUISITION_CONTRACT,

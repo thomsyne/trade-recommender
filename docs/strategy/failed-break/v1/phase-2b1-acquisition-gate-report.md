@@ -10,18 +10,18 @@
 - Instruments: AUD_USD, EUR_GBP, EUR_USD, GBP_USD, USD_CAD, USD_JPY
 - Granularities: D, H1, W; combined bid/ask; New York 17:00; Friday weekly alignment
 - Complete candles only; `includeFirst=true`; one provider request per logical chunk
-- Per-instrument counts: D 2,571; H1 56,365; W 471
+- Per-instrument counts: D 2,567; H1 56,341; W 471
 - Logical chunks: 84 (1 D + 12 H1 + 1 W per instrument)
-- Total intended rows: 356,442
+- Total intended rows: 356,274
 - All candle completions are strictly before 2019 in America/New_York.
 
 ## Stable results
 
-- Plan SHA-256: `41570a010f18bb24b4b787cab407e45d4ef0b297034adc75e4f6fe14195865a8`
-- Dataset manifest SHA-256: `fee412f6197ee8edbf54b47152901c8d05f3b3534ccd3df27fabbc7558cf7231`
-- Ordered chunk manifest SHA-256: `b46e1eadbee5e5ee1be9e8d0443a4c7de7a02cc498b2d9eded63ffb1f85d78d9`
-- `phase-2b1-acquisition-plan.json`: `94c4a7923b5335176755a2dcdae19e2acb41f8b1e03ca81cc1d494827d21d202`
-- `phase-2b1-offline-acquisition-report.json`: `0c5827e66452c86f8edd22572ac238d749591ff0a55a40b3894b77e021ec864d`
+- Plan SHA-256: `da4d050315fa5c528589bb073a80e26eec6da00dd7cbc5080a56dbd8b6383721`
+- Dataset manifest SHA-256: `7b807646cf026e91f15444249ca5c1423ac9e4751c4778eb9546849ddc18689a`
+- Ordered chunk manifest SHA-256: `dd0a9309c0ece6170b554581cfbf3b4ec8a9ad63a24c7b3a682b6948e58f87c9`
+- `phase-2b1-acquisition-plan.json`: `6cf1197b22784812a7437e69db6df1b83ea83258efa118fabe902bcf41ed3086`
+- `phase-2b1-offline-acquisition-report.json`: `4c7d98df2abd2ffb3142c50ad33702f041fe276d6bceb1f640a207e1436b6c8f`
 
 The gate report's own file hash is intentionally not embedded in itself because a cryptographic
 self-hash cannot be represented without changing the hashed bytes. Recompute all three immutable
@@ -45,10 +45,11 @@ shasum -a 256 \
   docs/strategy/failed-break/v1/phase-2b1-acquisition-gate-report.md
 ```
 
-Two isolated databases were used for the gate. The governed source/strategy primary keys were
-`1/1` in the first and `2/2` in the second. Their complete reports compared byte-for-byte,
-including the plan SHA, dataset-manifest SHA, all 84 request hashes, all 84 logical keys, and the
-ordered-manifest SHA.
+The PostgreSQL-backed `HistoricalIdentityPortabilityTests` regression materializes the same
+semantic plan twice with deliberately displaced source and strategy primary-key allocation and
+compares the exact plan SHA, dataset-manifest SHA, all 84 request hashes, all 84 logical keys, and
+the ordered-manifest SHA. Test database cleanup is deterministic and the test makes no network
+calls.
 
 ## Safety conclusion
 

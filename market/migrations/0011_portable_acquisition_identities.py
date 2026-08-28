@@ -73,38 +73,56 @@ def apply_correction(apps, schema_editor):
           END IF;
           FOR item IN SELECT * FROM jsonb_each(NEW.ranges) LOOP
             IF item.key NOT IN ('D','H1','W')
-               OR (item.value->>'expected_count_per_instrument')::integer<1
-               OR (item.value->>'expected_count_per_instrument')::integer<>
-                  market_expected_count((item.value->>'from')::timestamptz,
-                    (item.value->>'to')::timestamptz,item.key)
-               OR (item.key='H1' AND (item.value->>'to')::timestamptz<>
-                    timestamptz '2019-01-01 04:00:00+00')
-               OR (item.key='D' AND (item.value->>'to')::timestamptz<>
-                    timestamptz '2018-12-31 22:00:00+00')
-               OR (item.key='W' AND (item.value->>'to')::timestamptz<>
-                    timestamptz '2018-12-28 22:00:00+00')
+               OR item.value <> (CASE item.key
+                    WHEN 'D' THEN '{"from":"2009-02-26T22:00:00+00:00",
+                      "to":"2018-12-31T22:00:00+00:00",
+                      "expected_count_per_instrument":2567}'::jsonb
+                    WHEN 'H1' THEN '{"from":"2009-12-31T15:00:00+00:00",
+                      "to":"2019-01-01T04:00:00+00:00",
+                      "expected_count_per_instrument":56341}'::jsonb
+                    WHEN 'W' THEN '{"from":"2009-12-18T22:00:00+00:00",
+                      "to":"2018-12-28T22:00:00+00:00",
+                      "expected_count_per_instrument":471}'::jsonb
+                  END)
             THEN RAISE EXCEPTION 'historical plan range is not the frozen calendar range'; END IF;
           END LOOP;
           RETURN NEW;
         END $$ LANGUAGE plpgsql;
 
         CREATE FUNCTION market_validate_historical_dataset() RETURNS trigger AS $$
-        DECLARE plan record;
+        DECLARE plan record; strategy record; expected_manifest jsonb; required_ranges jsonb;
         BEGIN
           IF NOT NEW.manifest ? 'historical_plan_sha256' THEN RETURN NEW; END IF;
           SELECT * INTO STRICT plan FROM market_historicaldatasetplan
             WHERE sha256=NEW.manifest->>'historical_plan_sha256';
+          SELECT * INTO STRICT strategy FROM research_strategyversion
+            WHERE id=plan.strategy_version_id;
+          SELECT jsonb_agg(jsonb_build_object(
+                   'instrument',instrument.value,
+                   'granularity',granularity.value,
+                   'start',plan.ranges->granularity.value->'from',
+                   'end',plan.ranges->granularity.value->'to')
+                   ORDER BY instrument.ordinality,granularity.ordinality)
+            INTO required_ranges
+            FROM jsonb_array_elements_text(plan.instruments)
+                   WITH ORDINALITY AS instrument(value,ordinality)
+            CROSS JOIN jsonb_array_elements_text(plan.granularities)
+                   WITH ORDINALITY AS granularity(value,ordinality);
+          expected_manifest := jsonb_build_object(
+            'strategy_manifest_sha256',strategy.content_hash,
+            'partition',jsonb_build_object('name','development','start_year',2010,'end_year',2018),
+            'required_ranges',required_ranges,
+            'historical_plan_sha256',plan.sha256,
+            'price_component',plan.price_component,
+            'complete_only',plan.complete_only,
+            'instruments',plan.instruments,
+            'granularities',plan.granularities,
+            'alignment',plan.alignment);
           IF NEW.source_id<>plan.source_id OR NEW.name<>plan.payload->'dataset'->>'name'
              OR NEW.version<>plan.payload->'dataset'->>'version'
              OR NEW.description<>plan.payload->'dataset'->>'description'
-             OR NEW.manifest_sha256<>market_sha256(NEW.manifest)
-             OR NEW.manifest->>'strategy_manifest_sha256'<>plan.phase1_manifest_hash
-             OR NEW.manifest->'partition'<>'{"name":"development","start_year":2010,"end_year":2018}'::jsonb
-             OR NEW.manifest->'instruments'<>plan.instruments
-             OR NEW.manifest->'granularities'<>plan.granularities
-             OR NEW.manifest->'alignment'<>plan.alignment
-             OR NEW.manifest->>'price_component'<>'COMBINED_BID_ASK'
-             OR NEW.manifest->'complete_only'<>'true'::jsonb
+             OR NEW.manifest<>expected_manifest
+             OR NEW.manifest_sha256<>market_sha256(expected_manifest)
           THEN RAISE EXCEPTION 'historical dataset conflicts with portable plan identity'; END IF;
           RETURN NEW;
         EXCEPTION WHEN NO_DATA_FOUND THEN
