@@ -22,6 +22,10 @@ from market.historical_acquisition import (
     PHASE1_MANIFEST_SHA256,
     PHASE1_SPEC_SHA256,
     SOURCE_IDENTITY,
+    HistoricalFailureCode,
+    HistoricalResponseError,
+    _record_historical_failure,
+    _timestamp_mismatch_evidence,
     begin_historical_attempt,
     create_historical_dataset_plan,
     offline_acquisition_report,
@@ -44,6 +48,7 @@ from market.models import (
     Instrument,
     SourceRegistry,
 )
+from market.oanda import OandaError
 from market.quality import expected_candle_timestamps
 from market.services import DatasetQualityError, assert_dataset_usable
 from market.tests.factories import candle
@@ -114,6 +119,44 @@ class CondensedFakeClient(FakeClient):
     def fetch_historical_chunk(self, instrument, granularity, start, end):
         _, manifest = super().fetch_historical_chunk(instrument, granularity, start, end)
         return [candle(start)], manifest
+
+
+class TransformingClient(FakeClient):
+    def __init__(self, transform):
+        self.transform = transform
+
+    def fetch_historical_chunk(self, instrument, granularity, start, end):
+        candles, manifest = super().fetch_historical_chunk(instrument, granularity, start, end)
+        return self.transform(candles, start, end), manifest
+
+
+class ProviderFailureClient(FakeClient):
+    def __init__(self, kind, status):
+        self.kind = kind
+        self.status = status
+
+    def fetch_historical_chunk(self, instrument, granularity, start, end):
+        _, manifest = super().fetch_historical_chunk(instrument, granularity, start, end)
+        evidence = {
+            **manifest["requests"][0],
+            "http_status": self.status,
+            "raw_url": "https://example.invalid/?token=raw-secret",
+            "authorization": "Bearer raw-secret",
+            "account_id": "private-account-id",
+            "raw_price": "1.234567",
+        }
+        raise OandaError(
+            "unsafe raw-secret https://example.invalid 1.234567",
+            failure_kind=self.kind,
+            provider_evidence=evidence,
+        )
+
+
+class MissingRequestIdClient(FakeClient):
+    def fetch_historical_chunk(self, instrument, granularity, start, end):
+        candles, manifest = super().fetch_historical_chunk(instrument, granularity, start, end)
+        manifest["requests"][0]["provider_request_id"] = ""
+        return candles, manifest
 
 
 class HistoricalFixtureMixin:
@@ -346,6 +389,45 @@ class HistoricalFixtureMixin:
                 }
             ],
         }
+
+    def assert_failed_attempt_evidence(self, chunk, error_code):
+        attempt = chunk.attempts.select_related("ingestion_run").get()
+        run = attempt.ingestion_run
+        event = AuditEvent.objects.get(
+            event_type="market.historical_ingestion_failed",
+            subject_type="HistoricalIngestionAttempt",
+            subject_id=str(attempt.pk),
+        )
+        self.assertEqual(run.status, IngestionRun.Status.FAILED)
+        self.assertEqual(run.failure_reason, error_code)
+        self.assertIsNotNone(run.finished_at)
+        self.assertEqual(event.payload["error_code"], error_code)
+        self.assertEqual(event.payload["logical_chunk_key"], chunk.logical_key)
+        self.assertEqual(event.payload["attempt_id"], attempt.pk)
+        self.assertEqual(event.payload["attempt_number"], attempt.attempt_number)
+        self.assertEqual(event.payload["idempotency_key"], attempt.idempotency_key)
+        self.assertEqual(event.payload["ingestion_run_id"], run.pk)
+        self.assertEqual(event.payload["plan_sha256"], chunk.plan.sha256)
+        self.assertEqual(
+            event.payload["dataset_manifest_sha256"], chunk.dataset_version.manifest_sha256
+        )
+        self.assertEqual(event.payload["instrument"], chunk.instrument.code)
+        self.assertEqual(event.payload["granularity"], chunk.granularity)
+        self.assertEqual(event.payload["canonical_request_sha256"], chunk.canonical_request_sha256)
+        self.assertEqual(event.payload["schema_version"], 1)
+        self.assertEqual(event.payload["occurred_at"], run.finished_at.isoformat())
+        self.assertFalse(IngestionManifest.objects.filter(ingestion_run=run).exists())
+        self.assertFalse(Candle.objects.filter(ingestion_run=run).exists())
+        self.assertFalse(
+            AuditEvent.objects.filter(
+                event_type="market.ingestion_succeeded",
+                subject_type="IngestionRun",
+                subject_id=str(run.pk),
+            ).exists()
+        )
+        self.assertFalse(chunk.dataset_version.incidents.exists())
+        self.assertFalse(chunk.dataset_version.conflicts.exists())
+        return attempt, event
 
 
 class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
@@ -614,6 +696,245 @@ class HistoricalAcquisitionTests(HistoricalFixtureMixin, TestCase):
         attempt = chunk.attempts.get()
         self.assertEqual(attempt.ingestion_run.status, IngestionRun.Status.FAILED)
         self.assertEqual(Candle.objects.count(), 0)
+
+    def test_timestamp_mismatch_records_missing_extra_duplicate_and_order_evidence(self):
+        plan, _ = self.plan()
+        chunks = list(
+            plan.chunks.filter(granularity="W").select_related("instrument").order_by("instrument")
+        )
+        cases = (
+            (
+                "missing",
+                lambda rows, _start, _end: rows[:-1],
+                {"missing_count": 1, "extra_count": 0, "duplicate_count": 0},
+            ),
+            (
+                "extra",
+                lambda rows, _start, end: [*rows, candle(end)],
+                {"missing_count": 0, "extra_count": 1, "duplicate_count": 0},
+            ),
+            (
+                "duplicate",
+                lambda rows, _start, _end: [rows[0], *rows],
+                {"missing_count": 0, "extra_count": 0, "duplicate_count": 1},
+            ),
+            (
+                "out_of_order",
+                lambda rows, _start, _end: [rows[1], rows[0], *rows[2:]],
+                {"missing_count": 0, "extra_count": 0, "duplicate_count": 0},
+            ),
+        )
+
+        for chunk, (name, transform, expected_counts) in zip(
+            chunks[: len(cases)], cases, strict=True
+        ):
+            with (
+                self.subTest(case=name),
+                self.assertRaisesMessage(
+                    DatasetQualityError,
+                    "provider response does not exactly cover the logical chunk",
+                ),
+            ):
+                run_historical_chunk(chunk.logical_key, TransformingClient(transform))
+
+            _, event = self.assert_failed_attempt_evidence(
+                chunk, HistoricalFailureCode.TIMESTAMP_SET_MISMATCH
+            )
+            evidence = event.payload["diagnostics"]
+            for field, value in expected_counts.items():
+                self.assertEqual(evidence[field], value)
+            self.assertEqual(evidence["ordering_mismatch"], name == "out_of_order")
+            self.assertFalse(evidence["difference_truncated"])
+            self.assertEqual(
+                evidence["expected_timestamp_set_sha256"],
+                stable_hash(
+                    sorted(
+                        item.isoformat()
+                        for item in expected_candle_timestamps(
+                            chunk.requested_from, chunk.requested_to, chunk.granularity
+                        )
+                    )
+                ),
+            )
+        self.assertEqual(
+            AuditEvent.objects.filter(event_type="market.historical_ingestion_failed").count(),
+            4,
+        )
+
+    def test_large_timestamp_difference_is_bounded_with_stable_set_hashes(self):
+        plan, _ = self.plan()
+        chunk = plan.chunks.filter(granularity="H1").first()
+        client = TransformingClient(lambda _rows, _start, _end: [])
+
+        with self.assertRaises(DatasetQualityError):
+            run_historical_chunk(chunk.logical_key, client)
+
+        _, event = self.assert_failed_attempt_evidence(
+            chunk, HistoricalFailureCode.TIMESTAMP_SET_MISMATCH
+        )
+        evidence = event.payload["diagnostics"]
+        expected = expected_candle_timestamps(
+            chunk.requested_from, chunk.requested_to, chunk.granularity
+        )
+        direct = _timestamp_mismatch_evidence(expected, ())
+        self.assertEqual(evidence, direct)
+        self.assertEqual(evidence["missing_count"], len(expected))
+        self.assertEqual(len(evidence["missing_timestamps"]), 128)
+        self.assertTrue(evidence["difference_truncated"])
+        self.assertEqual(evidence["actual_timestamp_set_sha256"], stable_hash([]))
+
+    def test_provider_failures_are_classified_and_sanitized(self):
+        plan, _ = self.plan()
+        chunks = list(plan.chunks.filter(granularity="W").order_by("instrument"))
+        cases = (
+            ("auth", 401, HistoricalFailureCode.PROVIDER_AUTH_ERROR),
+            ("http", 503, HistoricalFailureCode.PROVIDER_HTTP_ERROR),
+            ("malformed", 200, HistoricalFailureCode.PROVIDER_RESPONSE_MALFORMED),
+        )
+
+        for chunk, (kind, status, code) in zip(chunks[: len(cases)], cases, strict=True):
+            with self.subTest(kind=kind), self.assertRaises(OandaError):
+                run_historical_chunk(chunk.logical_key, ProviderFailureClient(kind, status))
+            _, event = self.assert_failed_attempt_evidence(chunk, code)
+            serialized = json.dumps(event.payload, sort_keys=True)
+            self.assertNotIn("raw-secret", serialized)
+            self.assertNotIn("example.invalid", serialized)
+            self.assertNotIn("private-account-id", serialized)
+            self.assertNotIn("1.234567", serialized)
+            self.assertNotIn("raw_url", serialized)
+            self.assertNotIn("authorization", serialized)
+            self.assertNotIn("account_id", serialized)
+            self.assertNotIn("raw_price", serialized)
+            provider = event.payload["provider_evidence"]
+            self.assertEqual(provider["http_status"], status)
+            self.assertEqual(provider["http_method"], "GET")
+            self.assertEqual(provider["oanda_environment"], "practice")
+
+    def test_missing_request_id_records_explicitly_unavailable_evidence(self):
+        plan, _ = self.plan()
+        chunk = plan.chunks.filter(granularity="W").first()
+
+        with self.assertRaisesMessage(
+            DatasetQualityError, "provider response lacks canonical request evidence"
+        ):
+            run_historical_chunk(chunk.logical_key, MissingRequestIdClient())
+
+        _, event = self.assert_failed_attempt_evidence(
+            chunk, HistoricalFailureCode.PROVIDER_EVIDENCE_MISSING
+        )
+        provider = event.payload["provider_evidence"]
+        self.assertEqual(provider["unavailable_fields"], ["provider_request_id"])
+        self.assertNotIn("provider_request_id", provider)
+        self.assertEqual(event.payload["failure_stage"], "response_validation")
+
+    def test_invalid_candle_records_bounded_structural_evidence_without_prices(self):
+        plan, _ = self.plan()
+        chunk = plan.chunks.filter(granularity="W").first()
+
+        def make_invalid(rows, _start, _end):
+            return [candle(rows[0].timestamp, complete=False), *rows[1:]]
+
+        with self.assertRaisesMessage(
+            DatasetQualityError, "provider response contains invalid candles"
+        ):
+            run_historical_chunk(chunk.logical_key, TransformingClient(make_invalid))
+
+        _, event = self.assert_failed_attempt_evidence(
+            chunk, HistoricalFailureCode.CANDLE_VALIDATION_FAILED
+        )
+        diagnostics = event.payload["diagnostics"]
+        self.assertEqual(diagnostics["issue_counts"], {"incomplete_candle": 1})
+        self.assertEqual(diagnostics["categories"], ["complete"])
+        self.assertFalse(diagnostics["diagnostic_truncated"])
+        serialized = json.dumps(event.payload, sort_keys=True)
+        for price in ("1.100000", "1.101000", "1.102000", "1.099000"):
+            self.assertNotIn(price, serialized)
+
+    def test_persistence_failure_records_only_sanitized_failure_evidence(self):
+        plan, _ = self.plan()
+        chunk = plan.chunks.filter(granularity="W").first()
+
+        with (
+            patch(
+                "market.historical_acquisition.store_ingestion",
+                side_effect=RuntimeError(
+                    "Bearer raw-secret https://example.invalid/account/private 1.234567"
+                ),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            run_historical_chunk(chunk.logical_key, FakeClient())
+
+        _, event = self.assert_failed_attempt_evidence(
+            chunk, HistoricalFailureCode.PERSISTENCE_FAILED
+        )
+        self.assertEqual(event.payload["failure_stage"], "persistence")
+        serialized = json.dumps(event.payload, sort_keys=True)
+        self.assertNotIn("raw-secret", serialized)
+        self.assertNotIn("example.invalid", serialized)
+        self.assertNotIn("1.234567", serialized)
+
+    def test_failure_event_and_run_transition_are_atomic(self):
+        plan, _ = self.plan()
+        chunk = plan.chunks.filter(granularity="W").first()
+
+        with (
+            patch(
+                "market.historical_acquisition.AuditEvent.objects.create",
+                side_effect=DatabaseError("synthetic audit persistence failure"),
+            ),
+            self.assertRaisesMessage(DatabaseError, "synthetic audit persistence failure"),
+        ):
+            run_historical_chunk(chunk.logical_key, FailingClient())
+
+        attempt = chunk.attempts.select_related("ingestion_run").get()
+        self.assertEqual(attempt.ingestion_run.status, IngestionRun.Status.RUNNING)
+        self.assertEqual(attempt.ingestion_run.failure_reason, "")
+        self.assertEqual(AuditEvent.objects.count(), 0)
+        self.assertEqual(IngestionManifest.objects.count(), 0)
+        self.assertEqual(Candle.objects.count(), 0)
+
+    def test_failed_attempt_event_is_exactly_once_and_terminally_immutable(self):
+        plan, _ = self.plan()
+        chunk = plan.chunks.filter(granularity="W").first()
+
+        with self.assertRaises(RuntimeError):
+            run_historical_chunk(chunk.logical_key, FailingClient())
+        attempt, event = self.assert_failed_attempt_evidence(
+            chunk, HistoricalFailureCode.UNKNOWN_FAILURE
+        )
+        failure = HistoricalResponseError(
+            "duplicate",
+            HistoricalFailureCode.UNKNOWN_FAILURE,
+            "provider_request",
+            {},
+            {"unavailable_fields": []},
+        )
+        with self.assertRaisesMessage(DatasetQualityError, "requires a running attempt"):
+            _record_historical_failure(attempt.pk, failure)
+        self.assertEqual(
+            AuditEvent.objects.filter(event_type="market.historical_ingestion_failed").count(),
+            1,
+        )
+        event.payload = {}
+        with self.assertRaisesMessage(ValidationError, "append-only"):
+            event.save()
+
+    def test_successful_historical_path_creates_no_failure_event(self):
+        plan, _ = self.plan()
+        chunk = plan.chunks.filter(granularity="W").first()
+
+        attempt = run_historical_chunk(chunk.logical_key, FakeClient())
+
+        self.assertEqual(attempt.ingestion_run.status, IngestionRun.Status.SUCCEEDED)
+        self.assertEqual(IngestionManifest.objects.count(), 1)
+        self.assertEqual(Candle.objects.count(), 471)
+        self.assertEqual(
+            AuditEvent.objects.filter(event_type="market.ingestion_succeeded").count(), 1
+        )
+        self.assertFalse(
+            AuditEvent.objects.filter(event_type="market.historical_ingestion_failed").exists()
+        )
 
     def test_complete_fixture_registers_immutably_with_deterministic_hashes(self):
         plan, dataset = self.plan()

@@ -289,7 +289,7 @@ class RecommendationTests(TestCase):
         stale_instrument = Instrument.objects.create(
             code="GBP_USD", base_currency="GBP", quote_currency="USD", display_order=3
         )
-        stale_at = self.now - timedelta(days=1)
+        stale_at = self.now - timedelta(days=4)
         evidence(stale_instrument, self.now, market_as_of=stale_at)
         provider = FakeProvider()
 
