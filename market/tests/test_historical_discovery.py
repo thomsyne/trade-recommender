@@ -349,6 +349,39 @@ class HistoricalDiscoveryTests(TestCase):
     def test_audit_persistence_failure_records_terminal_failure(self):
         self.assert_persistence_failure("audit_event", AuditEvent.objects, "create")
 
+    def test_deferred_reconstruction_failure_records_terminal_failure(self):
+        plan = create_discovery_plan(self.single_request_payload("phase-2b1r-discovery-v32"))
+        chunk = plan.chunks.select_related("instrument").get()
+        client = type(
+            "SuccessfulInventoryClient",
+            (),
+            {
+                "fetch_historical_inventory": lambda *_: (
+                    [StructuralObservation(chunk.requested_from, True, 10, True, True)],
+                    self.evidence_for(chunk),
+                )
+            },
+        )()
+
+        with (
+            patch(
+                "market.historical_discovery.semantic_inventory_hashes",
+                return_value=("0" * 64, "1" * 64, "2" * 64),
+            ),
+            self.assertRaises(DiscoveryPersistenceError) as raised,
+        ):
+            run_discovery_chunk(chunk.logical_key, client)
+
+        self.assertEqual(raised.exception.component, "database_constraints")
+        attempt = HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get()
+        self.assertEqual(attempt.ingestion_run.status, IngestionRun.Status.FAILED)
+        self.assertEqual(
+            attempt.ingestion_run.failure_reason, DiscoveryFailureCode.PERSISTENCE_FAILED
+        )
+        self.assertFalse(HistoricalTimestampInventory.objects.exists())
+        event = AuditEvent.objects.get(event_type="market.historical_discovery_failed")
+        self.assertEqual(event.payload["diagnostics"], {"component": "database_constraints"})
+
     def test_failure_evidence_error_leaves_attempt_for_stale_resolution(self):
         plan = create_discovery_plan(self.single_request_payload("phase-2b1r-discovery-v30"))
         chunk = plan.chunks.select_related("instrument").get()
@@ -509,6 +542,84 @@ class HistoricalDiscoveryTests(TestCase):
             )
         with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
             cursor.execute("TRUNCATE market_auditevent")
+
+    def test_database_rejects_noncanonical_terminal_audit_json(self):
+        plan = self.create_plan()
+        attempt = begin_discovery_attempt(plan.chunks.get().logical_key)
+        run = attempt.ingestion_run
+        occurred_at = timezone.now()
+        evidence = {
+            "canonical_request_sha256": attempt.chunk.canonical_request_sha256,
+            "endpoint_identity": (
+                f"oanda-v20-practice:GET:/v3/instruments/{attempt.chunk.instrument.code}/candles"
+            ),
+            "environment": "practice",
+            "http_method": "GET",
+            "http_status": 500,
+            "provider_request_id": "request-id",
+            "unavailable_fields": [],
+        }
+        event_body = _terminal_event_body(
+            attempt,
+            code=DiscoveryFailureCode.PROVIDER_HTTP_ERROR,
+            stage="provider_request",
+            evidence=evidence,
+            diagnostics={},
+            occurred_at=occurred_at,
+        )
+        malformed_bodies = []
+        for key in ("schema_version", "attempt_number"):
+            malformed = dict(event_body)
+            malformed[key] = str(malformed[key])
+            malformed_bodies.append(malformed)
+        missing = dict(event_body)
+        missing["unexpected"] = missing.pop("instrument")
+        malformed_bodies.append(missing)
+        substituted = dict(event_body)
+        substituted["granularity"] = "H1"
+        malformed_bodies.append(substituted)
+
+        for malformed_body in malformed_bodies:
+            with self.subTest(payload=malformed_body):
+                event_hash = canonical_hash(malformed_body)
+                run.status = IngestionRun.Status.FAILED
+                run.failure_reason = DiscoveryFailureCode.PROVIDER_HTTP_ERROR
+                run.finished_at = occurred_at
+                with self.assertRaises(DatabaseError), transaction.atomic():
+                    run.save()
+                    operational_hash = _operational_hash(attempt, run, evidence, event_hash)
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            """INSERT INTO market_historicaldiscoveryproviderevidence
+                               (attempt_id,endpoint_identity,http_method,environment,http_status,
+                                provider_request_id,canonical_request_sha256,unavailable_fields,
+                                terminal_event_sha256,operational_evidence_sha256,created_at)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,now())""",
+                            [
+                                attempt.pk,
+                                evidence["endpoint_identity"],
+                                evidence["http_method"],
+                                evidence["environment"],
+                                evidence["http_status"],
+                                evidence["provider_request_id"],
+                                evidence["canonical_request_sha256"],
+                                json.dumps(evidence["unavailable_fields"]),
+                                event_hash,
+                                operational_hash,
+                            ],
+                        )
+                        cursor.execute(
+                            """INSERT INTO market_auditevent
+                               (occurred_at,event_type,actor,subject_type,subject_id,payload)
+                               VALUES (now(),%s,%s,%s,%s,%s::jsonb)""",
+                            [
+                                "market.historical_discovery_failed",
+                                "market.historical_discovery.run_discovery_chunk",
+                                "HistoricalDiscoveryAttempt",
+                                str(attempt.pk),
+                                json.dumps({**malformed_body, "event_sha256": event_hash}),
+                            ],
+                        )
 
     def test_database_rejects_unsafe_raw_sql_provider_evidence(self):
         plan = self.create_plan()

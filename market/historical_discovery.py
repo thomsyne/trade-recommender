@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied
-from django.db import connection, transaction
+from django.db import DatabaseError, connection, transaction
 from django.db.models import Max
 from django.utils import timezone
 
@@ -671,6 +671,18 @@ def _record_success(attempt_id, observations, evidence):
         )
     except Exception:
         raise DiscoveryPersistenceError("audit_event") from None
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SET CONSTRAINTS market_discovery_inventory_reconstruct, "
+                "market_discovery_provider_validate, market_discovery_run_terminal IMMEDIATE"
+            )
+            cursor.execute(
+                "SET CONSTRAINTS market_discovery_inventory_reconstruct, "
+                "market_discovery_provider_validate, market_discovery_run_terminal DEFERRED"
+            )
+    except Exception:
+        raise DiscoveryPersistenceError("database_constraints") from None
     attempt.ingestion_run = run
     return attempt
 
@@ -717,12 +729,17 @@ def run_discovery_chunk(logical_key, client):
         raise
     try:
         return _record_success(attempt.pk, observations, provider_evidence)
-    except DiscoveryPersistenceError as error:
+    except (DiscoveryPersistenceError, DatabaseError) as error:
+        component = (
+            error.component
+            if isinstance(error, DiscoveryPersistenceError)
+            else "database_constraints"
+        )
         failure = DiscoveryResponseError(
             "historical discovery persistence failed",
             DiscoveryFailureCode.PERSISTENCE_FAILED,
             "persistence",
-            {"component": error.component},
+            {"component": component},
             provider_evidence,
             len(observations),
         )

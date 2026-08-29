@@ -372,7 +372,9 @@ def install_discovery_governance(apps, schema_editor):
         CREATE FUNCTION market_validate_discovery_audit_insert() RETURNS trigger AS $$
         DECLARE lineage record; evidence record; existing_count integer; payload_key_count integer;
                 expected_provider jsonb; expected_success_diagnostics jsonb; diagnostics jsonb;
-                expected_event_type text; expected_error_code text;
+                expected_event_body jsonb; expected_event jsonb;
+                expected_event_type text; expected_error_code text; expected_stage text;
+                expected_diagnostics jsonb;
         BEGIN
           IF NEW.subject_type<>'HistoricalDiscoveryAttempt'
              AND NEW.event_type NOT LIKE 'market.historical_discovery_%%'
@@ -387,7 +389,7 @@ def install_discovery_governance(apps, schema_editor):
           SELECT a.attempt_number,a.idempotency_key,c.logical_key,c.granularity,
                  c.requested_from,c.requested_to,c.canonical_request_sha256,i.code,
                  r.status,r.failure_reason,r.fetched_count,inv.semantic_inventory_sha256,
-                 inv.observation_count
+                 inv.observation_count,r.finished_at
             INTO STRICT lineage FROM market_historicaldiscoveryattempt a
             JOIN market_historicaldiscoverychunk c ON c.id=a.chunk_id
             JOIN market_instrument i ON i.id=c.instrument_id
@@ -416,9 +418,55 @@ def install_discovery_governance(apps, schema_editor):
           expected_success_diagnostics := jsonb_build_object(
             'observation_count',lineage.observation_count,
             'semantic_inventory_sha256',lineage.semantic_inventory_sha256);
+          expected_stage := CASE
+            WHEN lineage.status='succeeded' THEN 'complete'
+            WHEN expected_error_code='DISCOVERY_PERSISTENCE_FAILED' THEN 'persistence'
+            WHEN expected_error_code='DISCOVERY_STALE_ATTEMPT' THEN 'stale_resolution'
+            WHEN expected_error_code IN ('DISCOVERY_PROVIDER_AUTH_ERROR',
+                 'DISCOVERY_PROVIDER_HTTP_ERROR','DISCOVERY_PROVIDER_RESPONSE_MALFORMED',
+                 'DISCOVERY_UNKNOWN_FAILURE') THEN 'provider_request'
+            WHEN expected_error_code='DISCOVERY_PROVIDER_EVIDENCE_MISSING'
+              THEN 'provider_evidence'
+            WHEN expected_error_code IN ('DISCOVERY_PROVIDER_LIMIT_SUSPECTED',
+                 'DISCOVERY_STRUCTURE_INVALID') THEN 'response_validation'
+            ELSE NULL END;
+          expected_diagnostics := CASE
+            WHEN lineage.status='succeeded' THEN expected_success_diagnostics
+            WHEN expected_error_code='DISCOVERY_PERSISTENCE_FAILED' THEN
+              jsonb_build_object('component',diagnostics->>'component')
+            WHEN expected_error_code='DISCOVERY_STALE_ATTEMPT' THEN jsonb_build_object(
+              'reason',diagnostics->>'reason','stale_threshold_seconds',
+              (diagnostics->>'stale_threshold_seconds')::integer)
+            WHEN expected_error_code IN ('DISCOVERY_PROVIDER_AUTH_ERROR',
+                 'DISCOVERY_PROVIDER_HTTP_ERROR','DISCOVERY_PROVIDER_RESPONSE_MALFORMED',
+                 'DISCOVERY_UNKNOWN_FAILURE') THEN '{}'::jsonb
+            WHEN expected_error_code='DISCOVERY_PROVIDER_EVIDENCE_MISSING' THEN
+              jsonb_build_object('unavailable_fields',evidence.unavailable_fields)
+            WHEN expected_error_code='DISCOVERY_PROVIDER_LIMIT_SUSPECTED' THEN
+              jsonb_build_object('observation_count',lineage.fetched_count)
+            WHEN expected_error_code='DISCOVERY_STRUCTURE_INVALID' THEN diagnostics
+            ELSE NULL END;
+          expected_event_body := jsonb_build_object(
+            'schema_version',1,
+            'error_code',expected_error_code,
+            'stage',expected_stage,
+            'logical_discovery_key',lineage.logical_key,
+            'attempt_number',lineage.attempt_number,
+            'idempotency_key',lineage.idempotency_key,
+            'instrument',lineage.code,
+            'granularity',lineage.granularity,
+            'requested_from',market_discovery_timestamp(lineage.requested_from),
+            'requested_to',market_discovery_timestamp(lineage.requested_to),
+            'canonical_request_sha256',lineage.canonical_request_sha256,
+            'provider_evidence',expected_provider,
+            'diagnostics',expected_diagnostics,
+            'occurred_at',market_discovery_operational_timestamp(lineage.finished_at));
+          expected_event := expected_event_body || jsonb_build_object(
+            'event_sha256',market_sha256(expected_event_body));
           IF existing_count<>0 OR NEW.event_type IS DISTINCT FROM expected_event_type
              OR NEW.actor IS DISTINCT FROM 'market.historical_discovery.run_discovery_chunk'
              OR payload_key_count<>15 OR jsonb_typeof(NEW.payload) IS DISTINCT FROM 'object'
+             OR NEW.payload IS DISTINCT FROM expected_event
              OR NEW.payload->>'schema_version' IS DISTINCT FROM '1'
              OR NEW.payload->>'logical_discovery_key' IS DISTINCT FROM lineage.logical_key
              OR (NEW.payload->>'attempt_number')::integer IS DISTINCT FROM lineage.attempt_number
@@ -451,7 +499,8 @@ def install_discovery_governance(apps, schema_editor):
                       NEW.payload->>'stage' IS DISTINCT FROM 'persistence'
                       OR diagnostics->>'component' IS NULL
                       OR diagnostics->>'component' NOT IN
-                         ('inventory','observations','run','provider_evidence','audit_event')
+                         ('inventory','observations','run','provider_evidence','audit_event',
+                          'database_constraints')
                       OR diagnostics IS DISTINCT FROM
                          jsonb_build_object('component',diagnostics->>'component')))
                   OR (expected_error_code='DISCOVERY_STALE_ATTEMPT' AND (
