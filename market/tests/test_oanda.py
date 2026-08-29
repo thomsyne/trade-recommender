@@ -213,6 +213,110 @@ class OandaClientTests(SimpleTestCase):
         )
         self.assertNotIn("1.234567", str(error.provider_evidence))
 
+    def test_discovery_makes_one_request_and_discards_prices(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(
+                200,
+                headers={"RequestID": "discovery-request-1"},
+                json={
+                    "candles": [
+                        {
+                            "time": "2018-12-21T22:00:00Z",
+                            "complete": True,
+                            "volume": 17,
+                            "bid": {"o": "SECRET_BID", "h": "1", "l": "1", "c": "1"},
+                            "ask": {"o": "SECRET_ASK", "h": "2", "l": "2", "c": "2"},
+                        }
+                    ]
+                },
+            )
+
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        end = start + timedelta(weeks=1)
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        observations, evidence = client.fetch_historical_inventory("AUD_USD", "W", start, end)
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(
+            vars(observations[0]),
+            {
+                "timestamp": start,
+                "complete": True,
+                "volume": 17,
+                "bid_present": True,
+                "ask_present": True,
+            },
+        )
+        serialized = repr((observations, evidence))
+        self.assertNotIn("SECRET_BID", serialized)
+        self.assertNotIn("SECRET_ASK", serialized)
+        self.assertNotIn("test-token", serialized)
+        self.assertNotIn("Authorization", serialized)
+        self.assertEqual(evidence["provider_request_id"], "discovery-request-1")
+
+    def test_discovery_network_failure_has_no_fabricated_status_or_request_id(self):
+        def handler(request):
+            raise httpx.ConnectError("secret transport diagnostic", request=request)
+
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        with self.assertRaises(OandaError) as raised:
+            client.fetch_historical_inventory("AUD_USD", "W", start, start + timedelta(weeks=1))
+
+        error = raised.exception
+        self.assertEqual(str(error), "OANDA discovery request failed")
+        self.assertNotIn("http_status", error.provider_evidence)
+        self.assertNotIn("provider_request_id", error.provider_evidence)
+        self.assertEqual(
+            error.provider_evidence["unavailable_fields"],
+            ["http_status", "provider_request_id"],
+        )
+        self.assertNotIn("secret transport diagnostic", repr(error.provider_evidence))
+        self.assertNotIn("test-token", repr(error.provider_evidence))
+
+    def test_discovery_rejects_timezone_naive_provider_timestamp(self):
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers={"RequestID": "naive-timestamp"},
+                json={"candles": [_payload("2018-12-21T22:00:00", complete=True)]},
+            )
+
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        with self.assertRaisesMessage(OandaError, "response is malformed"):
+            client.fetch_historical_inventory("AUD_USD", "W", start, start + timedelta(weeks=1))
+
+    def test_discovery_requires_complete_canonical_bid_and_ask_components(self):
+        components = [
+            ({}, {"o": "1", "h": "1", "l": "1", "c": "1"}),
+            ({"o": "1", "h": "1", "l": "1"}, {"o": "1", "h": "1", "l": "1", "c": "1"}),
+            ({"o": "1", "h": "1", "l": "1", "c": "1"}, {}),
+            ({"o": "1", "h": "1", "l": "1", "c": "1"}, {"o": "1"}),
+        ]
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        for bid, ask in components:
+            with self.subTest(bid=bid, ask=ask):
+
+                def handler(request):
+                    payload = _payload("2018-12-21T22:00:00Z", complete=True)
+                    payload.update(bid=bid, ask=ask)
+                    return httpx.Response(
+                        200,
+                        headers={"RequestID": "component-structure"},
+                        json={"candles": [payload]},
+                    )
+
+                client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+                observations, _ = client.fetch_historical_inventory(
+                    "AUD_USD", "W", start, start + timedelta(weeks=1)
+                )
+                self.assertEqual(observations[0].bid_present, set(bid) == {"o", "h", "l", "c"})
+                self.assertEqual(observations[0].ask_present, set(ask) == {"o", "h", "l", "c"})
+
     def test_historical_response_rejects_missing_duplicate_incomplete_crossed_and_misaligned(self):
         start = datetime(2018, 12, 30, 22, tzinfo=UTC)
         end = start + timedelta(hours=2)

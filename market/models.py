@@ -2,6 +2,7 @@ import hashlib
 import json
 from datetime import UTC
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.dateparse import parse_datetime
@@ -321,6 +322,218 @@ class HistoricalIngestionAttempt(ImmutableModel):
             raise ValidationError("historical attempt idempotency key does not match its chunk")
         self.idempotency_key = expected_key
         return super().save(*args, **kwargs)
+
+
+class HistoricalDiscoveryPlan(models.Model):
+    identity = models.CharField(max_length=160)
+    version = models.CharField(max_length=80)
+    source = models.ForeignKey(SourceRegistry, on_delete=models.PROTECT)
+    purpose = models.CharField(max_length=80)
+    environment = models.CharField(max_length=12)
+    phase1_spec_hash = models.CharField(max_length=64)
+    phase1_manifest_hash = models.CharField(max_length=64)
+    superseded_data_identity = models.CharField(max_length=160)
+    declared_chunk_count = models.PositiveIntegerField()
+    canonical_request_manifest = models.JSONField()
+    canonical_request_manifest_sha256 = models.CharField(max_length=64)
+    payload = models.JSONField()
+    sha256 = models.CharField(max_length=64, unique=True)
+    sealed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("identity", "version"), name="unique_historical_discovery_plan_version"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(declared_chunk_count__gte=1),
+                name="historical_discovery_plan_nonempty",
+            ),
+        ]
+        permissions = [
+            ("approve_historical_discovery", "Can approve historical timestamp discovery")
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError(
+                "historical discovery plans are immutable outside governed sealing"
+            )
+        manifest_hash = dataset_manifest_sha256(self.canonical_request_manifest)
+        payload_hash = dataset_manifest_sha256(self.payload)
+        if self.canonical_request_manifest_sha256 not in {"", manifest_hash}:
+            raise ValidationError("discovery request-manifest SHA-256 does not match")
+        if self.sha256 not in {"", payload_hash}:
+            raise ValidationError("discovery plan SHA-256 does not match")
+        self.canonical_request_manifest_sha256 = manifest_hash
+        self.sha256 = payload_hash
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("historical discovery plans are append-only")
+
+
+class HistoricalDiscoveryChunk(ImmutableModel):
+    plan = models.ForeignKey(
+        HistoricalDiscoveryPlan, on_delete=models.PROTECT, related_name="chunks"
+    )
+    ordinal = models.PositiveIntegerField()
+    instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
+    granularity = models.CharField(max_length=3, choices=HISTORICAL_GRANULARITIES)
+    requested_from = models.DateTimeField()
+    requested_to = models.DateTimeField()
+    canonical_request = models.JSONField()
+    canonical_request_sha256 = models.CharField(max_length=64)
+    logical_key = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("plan", "ordinal")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("plan", "ordinal"), name="unique_historical_discovery_chunk_ordinal"
+            ),
+            models.UniqueConstraint(
+                fields=("plan", "instrument", "granularity", "requested_from", "requested_to"),
+                name="unique_historical_discovery_request",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(ordinal__gte=1), name="historical_discovery_ordinal_positive"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(requested_from__lt=models.F("requested_to")),
+                name="historical_discovery_increasing_range",
+            ),
+        ]
+
+
+class HistoricalDiscoveryAttempt(ImmutableModel):
+    chunk = models.ForeignKey(
+        HistoricalDiscoveryChunk, on_delete=models.PROTECT, related_name="attempts"
+    )
+    ingestion_run = models.OneToOneField(
+        IngestionRun, on_delete=models.PROTECT, related_name="historical_discovery_attempt"
+    )
+    attempt_number = models.PositiveIntegerField()
+    idempotency_key = models.CharField(max_length=200, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("chunk", "attempt_number"),
+                name="unique_historical_discovery_attempt_number",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(attempt_number__gte=1),
+                name="historical_discovery_attempt_positive",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        expected = f"historical-discovery-attempt:{self.chunk.logical_key}:{self.attempt_number}"
+        if self.idempotency_key not in {"", expected}:
+            raise ValidationError("discovery attempt idempotency key does not match")
+        self.idempotency_key = expected
+        return super().save(*args, **kwargs)
+
+
+class HistoricalTimestampInventory(ImmutableModel):
+    chunk = models.OneToOneField(
+        HistoricalDiscoveryChunk, on_delete=models.PROTECT, related_name="inventory"
+    )
+    accepted_attempt = models.OneToOneField(
+        HistoricalDiscoveryAttempt, on_delete=models.PROTECT, related_name="inventory"
+    )
+    observation_count = models.PositiveIntegerField()
+    timestamp_set_sha256 = models.CharField(max_length=64)
+    structural_observation_sha256 = models.CharField(max_length=64)
+    semantic_inventory_sha256 = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(observation_count__gte=1),
+                name="historical_timestamp_inventory_nonempty",
+            )
+        ]
+
+
+class HistoricalTimestampObservation(ImmutableModel):
+    inventory = models.ForeignKey(
+        HistoricalTimestampInventory, on_delete=models.PROTECT, related_name="observations"
+    )
+    timestamp = models.DateTimeField()
+    complete = models.BooleanField()
+    volume = models.PositiveIntegerField()
+    bid_present = models.BooleanField()
+    ask_present = models.BooleanField()
+
+    class Meta:
+        ordering = ("inventory", "timestamp")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("inventory", "timestamp"),
+                name="unique_historical_timestamp_observation",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(complete=True), name="historical_discovery_observation_complete"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(bid_present=True),
+                name="historical_discovery_observation_has_bid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(ask_present=True),
+                name="historical_discovery_observation_has_ask",
+            ),
+        ]
+
+
+class HistoricalDiscoveryProviderEvidence(ImmutableModel):
+    attempt = models.OneToOneField(
+        HistoricalDiscoveryAttempt, on_delete=models.PROTECT, related_name="provider_evidence"
+    )
+    endpoint_identity = models.CharField(max_length=240, null=True, blank=True)
+    http_method = models.CharField(max_length=8, null=True, blank=True)
+    environment = models.CharField(max_length=12, null=True, blank=True)
+    http_status = models.PositiveSmallIntegerField(null=True, blank=True)
+    provider_request_id = models.CharField(max_length=200, null=True, blank=True)
+    canonical_request_sha256 = models.CharField(max_length=64, null=True, blank=True)
+    unavailable_fields = models.JSONField(default=list)
+    terminal_event_sha256 = models.CharField(max_length=64)
+    operational_evidence_sha256 = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class HistoricalDiscoveryApproval(ImmutableModel):
+    plan = models.OneToOneField(
+        HistoricalDiscoveryPlan, on_delete=models.PROTECT, related_name="approval"
+    )
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    global_semantic_inventory_sha256 = models.CharField(max_length=64)
+    accepted_operational_evidence_set_sha256 = models.CharField(max_length=64)
+    payload = models.JSONField()
+    sha256 = models.CharField(max_length=64, unique=True)
+    approved_at = models.DateTimeField()
+
+
+class HistoricalDiscoveryRegistration(ImmutableModel):
+    plan = models.OneToOneField(
+        HistoricalDiscoveryPlan, on_delete=models.PROTECT, related_name="registration"
+    )
+    approval = models.OneToOneField(
+        HistoricalDiscoveryApproval, on_delete=models.PROTECT, related_name="registration"
+    )
+    ordered_chunk_manifest_sha256 = models.CharField(max_length=64)
+    global_semantic_inventory_sha256 = models.CharField(max_length=64)
+    accepted_operational_evidence_set_sha256 = models.CharField(max_length=64)
+    cross_series_report_sha256 = models.CharField(max_length=64)
+    payload = models.JSONField()
+    report_sha256 = models.CharField(max_length=64, unique=True)
+    registered_at = models.DateTimeField()
 
 
 class Candle(models.Model):
