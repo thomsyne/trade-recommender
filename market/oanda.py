@@ -23,7 +23,10 @@ class CandleData:
 
 
 class OandaError(RuntimeError):
-    pass
+    def __init__(self, message, *, failure_kind=None, provider_evidence=None):
+        super().__init__(message)
+        self.failure_kind = failure_kind
+        self.provider_evidence = provider_evidence or {}
 
 
 class OandaClient:
@@ -141,12 +144,56 @@ class OandaClient:
             "includeFirst": True,
             "complete_only": True,
         }
-        response = self.client.get(f"/instruments/{instrument}/candles", params=params)
-        payload = _response_json(response)
+        canonical_request_sha256 = manifest_hash(canonical_request)
+        provider_evidence = {
+            "endpoint_identity": (
+                f"oanda-v20-{self.environment}:GET:/v3/instruments/{instrument}/candles"
+            ),
+            "http_method": "GET",
+            "oanda_environment": self.environment,
+            "canonical_request_sha256": canonical_request_sha256,
+        }
+        try:
+            response = self.client.get(f"/instruments/{instrument}/candles", params=params)
+        except httpx.HTTPError as error:
+            raise OandaError(
+                "OANDA historical request failed",
+                failure_kind="http",
+                provider_evidence={
+                    **provider_evidence,
+                    "unavailable_fields": ["http_status", "provider_request_id"],
+                },
+            ) from error
+        provider_evidence = {
+            **provider_evidence,
+            "http_status": response.status_code,
+            "provider_request_id": response.headers.get("RequestID", ""),
+        }
+        if not provider_evidence["provider_request_id"]:
+            provider_evidence["unavailable_fields"] = ["provider_request_id"]
+        if response.status_code != 200:
+            kind = "auth" if response.status_code in {401, 403} else "http"
+            raise OandaError(
+                f"OANDA historical request returned HTTP {response.status_code}",
+                failure_kind=kind,
+                provider_evidence=provider_evidence,
+            )
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            raise OandaError(
+                "OANDA historical response is malformed",
+                failure_kind="malformed",
+                provider_evidence=provider_evidence,
+            ) from error
         try:
             candles = [_parse_candle(item) for item in payload["candles"]]
         except (KeyError, TypeError, ValueError, ArithmeticError) as error:
-            raise OandaError("OANDA historical response contains a malformed candle") from error
+            raise OandaError(
+                "OANDA historical response contains a malformed candle",
+                failure_kind="malformed",
+                provider_evidence=provider_evidence,
+            ) from error
         manifest = {
             "instrument": instrument,
             "granularity": granularity,
@@ -160,14 +207,7 @@ class OandaClient:
             "includeFirst": True,
             "requests": [
                 {
-                    "endpoint_identity": (
-                        f"oanda-v20-{self.environment}:GET:/v3/instruments/{instrument}/candles"
-                    ),
-                    "http_method": "GET",
-                    "oanda_environment": self.environment,
-                    "canonical_request_sha256": manifest_hash(canonical_request),
-                    "provider_request_id": response.headers.get("RequestID", ""),
-                    "http_status": response.status_code,
+                    **provider_evidence,
                 }
             ],
         }

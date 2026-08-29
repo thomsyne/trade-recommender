@@ -170,6 +170,49 @@ class OandaClientTests(SimpleTestCase):
             ],
         )
 
+    def test_historical_auth_error_exposes_only_sanitized_provider_evidence(self):
+        def handler(request):
+            return httpx.Response(
+                401,
+                headers={"RequestID": "provider-auth-request"},
+                json={"errorMessage": "raw provider response body must not be retained"},
+            )
+
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        with self.assertRaises(OandaError) as raised:
+            client.fetch_historical_chunk("AUD_USD", "W", start, start + timedelta(weeks=1))
+
+        error = raised.exception
+        self.assertEqual(error.failure_kind, "auth")
+        self.assertEqual(str(error), "OANDA historical request returned HTTP 401")
+        self.assertEqual(error.provider_evidence["http_status"], 401)
+        self.assertEqual(error.provider_evidence["provider_request_id"], "provider-auth-request")
+        self.assertNotIn("raw provider response body", str(error.provider_evidence))
+        self.assertNotIn("Authorization", str(error.provider_evidence))
+        self.assertNotIn("test-token", str(error.provider_evidence))
+
+    def test_historical_malformed_response_retains_no_body_or_prices(self):
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers={"RequestID": "provider-malformed-request"},
+                content=b'{"candles":[{"bid":{"o":"1.234567"}}]}',
+            )
+
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        with self.assertRaises(OandaError) as raised:
+            client.fetch_historical_chunk("AUD_USD", "W", start, start + timedelta(weeks=1))
+
+        error = raised.exception
+        self.assertEqual(error.failure_kind, "malformed")
+        self.assertEqual(error.provider_evidence["http_status"], 200)
+        self.assertEqual(
+            error.provider_evidence["provider_request_id"], "provider-malformed-request"
+        )
+        self.assertNotIn("1.234567", str(error.provider_evidence))
+
     def test_historical_response_rejects_missing_duplicate_incomplete_crossed_and_misaligned(self):
         start = datetime(2018, 12, 30, 22, tzinfo=UTC)
         end = start + timedelta(hours=2)
@@ -192,6 +235,32 @@ class OandaClientTests(SimpleTestCase):
             requested_from=start,
             requested_to=end,
         )
+        chunk.canonical_request_sha256 = manifest_hash(
+            {
+                "instrument": "EUR_USD",
+                "granularity": "H1",
+                "from": start.isoformat(),
+                "to": end.isoformat(),
+                "price": "BA",
+                "price_component": "COMBINED_BID_ASK",
+                "smooth": False,
+                "dailyAlignment": 17,
+                "alignmentTimezone": "America/New_York",
+                "weeklyAlignment": "Friday",
+                "includeFirst": True,
+                "complete_only": True,
+            }
+        )
+        manifest["requests"] = [
+            {
+                "endpoint_identity": "oanda-v20-practice:GET:/v3/instruments/EUR_USD/candles",
+                "http_method": "GET",
+                "oanda_environment": "practice",
+                "http_status": 200,
+                "provider_request_id": "test-request-id",
+                "canonical_request_sha256": chunk.canonical_request_sha256,
+            }
+        ]
         valid = [candle(timestamp) for timestamp in expected]
         cases = {
             "missing": valid[:1],

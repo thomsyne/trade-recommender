@@ -1,5 +1,8 @@
 import hashlib
 import json
+import re
+from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -10,6 +13,7 @@ from django.db.models import Max
 from django.utils import timezone
 
 from market.models import (
+    AuditEvent,
     Candle,
     DatasetRegistration,
     DatasetVersion,
@@ -21,6 +25,7 @@ from market.models import (
     SourceRegistry,
     validate_historical_ingestion_manifest,
 )
+from market.oanda import OandaError
 from market.quality import (
     expected_candle_timestamps,
     final_registered_completion_before,
@@ -62,6 +67,29 @@ FROZEN_RANGES = {
         "expected_count_per_instrument": 471,
     },
 }
+
+
+class HistoricalFailureCode:
+    PROVIDER_AUTH_ERROR = "PROVIDER_AUTH_ERROR"
+    PROVIDER_HTTP_ERROR = "PROVIDER_HTTP_ERROR"
+    PROVIDER_RESPONSE_MALFORMED = "PROVIDER_RESPONSE_MALFORMED"
+    PROVIDER_EVIDENCE_MISSING = "PROVIDER_EVIDENCE_MISSING"
+    TIMESTAMP_SET_MISMATCH = "TIMESTAMP_SET_MISMATCH"
+    CANDLE_VALIDATION_FAILED = "CANDLE_VALIDATION_FAILED"
+    PERSISTENCE_FAILED = "PERSISTENCE_FAILED"
+    UNKNOWN_FAILURE = "UNKNOWN_FAILURE"
+
+
+@dataclass(frozen=True)
+class HistoricalResponseError(DatasetQualityError):
+    message: str
+    error_code: str
+    failure_stage: str
+    diagnostics: dict
+    provider_evidence: dict
+
+    def __str__(self):
+        return self.message
 
 
 def stable_hash(payload):
@@ -345,6 +373,8 @@ def run_historical_chunk(logical_key, client):
     if not created:
         return attempt
     chunk, run = attempt.chunk, attempt.ingestion_run
+    manifest = None
+    failure_stage = "provider_request"
     try:
         candles, manifest = client.fetch_historical_chunk(
             chunk.instrument.code,
@@ -352,6 +382,7 @@ def run_historical_chunk(logical_key, client):
             chunk.requested_from,
             chunk.requested_to,
         )
+        failure_stage = "response_validation"
         _validate_chunk_response(chunk, candles, manifest)
         manifest = {
             **manifest,
@@ -360,26 +391,24 @@ def run_historical_chunk(logical_key, client):
             "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
             "complete_only": True,
         }
-        stored = store_ingestion(
-            chunk.plan.source,
-            chunk.instrument,
-            chunk.granularity,
-            chunk.requested_from,
-            chunk.requested_to,
-            candles,
-            manifest,
-            dataset_version=chunk.dataset_version,
-            ingestion_run=run,
-        )
-        if stored.status != IngestionRun.Status.SUCCEEDED:
-            raise DatasetQualityError(f"historical ingestion ended as {stored.status}")
-    except Exception:
-        run.refresh_from_db()
-        if run.status == IngestionRun.Status.RUNNING:
-            run.status = IngestionRun.Status.FAILED
-            run.failure_reason = "historical provider request or persistence failed"
-            run.finished_at = timezone.now()
-            run.save()
+        failure_stage = "persistence"
+        with transaction.atomic():
+            stored = store_ingestion(
+                chunk.plan.source,
+                chunk.instrument,
+                chunk.granularity,
+                chunk.requested_from,
+                chunk.requested_to,
+                candles,
+                manifest,
+                dataset_version=chunk.dataset_version,
+                ingestion_run=run,
+            )
+            if stored.status != IngestionRun.Status.SUCCEEDED:
+                raise DatasetQualityError(f"historical ingestion ended as {stored.status}")
+    except Exception as error:
+        failure = _classify_historical_failure(error, chunk, manifest, failure_stage)
+        _record_historical_failure(attempt.pk, failure)
         raise
     return attempt
 
@@ -395,24 +424,331 @@ def _validate_chunk_response(chunk, candles, manifest):
         "weeklyAlignment": "Friday",
         "includeFirst": True,
     }
-    if any(manifest.get(key) != value for key, value in required_manifest.items()):
-        raise DatasetQualityError("provider manifest conflicts with the logical chunk")
-    if (
-        parse_timestamp(manifest.get("from", "")) != chunk.requested_from
-        or parse_timestamp(manifest.get("to", "")) != chunk.requested_to
-    ):
-        raise DatasetQualityError("provider manifest range conflicts with the logical chunk")
+    if not isinstance(manifest, dict):
+        raise HistoricalResponseError(
+            "provider response manifest is malformed",
+            HistoricalFailureCode.PROVIDER_RESPONSE_MALFORMED,
+            "response_validation",
+            {},
+            _unavailable_provider_evidence(),
+        )
+    provider_evidence = _sanitized_provider_evidence(chunk, manifest)
+    if provider_evidence["unavailable_fields"]:
+        raise HistoricalResponseError(
+            "provider response lacks canonical request evidence",
+            HistoricalFailureCode.PROVIDER_EVIDENCE_MISSING,
+            "response_validation",
+            {"unavailable_provider_fields": provider_evidence["unavailable_fields"]},
+            provider_evidence,
+        )
+    invalid_manifest_fields = sorted(
+        key for key, value in required_manifest.items() if manifest.get(key) != value
+    )
+    if invalid_manifest_fields:
+        raise HistoricalResponseError(
+            "provider manifest conflicts with the logical chunk",
+            HistoricalFailureCode.PROVIDER_EVIDENCE_MISSING,
+            "response_validation",
+            {"invalid_manifest_fields": invalid_manifest_fields},
+            provider_evidence,
+        )
+    try:
+        range_matches = (
+            parse_timestamp(manifest.get("from", "")) == chunk.requested_from
+            and parse_timestamp(manifest.get("to", "")) == chunk.requested_to
+        )
+    except (TypeError, ValueError):
+        range_matches = False
+    if not range_matches:
+        raise HistoricalResponseError(
+            "provider manifest range conflicts with the logical chunk",
+            HistoricalFailureCode.PROVIDER_EVIDENCE_MISSING,
+            "response_validation",
+            {"invalid_manifest_fields": ["from", "to"]},
+            provider_evidence,
+        )
     expected = expected_candle_timestamps(
         chunk.requested_from, chunk.requested_to, chunk.granularity
     )
-    if tuple(item.timestamp for item in candles) != expected:
-        raise DatasetQualityError("provider response does not exactly cover the logical chunk")
+    try:
+        actual = tuple(item.timestamp.astimezone(UTC) for item in candles)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise HistoricalResponseError(
+            "provider response contains a malformed candle",
+            HistoricalFailureCode.PROVIDER_RESPONSE_MALFORMED,
+            "response_validation",
+            {},
+            provider_evidence,
+        ) from error
+    if actual != expected:
+        raise HistoricalResponseError(
+            "provider response does not exactly cover the logical chunk",
+            HistoricalFailureCode.TIMESTAMP_SET_MISMATCH,
+            "response_validation",
+            _timestamp_mismatch_evidence(expected, actual),
+            provider_evidence,
+        )
     issues = validate_candles(candles, chunk.granularity, require_registered_alignment=True)
     if issues:
-        raise DatasetQualityError(
-            "provider response contains invalid candles: "
-            + "; ".join(f"{issue.code}@{issue.index}" for issue in issues[:20])
+        raise HistoricalResponseError(
+            "provider response contains invalid candles",
+            HistoricalFailureCode.CANDLE_VALIDATION_FAILED,
+            "response_validation",
+            _candle_validation_evidence(candles, issues),
+            provider_evidence,
         )
+
+
+def _canonical_request_sha256(chunk):
+    registered = getattr(chunk, "canonical_request_sha256", None)
+    if registered:
+        return registered
+    return stable_hash(
+        {
+            "instrument": chunk.instrument.code,
+            "granularity": chunk.granularity,
+            "from": chunk.requested_from.isoformat(),
+            "to": chunk.requested_to.isoformat(),
+            "price": "BA",
+            "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
+            "smooth": False,
+            "dailyAlignment": 17,
+            "alignmentTimezone": "America/New_York",
+            "weeklyAlignment": "Friday",
+            "includeFirst": True,
+            "complete_only": True,
+        }
+    )
+
+
+def _unavailable_provider_evidence():
+    return {
+        "unavailable_fields": [
+            "canonical_request_sha256",
+            "endpoint_identity",
+            "http_method",
+            "http_status",
+            "oanda_environment",
+            "provider_request_id",
+        ]
+    }
+
+
+def _sanitized_provider_evidence(chunk, manifest):
+    fields = (
+        "endpoint_identity",
+        "http_method",
+        "oanda_environment",
+        "http_status",
+        "provider_request_id",
+        "canonical_request_sha256",
+    )
+    requests = manifest.get("requests")
+    request = requests[0] if isinstance(requests, list) and len(requests) == 1 else {}
+    evidence = {}
+    environment = request.get("oanda_environment")
+    expected = {
+        "endpoint_identity": (
+            f"oanda-v20-{environment}:GET:/v3/instruments/{chunk.instrument.code}/candles"
+            if environment in {"practice", "live"}
+            else None
+        ),
+        "http_method": "GET",
+        "oanda_environment": environment if environment in {"practice", "live"} else None,
+        "http_status": 200,
+        "provider_request_id": request.get("provider_request_id")
+        if isinstance(request.get("provider_request_id"), str)
+        and 0 < len(request.get("provider_request_id").strip()) <= 200
+        and re.fullmatch(r"[A-Za-z0-9._:-]+", request.get("provider_request_id").strip())
+        else None,
+        "canonical_request_sha256": _canonical_request_sha256(chunk),
+    }
+    for field in fields:
+        value = request.get(field)
+        if expected[field] is not None and value == expected[field]:
+            evidence[field] = value.strip() if field == "provider_request_id" else value
+    evidence["unavailable_fields"] = sorted(set(fields) - set(evidence))
+    return evidence
+
+
+def _sanitized_oanda_error_evidence(chunk, raw):
+    fields = (
+        "endpoint_identity",
+        "http_method",
+        "oanda_environment",
+        "http_status",
+        "provider_request_id",
+        "canonical_request_sha256",
+    )
+    environment = raw.get("oanda_environment")
+    expected_endpoint = (
+        f"oanda-v20-{environment}:GET:/v3/instruments/{chunk.instrument.code}/candles"
+        if environment in {"practice", "live"}
+        else None
+    )
+    evidence = {}
+    if raw.get("endpoint_identity") == expected_endpoint and expected_endpoint is not None:
+        evidence["endpoint_identity"] = expected_endpoint
+    if raw.get("http_method") == "GET":
+        evidence["http_method"] = "GET"
+    if environment in {"practice", "live"}:
+        evidence["oanda_environment"] = environment
+    if isinstance(raw.get("http_status"), int):
+        evidence["http_status"] = raw["http_status"]
+    request_id = raw.get("provider_request_id")
+    if (
+        isinstance(request_id, str)
+        and 0 < len(request_id.strip()) <= 200
+        and re.fullmatch(r"[A-Za-z0-9._:-]+", request_id.strip())
+    ):
+        evidence["provider_request_id"] = request_id.strip()
+    if raw.get("canonical_request_sha256") == _canonical_request_sha256(chunk):
+        evidence["canonical_request_sha256"] = raw["canonical_request_sha256"]
+    evidence["unavailable_fields"] = sorted(set(fields) - set(evidence))
+    return evidence
+
+
+def _bounded_first_last(values, size=64):
+    if len(values) <= size * 2:
+        return values
+    return values[:size] + values[-size:]
+
+
+def _timestamp_mismatch_evidence(expected, actual):
+    expected_values = sorted({item.astimezone(UTC).isoformat() for item in expected})
+    actual_values = [item.astimezone(UTC).isoformat() for item in actual]
+    actual_set = sorted(set(actual_values))
+    missing = sorted(set(expected_values) - set(actual_set))
+    extra = sorted(set(actual_set) - set(expected_values))
+    duplicates = sorted(value for value, count in Counter(actual_values).items() if count > 1)
+    difference_truncated = len(missing) + len(extra) > 512
+    return {
+        "expected_count": len(expected),
+        "actual_count": len(actual),
+        "expected_timestamp_set_sha256": stable_hash(expected_values),
+        "actual_timestamp_set_sha256": stable_hash(actual_set),
+        "missing_count": len(missing),
+        "extra_count": len(extra),
+        "missing_timestamps": (_bounded_first_last(missing) if difference_truncated else missing),
+        "extra_timestamps": _bounded_first_last(extra) if difference_truncated else extra,
+        "difference_truncated": difference_truncated,
+        "duplicate_count": len(actual_values) - len(actual_set),
+        "duplicate_timestamps": _bounded_first_last(duplicates),
+        "duplicate_timestamps_truncated": len(duplicates) > 128,
+        "ordering_mismatch": actual_values != sorted(actual_values),
+    }
+
+
+def _candle_validation_evidence(candles, issues):
+    categories = {
+        "alignment_mismatch": "timestamp",
+        "crossed_bid_ask": "spread",
+        "duplicate_timestamp": "timestamp",
+        "impossible_ohlc": "ohlc",
+        "incomplete_candle": "complete",
+        "negative_volume": "volume",
+        "non_monotonic_timestamp": "timestamp",
+        "timestamp_not_utc": "timestamp",
+        "unexpected_gap": "timestamp",
+    }
+    counts = Counter(issue.code for issue in issues)
+    timestamps = sorted(
+        {
+            candles[issue.index].timestamp.astimezone(UTC).isoformat()
+            for issue in issues
+            if 0 <= issue.index < len(candles)
+            and getattr(candles[issue.index], "timestamp", None) is not None
+        }
+    )
+    return {
+        "issue_codes": sorted(counts),
+        "issue_counts": dict(sorted(counts.items())),
+        "categories": sorted({categories.get(code, "structural") for code in counts}),
+        "affected_timestamp_samples": _bounded_first_last(timestamps),
+        "diagnostic_truncated": len(timestamps) > 128 or len(issues) > 512,
+    }
+
+
+def _classify_historical_failure(error, chunk, manifest, failure_stage):
+    if isinstance(error, HistoricalResponseError):
+        return error
+    if isinstance(error, OandaError):
+        codes = {
+            "auth": HistoricalFailureCode.PROVIDER_AUTH_ERROR,
+            "http": HistoricalFailureCode.PROVIDER_HTTP_ERROR,
+            "malformed": HistoricalFailureCode.PROVIDER_RESPONSE_MALFORMED,
+        }
+        return HistoricalResponseError(
+            "historical provider request failed",
+            codes.get(error.failure_kind, HistoricalFailureCode.UNKNOWN_FAILURE),
+            "provider_response" if error.failure_kind == "malformed" else "provider_request",
+            {},
+            _sanitized_oanda_error_evidence(chunk, error.provider_evidence),
+        )
+    if failure_stage == "persistence":
+        code = HistoricalFailureCode.PERSISTENCE_FAILED
+    else:
+        code = HistoricalFailureCode.UNKNOWN_FAILURE
+    provider_evidence = (
+        _sanitized_provider_evidence(chunk, manifest)
+        if isinstance(manifest, dict)
+        else _unavailable_provider_evidence()
+    )
+    return HistoricalResponseError(
+        "historical acquisition failed",
+        code,
+        failure_stage,
+        {},
+        provider_evidence,
+    )
+
+
+@transaction.atomic
+def _record_historical_failure(attempt_id, failure):
+    attempt = (
+        HistoricalIngestionAttempt.objects.select_for_update()
+        .select_related("chunk__plan", "chunk__dataset_version", "chunk__instrument")
+        .get(pk=attempt_id)
+    )
+    run = IngestionRun.objects.select_for_update().get(pk=attempt.ingestion_run_id)
+    if run.status != IngestionRun.Status.RUNNING:
+        raise DatasetQualityError("historical failure evidence requires a running attempt")
+    chunk = attempt.chunk
+    occurred_at = timezone.now()
+    payload = {
+        "schema_version": 1,
+        "error_code": failure.error_code,
+        "logical_chunk_key": chunk.logical_key,
+        "attempt_id": attempt.pk,
+        "attempt_number": attempt.attempt_number,
+        "idempotency_key": attempt.idempotency_key,
+        "ingestion_run_id": run.pk,
+        "plan_sha256": chunk.plan.sha256,
+        "dataset_manifest_sha256": chunk.dataset_version.manifest_sha256,
+        "instrument": chunk.instrument.code,
+        "granularity": chunk.granularity,
+        "requested_from": chunk.requested_from.astimezone(UTC).isoformat(),
+        "requested_to": chunk.requested_to.astimezone(UTC).isoformat(),
+        "canonical_request_sha256": chunk.canonical_request_sha256,
+        "expected_candle_count": len(
+            expected_candle_timestamps(chunk.requested_from, chunk.requested_to, chunk.granularity)
+        ),
+        "failure_stage": failure.failure_stage,
+        "occurred_at": occurred_at.isoformat(),
+        "provider_evidence": failure.provider_evidence,
+        "diagnostics": failure.diagnostics,
+    }
+    run.status = IngestionRun.Status.FAILED
+    run.failure_reason = failure.error_code
+    run.finished_at = occurred_at
+    run.save(update_fields=("status", "failure_reason", "finished_at"))
+    AuditEvent.objects.create(
+        event_type="market.historical_ingestion_failed",
+        actor="market.historical_acquisition.run_historical_chunk",
+        subject_type="HistoricalIngestionAttempt",
+        subject_id=str(attempt.pk),
+        payload=payload,
+    )
 
 
 @transaction.atomic
