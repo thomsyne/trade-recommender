@@ -277,6 +277,46 @@ class OandaClientTests(SimpleTestCase):
         self.assertNotIn("secret transport diagnostic", repr(error.provider_evidence))
         self.assertNotIn("test-token", repr(error.provider_evidence))
 
+    def test_discovery_rejects_timezone_naive_provider_timestamp(self):
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers={"RequestID": "naive-timestamp"},
+                json={"candles": [_payload("2018-12-21T22:00:00", complete=True)]},
+            )
+
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        with self.assertRaisesMessage(OandaError, "response is malformed"):
+            client.fetch_historical_inventory("AUD_USD", "W", start, start + timedelta(weeks=1))
+
+    def test_discovery_requires_complete_canonical_bid_and_ask_components(self):
+        components = [
+            ({}, {"o": "1", "h": "1", "l": "1", "c": "1"}),
+            ({"o": "1", "h": "1", "l": "1"}, {"o": "1", "h": "1", "l": "1", "c": "1"}),
+            ({"o": "1", "h": "1", "l": "1", "c": "1"}, {}),
+            ({"o": "1", "h": "1", "l": "1", "c": "1"}, {"o": "1"}),
+        ]
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        for bid, ask in components:
+            with self.subTest(bid=bid, ask=ask):
+
+                def handler(request):
+                    payload = _payload("2018-12-21T22:00:00Z", complete=True)
+                    payload.update(bid=bid, ask=ask)
+                    return httpx.Response(
+                        200,
+                        headers={"RequestID": "component-structure"},
+                        json={"candles": [payload]},
+                    )
+
+                client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+                observations, _ = client.fetch_historical_inventory(
+                    "AUD_USD", "W", start, start + timedelta(weeks=1)
+                )
+                self.assertEqual(observations[0].bid_present, set(bid) == {"o", "h", "l", "c"})
+                self.assertEqual(observations[0].ask_present, set(ask) == {"o", "h", "l", "c"})
+
     def test_historical_response_rejects_missing_duplicate_incomplete_crossed_and_misaligned(self):
         start = datetime(2018, 12, 30, 22, tzinfo=UTC)
         end = start + timedelta(hours=2)

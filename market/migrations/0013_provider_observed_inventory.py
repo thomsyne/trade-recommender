@@ -234,13 +234,17 @@ def install_discovery_governance(apps, schema_editor):
         CREATE FUNCTION market_validate_discovery_observation() RETURNS trigger AS $$
         DECLARE lineage record; local_time timestamp;
         BEGIN
-          SELECT c.requested_from,c.requested_to,c.granularity,p.sealed_at INTO STRICT lineage
+          SELECT c.requested_from,c.requested_to,c.granularity,p.sealed_at,r.status
+            INTO STRICT lineage
             FROM market_historicaltimestampinventory inv
             JOIN market_historicaldiscoverychunk c ON c.id=inv.chunk_id
             JOIN market_historicaldiscoveryplan p ON p.id=c.plan_id
+            JOIN market_historicaldiscoveryattempt a ON a.id=inv.accepted_attempt_id
+            JOIN market_ingestionrun r ON r.id=a.ingestion_run_id
             WHERE inv.id=NEW.inventory_id;
           local_time := NEW.timestamp AT TIME ZONE 'America/New_York';
-          IF lineage.sealed_at IS NOT NULL OR NEW.timestamp<lineage.requested_from
+          IF lineage.sealed_at IS NOT NULL OR lineage.status<>'running'
+             OR NEW.timestamp<lineage.requested_from
              OR NEW.timestamp>=lineage.requested_to
              OR date_trunc('second',NEW.timestamp)<>NEW.timestamp
              OR NOT NEW.complete OR NOT NEW.bid_present OR NOT NEW.ask_present
@@ -349,6 +353,10 @@ def install_discovery_governance(apps, schema_editor):
              OR market_sha256(event_payload-'event_sha256')<>NEW.terminal_event_sha256
              OR NEW.operational_evidence_sha256<>expected_operational_hash
              OR NEW.unavailable_fields IS DISTINCT FROM expected_unavailable
+             OR (NEW.provider_request_id IS NOT NULL AND
+                 NEW.provider_request_id!~'^[A-Za-z0-9._:-]{1,200}$')
+             OR (NEW.http_status IS NOT NULL AND
+                 (NEW.http_status<100 OR NEW.http_status>599))
              OR (NEW.canonical_request_sha256 IS NOT NULL AND
                  NEW.canonical_request_sha256<>lineage.canonical_request_sha256)
              OR (NEW.endpoint_identity IS NOT NULL AND NEW.endpoint_identity<>
@@ -359,6 +367,174 @@ def install_discovery_governance(apps, schema_editor):
                  OR NEW.http_status<>200))
           THEN RAISE EXCEPTION 'discovery provider evidence is invalid'; END IF;
           RETURN NEW;
+        END $$ LANGUAGE plpgsql;
+
+        CREATE FUNCTION market_validate_discovery_audit_insert() RETURNS trigger AS $$
+        DECLARE lineage record; evidence record; existing_count integer; payload_key_count integer;
+                expected_provider jsonb; expected_success_diagnostics jsonb; diagnostics jsonb;
+                expected_event_type text; expected_error_code text;
+        BEGIN
+          IF NEW.subject_type<>'HistoricalDiscoveryAttempt'
+             AND NEW.event_type NOT LIKE 'market.historical_discovery_%%'
+          THEN RETURN NEW; END IF;
+          IF NEW.subject_type<>'HistoricalDiscoveryAttempt'
+             OR NEW.event_type NOT IN ('market.historical_discovery_succeeded',
+                                       'market.historical_discovery_failed')
+             OR NEW.subject_id!~'^[1-9][0-9]*$'
+          THEN RAISE EXCEPTION 'invalid discovery terminal audit identity'; END IF;
+          PERFORM pg_advisory_xact_lock(hashtextextended(
+            'historical-discovery-audit:'||NEW.subject_id,0));
+          SELECT a.attempt_number,a.idempotency_key,c.logical_key,c.granularity,
+                 c.requested_from,c.requested_to,c.canonical_request_sha256,i.code,
+                 r.status,r.failure_reason,r.fetched_count,inv.semantic_inventory_sha256,
+                 inv.observation_count
+            INTO STRICT lineage FROM market_historicaldiscoveryattempt a
+            JOIN market_historicaldiscoverychunk c ON c.id=a.chunk_id
+            JOIN market_instrument i ON i.id=c.instrument_id
+            JOIN market_ingestionrun r ON r.id=a.ingestion_run_id
+            LEFT JOIN market_historicaltimestampinventory inv ON inv.accepted_attempt_id=a.id
+            WHERE a.id=NEW.subject_id::bigint;
+          SELECT * INTO STRICT evidence FROM market_historicaldiscoveryproviderevidence
+            WHERE attempt_id=NEW.subject_id::bigint;
+          SELECT count(*) INTO existing_count FROM market_auditevent audit
+            WHERE audit.subject_type='HistoricalDiscoveryAttempt'
+              AND audit.subject_id=NEW.subject_id
+              AND audit.event_type IN ('market.historical_discovery_succeeded',
+                                       'market.historical_discovery_failed');
+          SELECT count(*) INTO payload_key_count FROM jsonb_object_keys(NEW.payload);
+          expected_event_type := CASE WHEN lineage.status='succeeded'
+            THEN 'market.historical_discovery_succeeded'
+            ELSE 'market.historical_discovery_failed' END;
+          expected_error_code := nullif(lineage.failure_reason,'');
+          expected_provider := jsonb_build_object(
+            'canonical_request_sha256',evidence.canonical_request_sha256,
+            'endpoint_identity',evidence.endpoint_identity,'environment',evidence.environment,
+            'http_method',evidence.http_method,'http_status',evidence.http_status,
+            'provider_request_id',evidence.provider_request_id,
+            'unavailable_fields',evidence.unavailable_fields);
+          diagnostics := NEW.payload->'diagnostics';
+          expected_success_diagnostics := jsonb_build_object(
+            'observation_count',lineage.observation_count,
+            'semantic_inventory_sha256',lineage.semantic_inventory_sha256);
+          IF existing_count<>0 OR NEW.event_type IS DISTINCT FROM expected_event_type
+             OR NEW.actor IS DISTINCT FROM 'market.historical_discovery.run_discovery_chunk'
+             OR payload_key_count<>15 OR jsonb_typeof(NEW.payload) IS DISTINCT FROM 'object'
+             OR NEW.payload->>'schema_version' IS DISTINCT FROM '1'
+             OR NEW.payload->>'logical_discovery_key' IS DISTINCT FROM lineage.logical_key
+             OR (NEW.payload->>'attempt_number')::integer IS DISTINCT FROM lineage.attempt_number
+             OR NEW.payload->>'idempotency_key' IS DISTINCT FROM lineage.idempotency_key
+             OR NEW.payload->>'instrument' IS DISTINCT FROM lineage.code
+             OR NEW.payload->>'granularity' IS DISTINCT FROM lineage.granularity
+             OR NEW.payload->>'requested_from' IS DISTINCT FROM
+                market_discovery_timestamp(lineage.requested_from)
+             OR NEW.payload->>'requested_to' IS DISTINCT FROM
+                market_discovery_timestamp(lineage.requested_to)
+             OR NEW.payload->>'canonical_request_sha256' IS DISTINCT FROM
+                lineage.canonical_request_sha256
+             OR NEW.payload->'provider_evidence' IS DISTINCT FROM expected_provider
+             OR NEW.payload->>'occurred_at' IS DISTINCT FROM
+                market_discovery_operational_timestamp((SELECT finished_at FROM market_ingestionrun
+                  WHERE id=(SELECT ingestion_run_id FROM market_historicaldiscoveryattempt
+                            WHERE id=NEW.subject_id::bigint)))
+             OR NEW.payload->>'event_sha256' IS DISTINCT FROM
+                market_sha256(NEW.payload-'event_sha256')
+             OR jsonb_typeof(diagnostics) IS DISTINCT FROM 'object'
+             OR octet_length(diagnostics::text)>4096
+             OR diagnostics::text~*'"(authorization|token|password|secret|raw_url|account_id|body|bid_open|bid_high|bid_low|bid_close|ask_open|ask_high|ask_low|ask_close)"[[:space:]]*:'
+             OR (lineage.status='succeeded' AND (
+                  NEW.payload->'error_code' IS DISTINCT FROM 'null'::jsonb
+                  OR NEW.payload->>'stage' IS DISTINCT FROM 'complete'
+                  OR diagnostics IS DISTINCT FROM expected_success_diagnostics))
+             OR (lineage.status='failed' AND (
+                  NEW.payload->>'error_code' IS DISTINCT FROM expected_error_code
+                  OR (expected_error_code='DISCOVERY_PERSISTENCE_FAILED' AND (
+                      NEW.payload->>'stage' IS DISTINCT FROM 'persistence'
+                      OR diagnostics->>'component' IS NULL
+                      OR diagnostics->>'component' NOT IN
+                         ('inventory','observations','run','provider_evidence','audit_event')
+                      OR diagnostics IS DISTINCT FROM
+                         jsonb_build_object('component',diagnostics->>'component')))
+                  OR (expected_error_code='DISCOVERY_STALE_ATTEMPT' AND (
+                      NEW.payload->>'stage' IS DISTINCT FROM 'stale_resolution'
+                      OR diagnostics->>'reason' IS NULL
+                      OR diagnostics->>'reason'!~'^[A-Z][A-Z0-9_]{2,79}$'
+                      OR diagnostics->>'stale_threshold_seconds' IS NULL
+                      OR (diagnostics->>'stale_threshold_seconds')::integer<=0
+                      OR diagnostics IS DISTINCT FROM jsonb_build_object(
+                         'reason',diagnostics->>'reason','stale_threshold_seconds',
+                         (diagnostics->>'stale_threshold_seconds')::integer)))
+                  OR (expected_error_code IN ('DISCOVERY_PROVIDER_AUTH_ERROR',
+                      'DISCOVERY_PROVIDER_HTTP_ERROR','DISCOVERY_PROVIDER_RESPONSE_MALFORMED',
+                      'DISCOVERY_UNKNOWN_FAILURE') AND
+                      (NEW.payload->>'stage' IS DISTINCT FROM 'provider_request'
+                       OR diagnostics IS DISTINCT FROM '{}'::jsonb))
+                  OR (expected_error_code='DISCOVERY_PROVIDER_EVIDENCE_MISSING' AND (
+                      NEW.payload->>'stage' IS DISTINCT FROM 'provider_evidence'
+                      OR diagnostics IS DISTINCT FROM jsonb_build_object(
+                         'unavailable_fields',evidence.unavailable_fields)))
+                  OR (expected_error_code='DISCOVERY_PROVIDER_LIMIT_SUSPECTED' AND (
+                      NEW.payload->>'stage' IS DISTINCT FROM 'response_validation'
+                      OR diagnostics IS DISTINCT FROM
+                         jsonb_build_object('observation_count',lineage.fetched_count)))
+                  OR (expected_error_code='DISCOVERY_STRUCTURE_INVALID' AND (
+                      NEW.payload->>'stage' IS DISTINCT FROM 'response_validation'
+                      OR (SELECT count(*) FROM jsonb_object_keys(diagnostics))<>3
+                      OR jsonb_typeof(diagnostics->'issue_counts') IS DISTINCT FROM 'object'
+                      OR jsonb_typeof(diagnostics->'issue_samples') IS DISTINCT FROM 'array'
+                      OR jsonb_typeof(diagnostics->'diagnostic_truncated') IS DISTINCT FROM
+                         'boolean'
+                      OR jsonb_array_length(diagnostics->'issue_samples')>32
+                      OR EXISTS(SELECT 1 FROM jsonb_each(diagnostics->'issue_counts') issue
+                        WHERE issue.key NOT IN ('malformed_observation','timestamp_out_of_range',
+                          'timestamp_misaligned','completeness_missing','incomplete','invalid_volume',
+                          'bid_missing','ask_missing','unordered_timestamps',
+                          'duplicate_timestamps','empty_response')
+                          OR jsonb_typeof(issue.value)<>'number'
+                          OR (issue.value#>>'{}')::integer<1)
+                      OR EXISTS(SELECT 1 FROM jsonb_array_elements(
+                          diagnostics->'issue_samples') sample
+                        WHERE jsonb_typeof(sample)<>'object'
+                          OR (SELECT count(*) FROM jsonb_object_keys(sample))<>2
+                          OR sample->>'code' NOT IN ('malformed_observation',
+                            'timestamp_out_of_range','timestamp_misaligned','completeness_missing',
+                            'incomplete','invalid_volume','bid_missing','ask_missing',
+                            'unordered_timestamps','duplicate_timestamps','empty_response')
+                          OR (sample->'index'<>'null'::jsonb AND
+                              (jsonb_typeof(sample->'index')<>'number'
+                               OR (sample->>'index')::integer<0)))))
+                  OR expected_error_code NOT IN ('DISCOVERY_PERSISTENCE_FAILED',
+                     'DISCOVERY_STALE_ATTEMPT','DISCOVERY_PROVIDER_AUTH_ERROR',
+                     'DISCOVERY_PROVIDER_HTTP_ERROR','DISCOVERY_PROVIDER_RESPONSE_MALFORMED',
+                     'DISCOVERY_UNKNOWN_FAILURE','DISCOVERY_PROVIDER_EVIDENCE_MISSING',
+                     'DISCOVERY_PROVIDER_LIMIT_SUSPECTED','DISCOVERY_STRUCTURE_INVALID')))
+          THEN RAISE EXCEPTION 'discovery terminal audit event does not reconstruct'; END IF;
+          RETURN NEW;
+        END $$ LANGUAGE plpgsql;
+
+        CREATE FUNCTION market_discovery_audit_reject_mutation() RETURNS trigger AS $$
+        BEGIN
+          IF OLD.subject_type='HistoricalDiscoveryAttempt'
+             OR OLD.event_type LIKE 'market.historical_discovery_%%'
+             OR (TG_OP='UPDATE' AND (NEW.subject_type='HistoricalDiscoveryAttempt'
+                 OR NEW.event_type LIKE 'market.historical_discovery_%%'))
+          THEN RAISE EXCEPTION 'discovery terminal audit events are immutable'; END IF;
+          RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
+        END $$ LANGUAGE plpgsql;
+
+        CREATE FUNCTION market_discovery_audit_reject_truncate() RETURNS trigger AS $$
+        BEGIN
+          IF current_database() LIKE 'test\_%%' ESCAPE '\'
+             AND EXISTS(
+               SELECT 1 FROM pg_locks locks
+               WHERE locks.pid=pg_backend_pid() AND locks.granted
+                 AND locks.mode='AccessExclusiveLock'
+                 AND locks.relation='auth_permission'::regclass
+             ) THEN RETURN NULL; END IF;
+          IF EXISTS(SELECT 1 FROM market_auditevent
+                    WHERE subject_type='HistoricalDiscoveryAttempt'
+                       OR event_type LIKE 'market.historical_discovery_%%')
+          THEN RAISE EXCEPTION 'discovery terminal audit events cannot be truncated'; END IF;
+          RETURN NULL;
         END $$ LANGUAGE plpgsql;
 
         CREATE FUNCTION market_validate_discovery_terminal_run() RETURNS trigger AS $$
@@ -393,6 +569,7 @@ def install_discovery_governance(apps, schema_editor):
                 permission_ok boolean; chunk_count integer; inventory_count integer;
                 running_count integer; chunk_manifest jsonb; semantic_manifest jsonb;
                 operational_manifest jsonb; chunk_hash text; semantic_hash text; operational_hash text;
+                approver_username text; expected_approval jsonb; expected_registration jsonb;
         BEGIN
           IF TG_TABLE_NAME='market_historicaldiscoveryplan' THEN
             plan_key := NEW.id;
@@ -416,6 +593,8 @@ def install_discovery_governance(apps, schema_editor):
              WHERE ug.user_id=u.id AND perm.codename='approve_historical_discovery'
                AND ct.app_label='market' AND ct.model='historicaldiscoveryplan'))
             INTO permission_ok FROM auth_user u WHERE u.id=approval_row.approved_by_id;
+          SELECT username INTO approver_username FROM auth_user
+            WHERE id=approval_row.approved_by_id;
           SELECT count(*),coalesce(jsonb_agg(jsonb_build_object(
               'ordinal',c.ordinal,'logical_discovery_key',c.logical_key,
               'canonical_request',c.canonical_request,
@@ -438,15 +617,37 @@ def install_discovery_governance(apps, schema_editor):
             WHERE c.plan_id=plan_key;
           chunk_hash:=market_sha256(chunk_manifest); semantic_hash:=market_sha256(semantic_manifest);
           operational_hash:=market_sha256(operational_manifest);
+          expected_approval:=jsonb_build_object(
+            'identity','failed-break-phase-2b1r-discovery-approval-v1',
+            'plan_sha256',plan_row.sha256,
+            'global_semantic_inventory_sha256',semantic_hash,
+            'accepted_operational_evidence_set_sha256',operational_hash,
+            'cross_series_report_sha256',registration_row.cross_series_report_sha256,
+            'approved_by',approver_username,
+            'approved_at',market_discovery_operational_timestamp(approval_row.approved_at));
+          expected_registration:=jsonb_build_object(
+            'plan_sha256',plan_row.sha256,'approval_sha256',approval_row.sha256,
+            'ordered_chunk_manifest_sha256',chunk_hash,
+            'global_semantic_inventory_sha256',semantic_hash,
+            'accepted_operational_evidence_set_sha256',operational_hash,
+            'cross_series_report_sha256',registration_row.cross_series_report_sha256,
+            'registered_at',market_discovery_operational_timestamp(registration_row.registered_at));
           IF NOT coalesce(permission_ok,false) OR chunk_count<>plan_row.declared_chunk_count
              OR inventory_count<>chunk_count OR running_count<>0
              OR chunk_manifest<>plan_row.canonical_request_manifest
              OR approval_row.global_semantic_inventory_sha256<>semantic_hash
              OR approval_row.accepted_operational_evidence_set_sha256<>operational_hash
+             OR approval_row.payload IS DISTINCT FROM expected_approval
+             OR approval_row.sha256 IS DISTINCT FROM market_sha256(expected_approval)
              OR registration_row.approval_id<>approval_row.id
              OR registration_row.ordered_chunk_manifest_sha256<>chunk_hash
              OR registration_row.global_semantic_inventory_sha256<>semantic_hash
              OR registration_row.accepted_operational_evidence_set_sha256<>operational_hash
+             OR approval_row.payload->>'cross_series_report_sha256' IS DISTINCT FROM
+                registration_row.cross_series_report_sha256
+             OR registration_row.payload IS DISTINCT FROM expected_registration
+             OR registration_row.report_sha256 IS DISTINCT FROM
+                market_sha256(expected_registration)
              OR registration_row.registered_at<>plan_row.sealed_at
           THEN RAISE EXCEPTION 'discovery seal does not reconstruct'; END IF;
           RETURN NULL;
@@ -469,12 +670,18 @@ def install_discovery_governance(apps, schema_editor):
         CREATE CONSTRAINT TRIGGER market_discovery_provider_validate AFTER INSERT
           ON market_historicaldiscoveryproviderevidence DEFERRABLE INITIALLY DEFERRED
           FOR EACH ROW EXECUTE FUNCTION market_validate_discovery_provider_evidence();
+        CREATE TRIGGER market_discovery_audit_validate BEFORE INSERT
+          ON market_auditevent FOR EACH ROW
+          EXECUTE FUNCTION market_validate_discovery_audit_insert();
+        CREATE TRIGGER market_discovery_audit_immutable BEFORE UPDATE OR DELETE
+          ON market_auditevent FOR EACH ROW
+          EXECUTE FUNCTION market_discovery_audit_reject_mutation();
+        CREATE TRIGGER market_discovery_audit_no_truncate BEFORE TRUNCATE
+          ON market_auditevent FOR EACH STATEMENT
+          EXECUTE FUNCTION market_discovery_audit_reject_truncate();
 
         CREATE CONSTRAINT TRIGGER market_discovery_inventory_reconstruct
           AFTER INSERT ON market_historicaltimestampinventory DEFERRABLE INITIALLY DEFERRED
-          FOR EACH ROW EXECUTE FUNCTION market_validate_discovery_inventory_deferred();
-        CREATE CONSTRAINT TRIGGER market_discovery_observation_reconstruct
-          AFTER INSERT ON market_historicaltimestampobservation DEFERRABLE INITIALLY DEFERRED
           FOR EACH ROW EXECUTE FUNCTION market_validate_discovery_inventory_deferred();
         CREATE CONSTRAINT TRIGGER market_discovery_run_terminal
           AFTER INSERT OR UPDATE ON market_ingestionrun DEFERRABLE INITIALLY DEFERRED
@@ -522,6 +729,9 @@ def remove_discovery_governance(apps, schema_editor):
     require_empty_discovery(apps, schema_editor)
     schema_editor.execute(
         "DROP TRIGGER IF EXISTS market_discovery_run_terminal ON market_ingestionrun;"
+        "DROP TRIGGER IF EXISTS market_discovery_audit_validate ON market_auditevent;"
+        "DROP TRIGGER IF EXISTS market_discovery_audit_immutable ON market_auditevent;"
+        "DROP TRIGGER IF EXISTS market_discovery_audit_no_truncate ON market_auditevent;"
         "DROP TRIGGER IF EXISTS market_discovery_approval_atomic "
         "ON market_historicaldiscoveryapproval;"
         "DROP TRIGGER IF EXISTS market_discovery_registration_atomic "
@@ -553,6 +763,9 @@ def remove_discovery_governance(apps, schema_editor):
         schema_editor.execute(f"DROP TRIGGER IF EXISTS {table}_append_only ON {table};")
     schema_editor.execute(
         "DROP FUNCTION IF EXISTS market_validate_discovery_terminal_run();"
+        "DROP FUNCTION IF EXISTS market_discovery_audit_reject_mutation();"
+        "DROP FUNCTION IF EXISTS market_discovery_audit_reject_truncate();"
+        "DROP FUNCTION IF EXISTS market_validate_discovery_audit_insert();"
         "DROP FUNCTION IF EXISTS market_validate_discovery_seal_deferred();"
         "DROP FUNCTION IF EXISTS market_validate_discovery_provider_evidence();"
         "DROP FUNCTION IF EXISTS market_validate_discovery_inventory_deferred();"

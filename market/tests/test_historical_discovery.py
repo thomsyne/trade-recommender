@@ -1,4 +1,5 @@
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -9,16 +10,19 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import DatabaseError, close_old_connections, connection, transaction
-from django.test import SimpleTestCase, TestCase, TransactionTestCase
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from market.historical_acquisition import INSTRUMENTS
 from market.historical_discovery import (
     DISCOVERY_PROVIDER_MAX_CANDLES,
     DiscoveryFailureCode,
+    DiscoveryPersistenceError,
     DiscoveryResponseError,
     StructuralObservation,
+    _operational_hash,
     _registration_hashes,
+    _terminal_event_body,
     _validate_response,
     approve_and_register_discovery,
     begin_discovery_attempt,
@@ -45,6 +49,7 @@ from market.models import (
     SourceRegistry,
 )
 from market.oanda import OandaError
+from market.quality import expected_candle_timestamps
 from market.services import DatasetQualityError
 
 
@@ -120,9 +125,10 @@ class HistoricalDiscoveryTests(TestCase):
                 active=True,
             )
 
-    def single_request_payload(self, version="phase-2b1r-discovery-v2"):
+    def single_request_payload(self, version="phase-2b1r-discovery-v2", request_index=0):
         payload = build_initial_discovery_plan()
-        request = dict(payload["requests"][0])
+        request = dict(payload["requests"][request_index])
+        request["ordinal"] = 1
         request_body = request["canonical_request"]
         start = datetime.fromisoformat(request_body["from"].replace("Z", "+00:00"))
         end = datetime.fromisoformat(request_body["to"].replace("Z", "+00:00"))
@@ -287,8 +293,10 @@ class HistoricalDiscoveryTests(TestCase):
             ["http_status", "provider_request_id"],
         )
 
-    def test_terminal_audit_failure_rolls_back_success_transition(self):
-        plan = self.create_plan()
+    def assert_persistence_failure(self, component, target, method):
+        plan = create_discovery_plan(
+            self.single_request_payload(f"phase-2b1r-discovery-v{10 + len(component)}")
+        )
         chunk = plan.chunks.select_related("instrument").get()
         client = type(
             "SuccessfulInventoryClient",
@@ -300,19 +308,78 @@ class HistoricalDiscoveryTests(TestCase):
                 )
             },
         )()
+        original = getattr(target, method)
+        calls = 0
+
+        def fail_once(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise DatabaseError("synthetic persistence failure")
+            return original(*args, **kwargs)
 
         with (
+            patch.object(target, method, side_effect=fail_once),
+            self.assertRaises(DiscoveryPersistenceError),
+        ):
+            run_discovery_chunk(chunk.logical_key, client)
+
+        attempt = HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get()
+        self.assertEqual(attempt.ingestion_run.status, IngestionRun.Status.FAILED)
+        self.assertEqual(
+            attempt.ingestion_run.failure_reason, DiscoveryFailureCode.PERSISTENCE_FAILED
+        )
+        self.assertFalse(HistoricalTimestampInventory.objects.exists())
+        event = AuditEvent.objects.get(event_type="market.historical_discovery_failed")
+        self.assertEqual(event.payload["diagnostics"], {"component": component})
+
+    def test_inventory_persistence_failure_records_terminal_failure(self):
+        self.assert_persistence_failure("inventory", HistoricalTimestampInventory.objects, "create")
+
+    def test_observation_persistence_failure_records_terminal_failure(self):
+        self.assert_persistence_failure(
+            "observations", HistoricalTimestampObservation.objects, "bulk_create"
+        )
+
+    def test_provider_evidence_persistence_failure_records_terminal_failure(self):
+        self.assert_persistence_failure(
+            "provider_evidence", HistoricalDiscoveryProviderEvidence.objects, "create"
+        )
+
+    def test_audit_persistence_failure_records_terminal_failure(self):
+        self.assert_persistence_failure("audit_event", AuditEvent.objects, "create")
+
+    def test_failure_evidence_error_leaves_attempt_for_stale_resolution(self):
+        plan = create_discovery_plan(self.single_request_payload("phase-2b1r-discovery-v30"))
+        chunk = plan.chunks.select_related("instrument").get()
+        client = type(
+            "SuccessfulInventoryClient",
+            (),
+            {
+                "fetch_historical_inventory": lambda _, instrument, granularity, start, end: (
+                    [StructuralObservation(start, True, 10, True, True)],
+                    self.evidence_for(chunk),
+                )
+            },
+        )()
+        with (
             patch.object(
-                AuditEvent.objects, "create", side_effect=DatabaseError("synthetic audit failure")
+                HistoricalTimestampInventory.objects,
+                "create",
+                side_effect=DatabaseError("inventory unavailable"),
             ),
-            self.assertRaises(DatabaseError),
+            patch.object(
+                HistoricalDiscoveryProviderEvidence.objects,
+                "create",
+                side_effect=DatabaseError("failure evidence unavailable"),
+            ),
+            self.assertRaises(DiscoveryPersistenceError),
         ):
             run_discovery_chunk(chunk.logical_key, client)
 
         attempt = HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get()
         self.assertEqual(attempt.ingestion_run.status, IngestionRun.Status.RUNNING)
-        self.assertFalse(HistoricalTimestampInventory.objects.exists())
-        self.assertFalse(HistoricalDiscoveryProviderEvidence.objects.exists())
+        self.assertFalse(AuditEvent.objects.exists())
 
     def test_structural_validation_fails_closed_for_every_governed_field(self):
         plan = self.create_plan()
@@ -346,6 +413,27 @@ class HistoricalDiscoveryTests(TestCase):
             with self.subTest(code=code), self.assertRaises(DiscoveryResponseError) as raised:
                 _validate_response(chunk, observations, self.evidence_for(chunk))
             self.assertIn(code, raised.exception.diagnostics["issue_counts"])
+
+    def test_structural_failure_terminal_audit_reconstructs(self):
+        plan = self.create_plan()
+        chunk = plan.chunks.select_related("instrument").get()
+        observation = StructuralObservation(chunk.requested_from, True, 1, True, True)
+        client = type(
+            "DuplicateInventoryClient",
+            (),
+            {
+                "fetch_historical_inventory": lambda *_: (
+                    [observation, observation],
+                    self.evidence_for(chunk),
+                )
+            },
+        )()
+
+        with self.assertRaises(DiscoveryResponseError):
+            run_discovery_chunk(chunk.logical_key, client)
+
+        event = AuditEvent.objects.get(event_type="market.historical_discovery_failed")
+        self.assertEqual(event.payload["error_code"], DiscoveryFailureCode.STRUCTURE_INVALID)
 
     def test_provider_limit_equality_fails_before_first_last_can_be_used(self):
         plan = self.create_plan()
@@ -396,6 +484,139 @@ class HistoricalDiscoveryTests(TestCase):
         with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
             cursor.execute("TRUNCATE market_historicaldiscoverychunk")
 
+    def test_database_permanently_rejects_duplicate_and_forged_terminal_audit(self):
+        plan = self.create_plan()
+        attempt = self.run_success(plan)
+        event = AuditEvent.objects.get(subject_id=str(attempt.pk))
+
+        with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO market_auditevent
+                   (occurred_at,event_type,actor,subject_type,subject_id,payload)
+                   VALUES (now(),%s,%s,%s,%s,%s::jsonb)""",
+                [
+                    event.event_type,
+                    event.actor,
+                    event.subject_type,
+                    event.subject_id,
+                    json.dumps(event.payload),
+                ],
+            )
+        with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE market_auditevent SET payload=%s::jsonb WHERE id=%s",
+                [json.dumps({"raw_url": "https://forbidden.invalid"}), event.pk],
+            )
+        with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute("TRUNCATE market_auditevent")
+
+    def test_database_rejects_unsafe_raw_sql_provider_evidence(self):
+        plan = self.create_plan()
+        attempt = begin_discovery_attempt(plan.chunks.get().logical_key)
+        run = attempt.ingestion_run
+        occurred_at = timezone.now()
+        evidence = {
+            "canonical_request_sha256": attempt.chunk.canonical_request_sha256,
+            "endpoint_identity": (
+                f"oanda-v20-practice:GET:/v3/instruments/{attempt.chunk.instrument.code}/candles"
+            ),
+            "environment": "practice",
+            "http_method": "GET",
+            "http_status": 500,
+            "provider_request_id": "https://unsafe.invalid/secret",
+            "unavailable_fields": [],
+        }
+        event_body = _terminal_event_body(
+            attempt,
+            code=DiscoveryFailureCode.PROVIDER_HTTP_ERROR,
+            stage="provider_request",
+            evidence=evidence,
+            diagnostics={},
+            occurred_at=occurred_at,
+        )
+        event_hash = canonical_hash(event_body)
+        run.status = IngestionRun.Status.FAILED
+        run.failure_reason = DiscoveryFailureCode.PROVIDER_HTTP_ERROR
+        run.finished_at = occurred_at
+
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            run.save()
+            operational_hash = _operational_hash(attempt, run, evidence, event_hash)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO market_historicaldiscoveryproviderevidence
+                       (attempt_id,endpoint_identity,http_method,environment,http_status,
+                        provider_request_id,canonical_request_sha256,unavailable_fields,
+                        terminal_event_sha256,operational_evidence_sha256,created_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,now())""",
+                    [
+                        attempt.pk,
+                        evidence["endpoint_identity"],
+                        evidence["http_method"],
+                        evidence["environment"],
+                        evidence["http_status"],
+                        evidence["provider_request_id"],
+                        evidence["canonical_request_sha256"],
+                        json.dumps(evidence["unavailable_fields"]),
+                        event_hash,
+                        operational_hash,
+                    ],
+                )
+                cursor.execute(
+                    """INSERT INTO market_auditevent
+                       (occurred_at,event_type,actor,subject_type,subject_id,payload)
+                       VALUES (now(),%s,%s,%s,%s,%s::jsonb)""",
+                    [
+                        "market.historical_discovery_failed",
+                        "market.historical_discovery.run_discovery_chunk",
+                        "HistoricalDiscoveryAttempt",
+                        str(attempt.pk),
+                        json.dumps({**event_body, "event_sha256": event_hash}),
+                    ],
+                )
+                cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+
+    def test_4999_observations_reconstruct_once_with_bounded_runtime(self):
+        payload = build_initial_discovery_plan()
+        h1_index = next(
+            index
+            for index, request in enumerate(payload["requests"])
+            if request["canonical_request"]["granularity"] == "H1"
+        )
+        plan = create_discovery_plan(
+            self.single_request_payload("phase-2b1r-discovery-v31", h1_index)
+        )
+        chunk = plan.chunks.select_related("instrument").get()
+        timestamps = expected_candle_timestamps(
+            chunk.requested_from, chunk.requested_to, chunk.granularity
+        )
+        self.assertEqual(len(timestamps), 4999)
+        observations = [StructuralObservation(item, True, 1, True, True) for item in timestamps]
+        client = type(
+            "LargeInventoryClient",
+            (),
+            {
+                "fetch_historical_inventory": lambda *_: (
+                    observations,
+                    self.evidence_for(chunk),
+                )
+            },
+        )()
+
+        started = time.monotonic()
+        run_discovery_chunk(chunk.logical_key, client)
+        with connection.cursor() as cursor:
+            cursor.execute("SET CONSTRAINTS market_discovery_inventory_reconstruct IMMEDIATE")
+            cursor.execute(
+                """SELECT count(*) FROM pg_trigger
+                   WHERE tgrelid='market_historicaltimestampobservation'::regclass
+                     AND tgname='market_discovery_observation_reconstruct'"""
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute("SET CONSTRAINTS ALL DEFERRED")
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(HistoricalTimestampObservation.objects.count(), 4999)
+
     def test_incomplete_or_unauthorized_plan_cannot_be_sealed(self):
         plan = self.create_plan()
         user = get_user_model().objects.create_user("reviewer")
@@ -440,6 +661,7 @@ class HistoricalDiscoveryTests(TestCase):
         self.assertEqual(
             _registration_hashes(plan)[1], registration.global_semantic_inventory_sha256
         )
+        self.assertEqual(registration.approval.payload["cross_series_report_sha256"], "b" * 64)
         with self.assertRaisesMessage(DatasetQualityError, "sealed"):
             begin_discovery_attempt(plan.chunks.get().logical_key)
         inventory = HistoricalTimestampInventory.objects.get()
@@ -453,10 +675,82 @@ class HistoricalDiscoveryTests(TestCase):
                 ask_present=True,
             )
 
+    def test_database_rejects_forged_approval_payload_and_hash(self):
+        plan = self.create_plan()
+        self.run_success(plan)
+        user = get_user_model().objects.create_user("approval-forger")
+        user.user_permissions.add(Permission.objects.get(codename="approve_historical_discovery"))
+        original = HistoricalDiscoveryApproval.objects.create
+
+        def forged_create(**kwargs):
+            kwargs["payload"] = {**kwargs["payload"], "raw_url": "https://forbidden.invalid"}
+            kwargs["sha256"] = "f" * 64
+            return original(**kwargs)
+
+        with (
+            patch.object(HistoricalDiscoveryApproval.objects, "create", side_effect=forged_create),
+            self.assertRaises(DatabaseError),
+        ):
+            approve_and_register_discovery(plan.sha256, user.pk, "c" * 64)
+        self.assertFalse(HistoricalDiscoveryApproval.objects.exists())
+        self.assertFalse(HistoricalDiscoveryRegistration.objects.exists())
+
+    def test_database_rejects_forged_registration_payload_and_hash(self):
+        plan = self.create_plan()
+        self.run_success(plan)
+        user = get_user_model().objects.create_user("registration-forger")
+        user.user_permissions.add(Permission.objects.get(codename="approve_historical_discovery"))
+        original = HistoricalDiscoveryRegistration.objects.create
+
+        def forged_create(**kwargs):
+            kwargs["payload"] = {**kwargs["payload"], "body": "forbidden"}
+            kwargs["report_sha256"] = "f" * 64
+            return original(**kwargs)
+
+        with (
+            patch.object(
+                HistoricalDiscoveryRegistration.objects, "create", side_effect=forged_create
+            ),
+            self.assertRaises(DatabaseError),
+        ):
+            approve_and_register_discovery(plan.sha256, user.pk, "d" * 64)
+        self.assertFalse(HistoricalDiscoveryApproval.objects.exists())
+        self.assertFalse(HistoricalDiscoveryRegistration.objects.exists())
+
     @patch("market.management.commands.discover_historical_inventory.OandaClient")
     def test_command_requires_explicit_execute_before_client_creation(self, client):
         with self.assertRaisesMessage(CommandError, "explicit --execute"):
             call_command("discover_historical_inventory", logical_discovery_key="0" * 64)
+        client.assert_not_called()
+
+    @override_settings(
+        OANDA_ENVIRONMENT="live",
+        OANDA_DISCOVERY_TOKEN="dedicated-test-value",
+        OANDA_TOKEN="generic-value",
+    )
+    @patch("market.management.commands.discover_historical_inventory.OandaClient")
+    def test_command_rejects_live_environment_before_client_creation(self, client):
+        with self.assertRaisesMessage(CommandError, "practice environment"):
+            call_command(
+                "discover_historical_inventory",
+                logical_discovery_key="0" * 64,
+                execute=True,
+            )
+        client.assert_not_called()
+
+    @override_settings(
+        OANDA_ENVIRONMENT="practice",
+        OANDA_DISCOVERY_TOKEN="",
+        OANDA_TOKEN="generic-production-value",
+    )
+    @patch("market.management.commands.discover_historical_inventory.OandaClient")
+    def test_command_rejects_generic_token_without_dedicated_test_credential(self, client):
+        with self.assertRaisesMessage(CommandError, "OANDA_API_KEY_TEST"):
+            call_command(
+                "discover_historical_inventory",
+                logical_discovery_key="0" * 64,
+                execute=True,
+            )
         client.assert_not_called()
 
     def test_model_layer_rejects_terminal_evidence_mutation(self):

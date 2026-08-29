@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Max
 from django.utils import timezone
 
@@ -63,6 +63,7 @@ class DiscoveryFailureCode:
     PROVIDER_RESPONSE_MALFORMED = "DISCOVERY_PROVIDER_RESPONSE_MALFORMED"
     PROVIDER_EVIDENCE_MISSING = "DISCOVERY_PROVIDER_EVIDENCE_MISSING"
     PROVIDER_LIMIT_SUSPECTED = "DISCOVERY_PROVIDER_LIMIT_SUSPECTED"
+    PERSISTENCE_FAILED = "DISCOVERY_PERSISTENCE_FAILED"
     STRUCTURE_INVALID = "DISCOVERY_STRUCTURE_INVALID"
     STALE_ATTEMPT = "DISCOVERY_STALE_ATTEMPT"
     UNKNOWN_FAILURE = "DISCOVERY_UNKNOWN_FAILURE"
@@ -88,6 +89,12 @@ class DiscoveryResponseError(DatasetQualityError):
 
     def __str__(self):
         return self.message
+
+
+class DiscoveryPersistenceError(DatasetQualityError):
+    def __init__(self, component):
+        super().__init__("historical discovery persistence failed")
+        self.component = component
 
 
 def canonical_hash(value):
@@ -512,7 +519,7 @@ def _terminal_event_body(attempt, *, code, stage, evidence, diagnostics, occurre
         "canonical_request_sha256": attempt.chunk.canonical_request_sha256,
         "provider_evidence": evidence,
         "diagnostics": diagnostics,
-        "occurred_at": occurred_at.isoformat(),
+        "occurred_at": occurred_at.astimezone(UTC).isoformat(timespec="microseconds"),
     }
 
 
@@ -597,20 +604,26 @@ def _record_success(attempt_id, observations, evidence):
     timestamp_hash, structural_hash, semantic_hash = semantic_inventory_hashes(
         attempt.chunk, observations
     )
-    inventory = HistoricalTimestampInventory.objects.create(
-        chunk=attempt.chunk,
-        accepted_attempt=attempt,
-        observation_count=len(observations),
-        timestamp_set_sha256=timestamp_hash,
-        structural_observation_sha256=structural_hash,
-        semantic_inventory_sha256=semantic_hash,
-    )
-    HistoricalTimestampObservation.objects.bulk_create(
-        [
-            HistoricalTimestampObservation(inventory=inventory, **asdict(item))
-            for item in observations
-        ]
-    )
+    try:
+        inventory = HistoricalTimestampInventory.objects.create(
+            chunk=attempt.chunk,
+            accepted_attempt=attempt,
+            observation_count=len(observations),
+            timestamp_set_sha256=timestamp_hash,
+            structural_observation_sha256=structural_hash,
+            semantic_inventory_sha256=semantic_hash,
+        )
+    except Exception:
+        raise DiscoveryPersistenceError("inventory") from None
+    try:
+        HistoricalTimestampObservation.objects.bulk_create(
+            [
+                HistoricalTimestampObservation(inventory=inventory, **asdict(item))
+                for item in observations
+            ]
+        )
+    except Exception:
+        raise DiscoveryPersistenceError("observations") from None
     occurred_at = timezone.now()
     event_body = _terminal_event_body(
         attempt,
@@ -629,26 +642,35 @@ def _record_success(attempt_id, observations, evidence):
     run.stored_count = len(observations)
     run.rejected_count = 0
     run.finished_at = occurred_at
-    run.save()
-    HistoricalDiscoveryProviderEvidence.objects.create(
-        attempt=attempt,
-        endpoint_identity=evidence["endpoint_identity"],
-        http_method=evidence["http_method"],
-        environment=evidence["environment"],
-        http_status=evidence["http_status"],
-        provider_request_id=evidence["provider_request_id"],
-        canonical_request_sha256=evidence["canonical_request_sha256"],
-        unavailable_fields=evidence["unavailable_fields"],
-        terminal_event_sha256=event_hash,
-        operational_evidence_sha256=_operational_hash(attempt, run, evidence, event_hash),
-    )
-    AuditEvent.objects.create(
-        event_type="market.historical_discovery_succeeded",
-        actor="market.historical_discovery.run_discovery_chunk",
-        subject_type="HistoricalDiscoveryAttempt",
-        subject_id=str(attempt.pk),
-        payload={**event_body, "event_sha256": event_hash},
-    )
+    try:
+        run.save()
+    except Exception:
+        raise DiscoveryPersistenceError("run") from None
+    try:
+        HistoricalDiscoveryProviderEvidence.objects.create(
+            attempt=attempt,
+            endpoint_identity=evidence["endpoint_identity"],
+            http_method=evidence["http_method"],
+            environment=evidence["environment"],
+            http_status=evidence["http_status"],
+            provider_request_id=evidence["provider_request_id"],
+            canonical_request_sha256=evidence["canonical_request_sha256"],
+            unavailable_fields=evidence["unavailable_fields"],
+            terminal_event_sha256=event_hash,
+            operational_evidence_sha256=_operational_hash(attempt, run, evidence, event_hash),
+        )
+    except Exception:
+        raise DiscoveryPersistenceError("provider_evidence") from None
+    try:
+        AuditEvent.objects.create(
+            event_type="market.historical_discovery_succeeded",
+            actor="market.historical_discovery.run_discovery_chunk",
+            subject_type="HistoricalDiscoveryAttempt",
+            subject_id=str(attempt.pk),
+            payload={**event_body, "event_sha256": event_hash},
+        )
+    except Exception:
+        raise DiscoveryPersistenceError("audit_event") from None
     attempt.ingestion_run = run
     return attempt
 
@@ -693,7 +715,22 @@ def run_discovery_chunk(logical_key, client):
     except Exception as error:
         _record_failure(attempt.pk, _classify_failure(error, attempt.chunk))
         raise
-    return _record_success(attempt.pk, observations, provider_evidence)
+    try:
+        return _record_success(attempt.pk, observations, provider_evidence)
+    except DiscoveryPersistenceError as error:
+        failure = DiscoveryResponseError(
+            "historical discovery persistence failed",
+            DiscoveryFailureCode.PERSISTENCE_FAILED,
+            "persistence",
+            {"component": error.component},
+            provider_evidence,
+            len(observations),
+        )
+        try:
+            _record_failure(attempt.pk, failure)
+        except Exception:
+            pass
+        raise
 
 
 @transaction.atomic
@@ -816,8 +853,9 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         "plan_sha256": plan.sha256,
         "global_semantic_inventory_sha256": semantic_hash,
         "accepted_operational_evidence_set_sha256": operational_hash,
+        "cross_series_report_sha256": cross_series_report_sha256,
         "approved_by": approver.get_username(),
-        "approved_at": now.isoformat(),
+        "approved_at": now.astimezone(UTC).isoformat(timespec="microseconds"),
     }
     approval = HistoricalDiscoveryApproval.objects.create(
         plan=plan,
@@ -835,7 +873,7 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         "global_semantic_inventory_sha256": semantic_hash,
         "accepted_operational_evidence_set_sha256": operational_hash,
         "cross_series_report_sha256": cross_series_report_sha256,
-        "registered_at": now.isoformat(),
+        "registered_at": now.astimezone(UTC).isoformat(timespec="microseconds"),
     }
     registration = HistoricalDiscoveryRegistration.objects.create(
         plan=plan,
@@ -849,5 +887,8 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         registered_at=now,
     )
     HistoricalDiscoveryPlan.objects.filter(pk=plan.pk, sealed_at__isnull=True).update(sealed_at=now)
+    with connection.cursor() as cursor:
+        cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        cursor.execute("SET CONSTRAINTS ALL DEFERRED")
     plan.sealed_at = now
     return registration

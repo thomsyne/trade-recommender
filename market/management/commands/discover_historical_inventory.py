@@ -17,8 +17,12 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         if not options["execute"]:
             raise CommandError("network discovery requires explicit --execute")
+        if settings.OANDA_ENVIRONMENT != "practice":
+            raise CommandError("historical discovery requires the practice environment")
+        if not settings.OANDA_DISCOVERY_TOKEN:
+            raise CommandError("historical discovery requires OANDA_API_KEY_TEST")
         try:
-            with OandaClient(settings.OANDA_TOKEN, settings.OANDA_ENVIRONMENT) as client:
+            with OandaClient(settings.OANDA_DISCOVERY_TOKEN, "practice") as client:
                 attempt = run_discovery_chunk(options["logical_discovery_key"], client)
         except ValueError as error:
             raise CommandError(str(error)) from error

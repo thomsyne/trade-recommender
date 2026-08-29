@@ -281,13 +281,11 @@ class OandaClient:
 
             observations = [
                 StructuralObservation(
-                    timestamp=datetime.fromisoformat(
-                        item["time"].replace("Z", "+00:00")
-                    ).astimezone(UTC),
+                    timestamp=_provider_timestamp(item["time"]),
                     complete=item["complete"],
                     volume=item["volume"],
-                    bid_present=isinstance(item.get("bid"), dict),
-                    ask_present=isinstance(item.get("ask"), dict),
+                    bid_present=_canonical_price_component(item.get("bid")),
+                    ask_present=_canonical_price_component(item.get("ask")),
                 )
                 for item in candles
             ]
@@ -329,6 +327,19 @@ class OandaClient:
 def manifest_hash(manifest):
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _provider_timestamp(value):
+    if not isinstance(value, str):
+        raise TypeError("provider timestamp must be text")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("provider timestamp must include a timezone")
+    return parsed.astimezone(UTC)
+
+
+def _canonical_price_component(value):
+    return isinstance(value, dict) and set(value) == {"o", "h", "l", "c"}
 
 
 def _parse_candle(item):
