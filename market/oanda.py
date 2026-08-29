@@ -213,6 +213,92 @@ class OandaClient:
         }
         return candles, manifest
 
+    def fetch_historical_inventory(self, instrument, granularity, start, end):
+        """Fetch one structural inventory, discarding all price values during parsing."""
+        if start.tzinfo is None or end.tzinfo is None or start >= end:
+            raise ValueError("historical discovery requires an aware increasing range")
+        start, end = start.astimezone(UTC), end.astimezone(UTC)
+        params = {
+            "price": "BA",
+            "granularity": granularity,
+            "from": _iso(start),
+            "to": _iso(end),
+            "smooth": "false",
+            "dailyAlignment": "17",
+            "alignmentTimezone": "America/New_York",
+            "weeklyAlignment": "Friday",
+            "includeFirst": "true",
+        }
+        canonical_request = {
+            "instrument": instrument,
+            "granularity": granularity,
+            "from": _iso(start),
+            "to": _iso(end),
+            "price": "BA",
+            "price_component": "COMBINED_BID_ASK",
+            "smooth": False,
+            "dailyAlignment": 17,
+            "alignmentTimezone": "America/New_York",
+            "weeklyAlignment": "Friday",
+            "includeFirst": True,
+        }
+        evidence = {
+            "endpoint_identity": (
+                f"oanda-v20-{self.environment}:GET:/v3/instruments/{instrument}/candles"
+            ),
+            "http_method": "GET",
+            "oanda_environment": self.environment,
+            "canonical_request_sha256": manifest_hash(canonical_request),
+        }
+        try:
+            response = self.client.get(f"/instruments/{instrument}/candles", params=params)
+        except httpx.HTTPError:
+            raise OandaError(
+                "OANDA discovery request failed",
+                failure_kind="http",
+                provider_evidence={
+                    **evidence,
+                    "unavailable_fields": ["http_status", "provider_request_id"],
+                },
+            ) from None
+        evidence.update(
+            http_status=response.status_code,
+            provider_request_id=response.headers.get("RequestID", ""),
+        )
+        if not evidence["provider_request_id"]:
+            evidence["unavailable_fields"] = ["provider_request_id"]
+        if response.status_code != 200:
+            raise OandaError(
+                f"OANDA discovery request returned HTTP {response.status_code}",
+                failure_kind="auth" if response.status_code in {401, 403} else "http",
+                provider_evidence=evidence,
+            )
+        try:
+            candles = response.json()["candles"]
+            if not isinstance(candles, list):
+                raise TypeError
+            from market.historical_discovery import StructuralObservation
+
+            observations = [
+                StructuralObservation(
+                    timestamp=datetime.fromisoformat(
+                        item["time"].replace("Z", "+00:00")
+                    ).astimezone(UTC),
+                    complete=item["complete"],
+                    volume=item["volume"],
+                    bid_present=isinstance(item.get("bid"), dict),
+                    ask_present=isinstance(item.get("ask"), dict),
+                )
+                for item in candles
+            ]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            raise OandaError(
+                "OANDA discovery response is malformed",
+                failure_kind="malformed",
+                provider_evidence=evidence,
+            ) from None
+        return observations, evidence
+
     def fetch_account_terms(self, account_id, instruments):
         if not account_id:
             raise ValueError("OANDA_ACCOUNT_ID is required")
