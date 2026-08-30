@@ -419,6 +419,10 @@ def begin_discovery_attempt(logical_key):
         raise DatasetQualityError("registered discovery plans are sealed")
     if HistoricalDiscoverySupersession.objects.filter(superseded_plan=chunk.plan).exists():
         raise DatasetQualityError("superseded discovery plans reject new attempts")
+    if HistoricalDiscoverySupersession.objects.filter(replacement_plan=chunk.plan).exists():
+        raise DatasetQualityError(
+            "supersession replacement plans reject attempts until governed activation"
+        )
     attempts = chunk.attempts.select_related("ingestion_run")
     if attempts.filter(ingestion_run__status=IngestionRun.Status.SUCCEEDED).exists():
         raise DatasetQualityError("successful discovery chunks cannot be retried")

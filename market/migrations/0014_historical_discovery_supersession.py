@@ -9,12 +9,21 @@ def install_supersession_governance(apps, schema_editor):
         return
     schema_editor.execute(
         r"""
+        CREATE FUNCTION market_discovery_plan_xact_lock(plan_key bigint) RETURNS void AS $$
+          SELECT pg_advisory_xact_lock(
+            hashtextextended('market-discovery-plan-governance:'||plan_key::text, 4225531));
+        $$ LANGUAGE sql;
+
         CREATE FUNCTION market_validate_discovery_supersession() RETURNS trigger AS $$
         DECLARE superseded record; replacement record; lineage record;
                 superseded_version integer; replacement_version integer;
                 audit_count integer; audit_hash text; expected_payload jsonb;
                 cycle_exists boolean; invalid_v2_layout boolean;
         BEGIN
+          PERFORM market_discovery_plan_xact_lock(
+            LEAST(NEW.superseded_plan_id, NEW.replacement_plan_id));
+          PERFORM market_discovery_plan_xact_lock(
+            GREATEST(NEW.superseded_plan_id, NEW.replacement_plan_id));
           SELECT * INTO STRICT superseded FROM market_historicaldiscoveryplan
             WHERE id=NEW.superseded_plan_id;
           SELECT * INTO STRICT replacement FROM market_historicaldiscoveryplan
@@ -186,9 +195,16 @@ def install_supersession_governance(apps, schema_editor):
           ELSE
             plan_key:=NEW.plan_id;
           END IF;
+          PERFORM market_discovery_plan_xact_lock(plan_key);
           IF EXISTS(SELECT 1 FROM market_historicaldiscoverysupersession
                     WHERE superseded_plan_id=plan_key)
           THEN RAISE EXCEPTION 'superseded discovery plans reject new writes'; END IF;
+          IF TG_TABLE_NAME='market_historicaldiscoveryattempt'
+             AND EXISTS(SELECT 1 FROM market_historicaldiscoverysupersession
+                        WHERE replacement_plan_id=plan_key)
+          THEN RAISE EXCEPTION
+            'supersession replacement plans reject attempts until governed activation';
+          END IF;
           RETURN NEW;
         END $$ LANGUAGE plpgsql;
 
@@ -265,6 +281,7 @@ def remove_supersession_governance(apps, schema_editor):
         "DROP FUNCTION IF EXISTS market_discovery_supersession_reject_mutation();"
         "DROP FUNCTION IF EXISTS market_reject_superseded_discovery_write();"
         "DROP FUNCTION IF EXISTS market_validate_discovery_supersession();"
+        "DROP FUNCTION IF EXISTS market_discovery_plan_xact_lock(bigint);"
     )
 
 
