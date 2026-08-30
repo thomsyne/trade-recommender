@@ -37,6 +37,7 @@ from market.tests.test_replacement_canary_activation import (
     MIGRATION_0015,
     MIGRATION_0016,
     MIGRATION_0017,
+    MIGRATION_0018,
     build_retry_ready_state,
     build_superseded_state,
     insert_raw_canary_attempt,
@@ -125,7 +126,7 @@ class Gate4FixtureTestCase(TransactionTestCase):
         ) = build_retry_ready_state(self.source)
         migrate_to(MIGRATION_0016)
         self.attempt_two = record_attempt_two_success(self.source, self.replacement)
-        migrate_to(MIGRATION_0017)
+        migrate_to(MIGRATION_0018)
         self.canary = self.replacement.chunks.select_related("instrument").get(
             logical_key=CANARY_V2_LOGICAL_KEY
         )
@@ -136,7 +137,7 @@ class Gate4FixtureTestCase(TransactionTestCase):
         )
 
     def tearDown(self):
-        migrate_to(MIGRATION_0017)
+        migrate_to(MIGRATION_0018)
         super().tearDown()
 
     def validator_outcomes(self):
@@ -261,13 +262,12 @@ class Gate4ActivationTests(Gate4FixtureTestCase):
         )
         with self.assertRaisesMessage(
             DatasetQualityError,
-            "supersession replacement plans reject approval until governed activation",
+            "gate5 approval requires the committed cross-series completion-summary hash",
         ):
             approve_and_register_discovery(self.replacement.sha256, approver.pk, "a" * 64)
         with (
             self.assertRaisesMessage(
-                DatabaseError,
-                "supersession replacement plans reject sealing until governed activation",
+                DatabaseError, "gate5 registration state does not reconstruct"
             ),
             transaction.atomic(),
         ):
@@ -379,7 +379,7 @@ class Gate4ActivationTests(Gate4FixtureTestCase):
 
 class Gate4PrerequisiteTests(TransactionTestCase):
     def tearDown(self):
-        migrate_to(MIGRATION_0017)
+        migrate_to(MIGRATION_0018)
         super().tearDown()
 
     def assert_activation_blocked(self, source, replacement):

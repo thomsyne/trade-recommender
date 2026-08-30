@@ -96,6 +96,24 @@ CANARY_SUCCESS_OBSERVATION_COUNT = 2932
 CANARY_SEMANTIC_INVENTORY_SHA256_RECORDED = (
     "fdf82569dc323bc58cadb5b48d5309fc0ec987c5caf66e16a1225d478b09e9de"
 )
+# Gate 5 approval-and-registration activation: after human inventory review,
+# approval is authorized only for the exact completed v2 replacement plan and
+# only against the committed, deterministic approval-decision artifact. The
+# global hashes are reproducible from the immutable inventory and evidence
+# rows; the artifact hash is the SHA-256 of the committed canonical JSON file.
+GATE5_APPROVAL_DECISION_SCHEMA_IDENTITY = "phase-2b1r-gate5-approval-decision-v1"
+GATE5_APPROVAL_DECISION_SHA256 = "d85029bd86690859e0bf3be3a38f36033e6c1fd6fdd4035d6f2944d4e9e14aea"
+DISCOVERY_COMPLETION_SUMMARY_SHA256 = (
+    "d267326c7d62e43fffaa610af118d52c7754af357a888a1c95cf3d24b16ae32d"
+)
+GLOBAL_SEMANTIC_INVENTORY_SHA256 = (
+    "78f8559bc9b14e84f8c1b1002d30ddd77d1918e9c026812b5ce6e2b0ca8af02c"
+)
+ACCEPTED_OPERATIONAL_EVIDENCE_SET_SHA256 = (
+    "a650dd977f0f2c79cbad2cb476fe36610a0fc0c2f372107b541882d0b342c878"
+)
+GATE5_ACCEPTED_INVENTORY_COUNT = 132
+GATE5_STRUCTURAL_OBSERVATION_COUNT = 364953
 DISCOVERY_PURPOSE = "provider_timestamp_inventory_discovery"
 DISCOVERY_APPROVAL_IDENTITY = "failed-break-phase-2b1r-discovery-approval-v1"
 SUPERSEDED_DATA_IDENTITY = "oanda-ba-ny17-friday-v1"
@@ -439,6 +457,96 @@ def future_data_contract_semantic_hash(*, global_semantic_inventory_sha256):
             "global_semantic_inventory_sha256": global_semantic_inventory_sha256,
         }
     )
+
+
+def build_gate5_approval_decision():
+    """The frozen Gate 5 product decisions, canonicalized deterministically.
+
+    The committed artifact file must contain exactly the canonical JSON of
+    this payload, so its file SHA-256 equals canonical_hash(payload) and
+    equals GATE5_APPROVAL_DECISION_SHA256."""
+    return {
+        "schema_identity": GATE5_APPROVAL_DECISION_SCHEMA_IDENTITY,
+        "schema_version": 1,
+        "plan_sha256": DISCOVERY_V2_PLAN_SHA256,
+        "request_manifest_sha256": DISCOVERY_V2_MANIFEST_SHA256,
+        "global_semantic_inventory_sha256": GLOBAL_SEMANTIC_INVENTORY_SHA256,
+        "accepted_operational_evidence_set_sha256": (ACCEPTED_OPERATIONAL_EVIDENCE_SET_SHA256),
+        "discovery_completion_summary_sha256": DISCOVERY_COMPLETION_SUMMARY_SHA256,
+        "successful_inventories": GATE5_ACCEPTED_INVENTORY_COUNT,
+        "structural_observations": GATE5_STRUCTURAL_OBSERVATION_COUNT,
+        "decisions": [
+            {
+                "code": "preserve-provider-observed-membership",
+                "decision": (
+                    "Preserve every accepted provider-observed timestamp. Do not"
+                    " delete, normalize, fill, interpolate or replace historical"
+                    " membership."
+                ),
+            },
+            {
+                "code": "retain-weekend-h1-evidence",
+                "decision": (
+                    "Retain the 2010-2012 weekend H1 observations as"
+                    " provider-observed evidence. Their presence does not by"
+                    " itself prove market tradability or authorize a strategy"
+                    " entry."
+                ),
+            },
+            {
+                "code": "chronological-indicator-history",
+                "decision": (
+                    "For later Gate 1B integration, use accepted observations in"
+                    " chronological indicator history unless an existing frozen"
+                    " Phase 1 rule explicitly excludes them."
+                ),
+            },
+            {
+                "code": "frozen-entry-eligibility-rules",
+                "decision": (
+                    "Entry and setup eligibility must still enforce the frozen"
+                    " strategy-session, market-open, point-in-time and"
+                    " exact-timestamp rules."
+                ),
+            },
+            {
+                "code": "instrument-specific-calendars",
+                "decision": (
+                    "Accept instrument-specific timestamp inventories. Never"
+                    " coerce the six instruments onto a shared calendar."
+                ),
+            },
+            {
+                "code": "preserve-sunday-ny17-daily-candles",
+                "decision": (
+                    "Preserve Sunday 17:00 America/New_York D candles; they"
+                    " represent the normal FX-week opening boundary."
+                ),
+            },
+            {
+                "code": "preserve-weekly-inventories-471",
+                "decision": (
+                    "Preserve the exact W inventories of 471 observations per instrument."
+                ),
+            },
+            {
+                "code": "failed-canary-operational-only",
+                "decision": (
+                    "Keep failed canary attempt 1 in operational provenance and"
+                    " the operational-evidence-set hash, but exclude it from"
+                    " semantic inventory membership."
+                ),
+            },
+            {
+                "code": "provider-drift-fails-closed",
+                "decision": (
+                    "Any later provider response differing from the sealed"
+                    " inventory must fail as provider drift. It must never"
+                    " mutate the approved inventory automatically."
+                ),
+            },
+        ],
+    }
 
 
 def _verify_canary_success_lineage(plan, rejection):
@@ -1275,16 +1383,49 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         raise DatasetQualityError("discovery plan is already sealed")
     if HistoricalDiscoverySupersession.objects.filter(superseded_plan=plan).exists():
         raise DatasetQualityError("superseded discovery plans cannot be approved")
-    if HistoricalDiscoverySupersession.objects.filter(replacement_plan=plan).exists():
-        raise DatasetQualityError(
-            "supersession replacement plans reject approval until governed activation"
-        )
+    if (
+        plan.sha256 != DISCOVERY_V2_PLAN_SHA256
+        or plan.identity != DISCOVERY_V2_PLAN_IDENTITY
+        or plan.version != DISCOVERY_V2_VERSION
+        or plan.canonical_request_manifest_sha256 != DISCOVERY_V2_MANIFEST_SHA256
+        or plan.declared_chunk_count != GATE5_ACCEPTED_INVENTORY_COUNT
+        or canonical_hash(plan.payload) != DISCOVERY_V2_PLAN_SHA256
+    ):
+        raise DatasetQualityError("only the approved replacement discovery plan may be approved")
+    if (
+        HistoricalDiscoverySupersession.objects.filter(
+            replacement_plan=plan,
+            superseded_plan_sha256=DISCOVERY_V1_PLAN_SHA256,
+            replacement_plan_sha256=DISCOVERY_V2_PLAN_SHA256,
+        ).count()
+        != 1
+    ):
+        raise DatasetQualityError("gate5 supersession lineage does not reconstruct")
+    _verify_canary_success_lineage(
+        plan, DatasetQualityError("gate5 canary lineage does not reconstruct")
+    )
     approver = get_user_model().objects.select_for_update().get(pk=approver_id)
     if not approver.is_active or not approver.has_perm("market.approve_historical_discovery"):
         raise PermissionDenied("active governed discovery approval permission is required")
     if not re.fullmatch(r"[0-9a-f]{64}", cross_series_report_sha256):
         raise ValueError("cross-series report SHA-256 is invalid")
+    if cross_series_report_sha256 != DISCOVERY_COMPLETION_SUMMARY_SHA256:
+        raise DatasetQualityError(
+            "gate5 approval requires the committed cross-series completion-summary hash"
+        )
     chunk_hash, semantic_hash, operational_hash = _registration_hashes(plan)
+    observation_count = HistoricalTimestampObservation.objects.filter(
+        inventory__chunk__plan=plan
+    ).count()
+    if (
+        chunk_hash != DISCOVERY_V2_MANIFEST_SHA256
+        or semantic_hash != GLOBAL_SEMANTIC_INVENTORY_SHA256
+        or operational_hash != ACCEPTED_OPERATIONAL_EVIDENCE_SET_SHA256
+        or HistoricalTimestampInventory.objects.filter(chunk__plan=plan).count()
+        != GATE5_ACCEPTED_INVENTORY_COUNT
+        or observation_count != GATE5_STRUCTURAL_OBSERVATION_COUNT
+    ):
+        raise DatasetQualityError("gate5 registration state does not reconstruct")
     now = timezone.now()
     approval_payload = {
         "identity": DISCOVERY_APPROVAL_IDENTITY,
@@ -1292,6 +1433,7 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         "global_semantic_inventory_sha256": semantic_hash,
         "accepted_operational_evidence_set_sha256": operational_hash,
         "cross_series_report_sha256": cross_series_report_sha256,
+        "approval_decision_sha256": GATE5_APPROVAL_DECISION_SHA256,
         "approved_by": approver.get_username(),
         "approved_at": now.astimezone(UTC).isoformat(timespec="microseconds"),
     }

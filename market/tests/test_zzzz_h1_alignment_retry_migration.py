@@ -23,7 +23,7 @@ REPLACED_FUNCTIONS = (
 class H1AlignmentRetryMigrationTests(TransactionTestCase):
     current = [("market", "0016_provider_observed_h1_alignment_retry")]
     previous = [("market", "0015_provider_observed_canary_activation")]
-    latest = [("market", "0017_provider_observed_full_discovery_activation")]
+    latest = [("market", "0018_provider_observed_discovery_registration_activation")]
 
     def setUp(self):
         super().setUp()

@@ -18,7 +18,7 @@ ACTIVATION_SIGNATURE = "market_validate_replacement_canary_attempt"
 class ReplacementCanaryActivationMigrationTests(TransactionTestCase):
     current = [("market", "0015_provider_observed_canary_activation")]
     previous = [("market", "0014_historical_discovery_supersession")]
-    latest = [("market", "0017_provider_observed_full_discovery_activation")]
+    latest = [("market", "0018_provider_observed_discovery_registration_activation")]
 
     def setUp(self):
         super().setUp()
