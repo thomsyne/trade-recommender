@@ -536,6 +536,46 @@ class HistoricalDiscoveryRegistration(ImmutableModel):
     registered_at = models.DateTimeField()
 
 
+class HistoricalDiscoverySupersession(ImmutableModel):
+    REASON_PROVIDER_REQUEST_BOUND_UNSAFE = "PROVIDER_REQUEST_BOUND_UNSAFE"
+
+    superseded_plan = models.OneToOneField(
+        HistoricalDiscoveryPlan,
+        on_delete=models.PROTECT,
+        related_name="supersession",
+    )
+    replacement_plan = models.OneToOneField(
+        HistoricalDiscoveryPlan,
+        on_delete=models.PROTECT,
+        related_name="replacement_for",
+    )
+    governing_attempt = models.OneToOneField(
+        HistoricalDiscoveryAttempt,
+        on_delete=models.PROTECT,
+        related_name="governing_supersession",
+    )
+    reason_code = models.CharField(max_length=80)
+    superseded_plan_sha256 = models.CharField(max_length=64)
+    replacement_plan_sha256 = models.CharField(max_length=64)
+    governing_terminal_event_sha256 = models.CharField(max_length=64)
+    governing_operational_evidence_sha256 = models.CharField(max_length=64)
+    payload = models.JSONField()
+    sha256 = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(superseded_plan=models.F("replacement_plan")),
+                name="historical_discovery_supersession_distinct_plans",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(reason_code="PROVIDER_REQUEST_BOUND_UNSAFE"),
+                name="historical_discovery_supersession_reason",
+            ),
+        ]
+
+
 class Candle(models.Model):
     instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
     ingestion_run = models.ForeignKey(

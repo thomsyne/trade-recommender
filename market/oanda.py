@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -27,6 +28,52 @@ class OandaError(RuntimeError):
         super().__init__(message)
         self.failure_kind = failure_kind
         self.provider_evidence = provider_evidence or {}
+
+
+DISCOVERY_LIMIT_ERROR_CODES = frozenset(
+    {
+        "CANDLE_COUNT_EXCEEDED",
+        "MAXIMUM_CANDLES_EXCEEDED",
+        "MAXIMUM_RESULTS_EXCEEDED",
+        "REQUEST_RANGE_TOO_LARGE",
+        "TOO_MANY_CANDLES",
+    }
+)
+DISCOVERY_LIMIT_ERROR_CATEGORIES = frozenset(
+    {"CANDLE_COUNT_LIMIT", "MAXIMUM_RESULTS", "RANGE_LIMIT"}
+)
+
+
+def _discovery_http_failure_kind(response):
+    if response.status_code in {401, 403}:
+        return "auth"
+    if response.status_code != 400:
+        return "http"
+    if len(response.content) > 4096:
+        return "http"
+    try:
+        payload = response.json()
+    except (TypeError, ValueError, UnicodeError):
+        return "http"
+    if type(payload) is not dict:
+        return "http"
+
+    def normalized(keys):
+        for key in keys:
+            value = payload.get(key)
+            if (
+                isinstance(value, str)
+                and 0 < len(value) <= 80
+                and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", value)
+            ):
+                return value.upper().replace("-", "_")
+        return None
+
+    code = normalized(("errorCode", "code"))
+    category = normalized(("errorCategory", "category"))
+    if code in DISCOVERY_LIMIT_ERROR_CODES or category in DISCOVERY_LIMIT_ERROR_CATEGORIES:
+        return "limit"
+    return "http"
 
 
 class OandaClient:
@@ -270,7 +317,7 @@ class OandaClient:
         if response.status_code != 200:
             raise OandaError(
                 f"OANDA discovery request returned HTTP {response.status_code}",
-                failure_kind="auth" if response.status_code in {401, 403} else "http",
+                failure_kind=_discovery_http_failure_kind(response),
                 provider_evidence=evidence,
             )
         try:

@@ -277,6 +277,69 @@ class OandaClientTests(SimpleTestCase):
         self.assertNotIn("secret transport diagnostic", repr(error.provider_evidence))
         self.assertNotIn("test-token", repr(error.provider_evidence))
 
+    def test_discovery_recognizes_allowlisted_provider_limit_code(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                headers={"RequestID": "provider-limit-request"},
+                json={
+                    "errorCode": "MAXIMUM_RESULTS_EXCEEDED",
+                    "errorMessage": "raw changing provider prose and SECRET_PRICE must be discarded",
+                },
+            )
+
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        with self.assertRaises(OandaError) as raised:
+            client.fetch_historical_inventory("AUD_USD", "H1", start, start + timedelta(hours=1))
+
+        error = raised.exception
+        self.assertEqual(error.failure_kind, "limit")
+        self.assertEqual(str(error), "OANDA discovery request returned HTTP 400")
+        serialized = repr(error.provider_evidence)
+        self.assertNotIn("raw changing", serialized)
+        self.assertNotIn("SECRET_PRICE", serialized)
+        self.assertNotIn("test-token", serialized)
+
+    def test_discovery_unknown_malformed_and_hostile_http_400_stay_generic(self):
+        bodies = (
+            {"errorCode": "UNRECOGNIZED", "errorMessage": "SECRET_BODY"},
+            ["MAXIMUM_RESULTS_EXCEEDED"],
+            b"not-json SECRET_BODY",
+            b'{"errorCode":"MAXIMUM_RESULTS_EXCEEDED","padding":"' + b"x" * 4097 + b'"}',
+            {"errorCode": "MAXIMUM_RESULTS_EXCEEDED;AUTHORIZATION=Bearer secret"},
+            {"category": "range limit"},
+        )
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        for body in bodies:
+            with self.subTest(body_type=type(body).__name__):
+
+                def handler(request):
+                    if isinstance(body, bytes):
+                        return httpx.Response(
+                            400,
+                            headers={"RequestID": "generic-http-request"},
+                            content=body,
+                        )
+                    return httpx.Response(
+                        400,
+                        headers={"RequestID": "generic-http-request"},
+                        json=body,
+                    )
+
+                client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+                with self.assertRaises(OandaError) as raised:
+                    client.fetch_historical_inventory(
+                        "AUD_USD", "H1", start, start + timedelta(hours=1)
+                    )
+                error = raised.exception
+                self.assertEqual(error.failure_kind, "http")
+                serialized = repr((error, error.provider_evidence))
+                self.assertNotIn("SECRET_BODY", serialized)
+                self.assertNotIn("AUTHORIZATION", serialized)
+                self.assertNotIn("Bearer secret", serialized)
+                self.assertNotIn("test-token", serialized)
+
     def test_discovery_rejects_timezone_naive_provider_timestamp(self):
         def handler(request):
             return httpx.Response(

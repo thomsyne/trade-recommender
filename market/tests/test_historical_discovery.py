@@ -1,5 +1,7 @@
 import json
+import math
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -13,7 +15,7 @@ from django.db import DatabaseError, close_old_connections, connection, transact
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
-from market.historical_acquisition import INSTRUMENTS
+from market.historical_acquisition import FROZEN_RANGES, INSTRUMENTS
 from market.historical_discovery import (
     DISCOVERY_PROVIDER_MAX_CANDLES,
     DiscoveryFailureCode,
@@ -27,6 +29,7 @@ from market.historical_discovery import (
     approve_and_register_discovery,
     begin_discovery_attempt,
     build_initial_discovery_plan,
+    build_replacement_discovery_plan,
     canonical_hash,
     create_discovery_plan,
     future_data_contract_semantic_hash,
@@ -34,14 +37,17 @@ from market.historical_discovery import (
     resolve_stale_discovery_attempt,
     run_discovery_chunk,
     semantic_inventory_hashes,
+    supersede_discovery_plan,
 )
 from market.models import (
     AuditEvent,
     HistoricalDiscoveryApproval,
     HistoricalDiscoveryAttempt,
+    HistoricalDiscoveryChunk,
     HistoricalDiscoveryPlan,
     HistoricalDiscoveryProviderEvidence,
     HistoricalDiscoveryRegistration,
+    HistoricalDiscoverySupersession,
     HistoricalTimestampInventory,
     HistoricalTimestampObservation,
     IngestionRun,
@@ -68,6 +74,88 @@ class OfflineDiscoveryPlanTests(SimpleTestCase):
         serialized = json.dumps(payload, sort_keys=True)
         for forbidden in ("source_id", "instrument_id", "run_id", "attempt_number"):
             self.assertNotIn(forbidden, serialized)
+
+        self.assertEqual(
+            payload["plan_sha256"],
+            "292556a591024876c7051212d1c6886cd026a097e141295e9b60257fc5402b33",
+        )
+        self.assertEqual(
+            payload["canonical_request_manifest_sha256"],
+            "a3cf7ef1f484d2379bfd1ef94769216b2ed9b41635cad7cadbd71a8de251bb2e",
+        )
+
+    def test_replacement_plan_uses_wall_clock_bounded_contiguous_h1_ranges(self):
+        payload = build_replacement_discovery_plan()
+        requests = payload["requests"]
+        distribution = Counter(item["canonical_request"]["granularity"] for item in requests)
+        h1_start = datetime.fromisoformat(FROZEN_RANGES["H1"]["from"])
+        h1_end = datetime.fromisoformat(FROZEN_RANGES["H1"]["to"])
+        derived_h1_per_instrument = math.ceil((h1_end - h1_start) / timedelta(hours=4000))
+
+        self.assertEqual(derived_h1_per_instrument, 20)
+        self.assertEqual(distribution, {"D": 6, "H1": 120, "W": 6})
+        self.assertEqual(len(requests), len(INSTRUMENTS) * (derived_h1_per_instrument + 2))
+        self.assertEqual(payload["declared_chunk_count"], len(requests))
+        self.assertEqual(
+            payload["plan_sha256"],
+            "2a25bbc28fca5d596b26d3d2921fa881e374174fb08cc1dbfb51e47c8b138e3a",
+        )
+        self.assertEqual(
+            payload["canonical_request_manifest_sha256"],
+            "04835164d5c2abe633efd1a8ddc58edcc7c9d5e8347c01425df5049d9b74b427",
+        )
+        durations = []
+        for instrument in INSTRUMENTS:
+            series = [
+                item["canonical_request"]
+                for item in requests
+                if item["canonical_request"]["instrument"] == instrument
+                and item["canonical_request"]["granularity"] == "H1"
+            ]
+            boundaries = [
+                (
+                    datetime.fromisoformat(item["from"].replace("Z", "+00:00")),
+                    datetime.fromisoformat(item["to"].replace("Z", "+00:00")),
+                )
+                for item in series
+            ]
+            self.assertEqual(boundaries[0][0], h1_start)
+            self.assertEqual(boundaries[-1][1], h1_end)
+            self.assertTrue(
+                all(left[1] == right[0] for left, right in zip(boundaries, boundaries[1:]))
+            )
+            for start, end in boundaries:
+                duration = (end - start) / timedelta(hours=1)
+                durations.append(duration)
+                self.assertGreater(duration, 0)
+                self.assertLessEqual(duration, 4000)
+                provider_specific_unique_hourly_timestamps = {
+                    start + timedelta(hours=offset) for offset in range(math.ceil(duration))
+                }
+                self.assertLessEqual(len(provider_specific_unique_hourly_timestamps), 4000)
+        self.assertEqual((min(durations), max(durations)), (2901, 4000))
+
+        for granularity in ("D", "W"):
+            expected_range = FROZEN_RANGES[granularity]
+            series = [
+                item["canonical_request"]
+                for item in requests
+                if item["canonical_request"]["granularity"] == granularity
+            ]
+            self.assertEqual(len(series), len(INSTRUMENTS))
+            self.assertTrue(
+                all(
+                    item["from"]
+                    == datetime.fromisoformat(expected_range["from"])
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                    and item["to"]
+                    == datetime.fromisoformat(expected_range["to"])
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                    for item in series
+                )
+            )
 
     def test_future_contract_fixture_depends_only_on_semantic_inventory(self):
         semantic = "a" * 64
@@ -181,6 +269,23 @@ class HistoricalDiscoveryTests(TestCase):
         )()
         return run_discovery_chunk(chunk.logical_key, client)
 
+    def create_supersession(self):
+        superseded = create_discovery_plan(self.single_request_payload("phase-2b1r-discovery-v1"))
+        chunk = superseded.chunks.select_related("instrument").get()
+        with self.assertRaises(OandaError):
+            run_discovery_chunk(
+                chunk.logical_key,
+                FailingInventoryClient(chunk.canonical_request_sha256),
+            )
+        attempt = HistoricalDiscoveryAttempt.objects.get(chunk=chunk)
+        replacement = create_discovery_plan(build_replacement_discovery_plan())
+        supersession = supersede_discovery_plan(
+            superseded.sha256,
+            replacement.sha256,
+            attempt.pk,
+        )
+        return superseded, replacement, attempt, supersession
+
     def test_separately_versioned_plan_uses_declared_count_not_global_84(self):
         plan = self.create_plan()
 
@@ -277,6 +382,44 @@ class HistoricalDiscoveryTests(TestCase):
         self.assertEqual(
             retry.idempotency_key, f"historical-discovery-attempt:{chunk.logical_key}:2"
         )
+
+    def test_allowlisted_http_limit_is_recorded_as_stable_limit_failure(self):
+        plan = self.create_plan()
+        chunk = plan.chunks.select_related("instrument").get()
+
+        class LimitClient:
+            def fetch_historical_inventory(inner_self, *args):
+                raise OandaError(
+                    "bounded provider limit response",
+                    failure_kind="limit",
+                    provider_evidence={
+                        "endpoint_identity": (
+                            "oanda-v20-practice:GET:/v3/instruments/"
+                            f"{chunk.instrument.code}/candles"
+                        ),
+                        "http_method": "GET",
+                        "oanda_environment": "practice",
+                        "http_status": 400,
+                        "provider_request_id": "provider-limit-request",
+                        "canonical_request_sha256": chunk.canonical_request_sha256,
+                    },
+                )
+
+        with self.assertRaises(OandaError):
+            run_discovery_chunk(chunk.logical_key, LimitClient())
+
+        attempt = HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get()
+        self.assertEqual(
+            attempt.ingestion_run.failure_reason,
+            DiscoveryFailureCode.PROVIDER_LIMIT_SUSPECTED,
+        )
+        event = AuditEvent.objects.get(event_type="market.historical_discovery_failed")
+        self.assertEqual(event.payload["stage"], "response_validation")
+        self.assertEqual(event.payload["diagnostics"], {"observation_count": 0})
+        serialized = json.dumps(event.payload, sort_keys=True).lower()
+        self.assertNotIn("body", serialized)
+        self.assertNotIn("authorization", serialized)
+        self.assertFalse(HistoricalTimestampInventory.objects.exists())
 
     def test_stale_resolution_requires_explicit_stale_attempt_threshold_and_reason(self):
         plan = self.create_plan()
@@ -828,6 +971,194 @@ class HistoricalDiscoveryTests(TestCase):
         self.assertFalse(HistoricalDiscoveryApproval.objects.exists())
         self.assertFalse(HistoricalDiscoveryRegistration.objects.exists())
 
+    def test_supersession_preserves_v1_evidence_and_blocks_all_old_plan_writes(self):
+        superseded = create_discovery_plan(self.single_request_payload("phase-2b1r-discovery-v1"))
+        chunk = superseded.chunks.select_related("instrument").get()
+        with self.assertRaises(OandaError):
+            run_discovery_chunk(
+                chunk.logical_key,
+                FailingInventoryClient(chunk.canonical_request_sha256),
+            )
+        attempt = HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get(
+            chunk=chunk
+        )
+        evidence = HistoricalDiscoveryProviderEvidence.objects.get(attempt=attempt)
+        event = AuditEvent.objects.get(subject_id=str(attempt.pk))
+        immutable_snapshot = {
+            "plan": HistoricalDiscoveryPlan.objects.filter(pk=superseded.pk).values().get(),
+            "chunks": list(superseded.chunks.order_by("ordinal").values()),
+            "attempt": HistoricalDiscoveryAttempt.objects.filter(pk=attempt.pk).values().get(),
+            "run": IngestionRun.objects.filter(pk=attempt.ingestion_run_id).values().get(),
+            "evidence": HistoricalDiscoveryProviderEvidence.objects.filter(pk=evidence.pk)
+            .values()
+            .get(),
+            "event": AuditEvent.objects.filter(pk=event.pk).values().get(),
+        }
+        replacement = create_discovery_plan(build_replacement_discovery_plan())
+        supersession = supersede_discovery_plan(
+            superseded.sha256,
+            replacement.sha256,
+            attempt.pk,
+        )
+
+        self.assertEqual(supersession.governing_attempt_id, attempt.pk)
+        self.assertEqual(
+            supersession.payload["governing_failure_code"],
+            run_failure := "DISCOVERY_PROVIDER_HTTP_ERROR",
+        )
+        self.assertEqual(attempt.ingestion_run.failure_reason, run_failure)
+        self.assertEqual(
+            immutable_snapshot,
+            {
+                "plan": HistoricalDiscoveryPlan.objects.filter(pk=superseded.pk).values().get(),
+                "chunks": list(superseded.chunks.order_by("ordinal").values()),
+                "attempt": HistoricalDiscoveryAttempt.objects.filter(pk=attempt.pk).values().get(),
+                "run": IngestionRun.objects.filter(pk=attempt.ingestion_run_id).values().get(),
+                "evidence": HistoricalDiscoveryProviderEvidence.objects.filter(pk=evidence.pk)
+                .values()
+                .get(),
+                "event": AuditEvent.objects.filter(pk=event.pk).values().get(),
+            },
+        )
+        with self.assertRaisesMessage(DatasetQualityError, "superseded"):
+            begin_discovery_attempt(chunk.logical_key)
+        user = get_user_model().objects.create_user("superseded-approver")
+        user.user_permissions.add(Permission.objects.get(codename="approve_historical_discovery"))
+        with self.assertRaisesMessage(DatasetQualityError, "superseded"):
+            approve_and_register_discovery(superseded.sha256, user.pk, "a" * 64)
+        with (
+            self.assertRaisesMessage(DatabaseError, "superseded discovery plans"),
+            transaction.atomic(),
+        ):
+            HistoricalDiscoveryPlan.objects.filter(pk=superseded.pk).update(
+                sealed_at=timezone.now()
+            )
+        with (
+            self.assertRaisesMessage(DatabaseError, "superseded discovery plans"),
+            transaction.atomic(),
+        ):
+            HistoricalDiscoveryChunk.objects.bulk_create(
+                [
+                    HistoricalDiscoveryChunk(
+                        plan=superseded,
+                        ordinal=1,
+                        instrument=chunk.instrument,
+                        granularity=chunk.granularity,
+                        requested_from=chunk.requested_from,
+                        requested_to=chunk.requested_to,
+                        canonical_request=chunk.canonical_request,
+                        canonical_request_sha256=chunk.canonical_request_sha256,
+                        logical_key="f" * 64,
+                    )
+                ]
+            )
+        with (
+            self.assertRaisesMessage(DatabaseError, "superseded discovery plans"),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoveryattempt
+                   (chunk_id,ingestion_run_id,attempt_number,idempotency_key,created_at)
+                   VALUES (%s,999999,2,%s,now())""",
+                [chunk.pk, "historical-discovery-attempt:forbidden:2"],
+            )
+        with (
+            self.assertRaisesMessage(DatabaseError, "superseded discovery plans"),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoveryapproval
+                   (plan_id,approved_by_id,global_semantic_inventory_sha256,
+                    accepted_operational_evidence_set_sha256,payload,sha256,approved_at)
+                   VALUES (%s,%s,%s,%s,'{}'::jsonb,%s,now())""",
+                [superseded.pk, user.pk, "a" * 64, "b" * 64, "c" * 64],
+            )
+        with (
+            self.assertRaisesMessage(DatabaseError, "superseded discovery plans"),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoveryregistration
+                   (plan_id,approval_id,ordered_chunk_manifest_sha256,
+                    global_semantic_inventory_sha256,accepted_operational_evidence_set_sha256,
+                    cross_series_report_sha256,payload,report_sha256,registered_at)
+                   VALUES (%s,999999,%s,%s,%s,%s,'{}'::jsonb,%s,now())""",
+                [superseded.pk, "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64],
+            )
+
+    def test_supersession_is_immutable_and_rejects_self_cycles_and_version_regression(self):
+        superseded, replacement, attempt, supersession = self.create_supersession()
+
+        supersession.reason_code = "CHANGED"
+        with self.assertRaises(ValidationError):
+            supersession.save()
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            HistoricalDiscoverySupersession.objects.filter(pk=supersession.pk).update(
+                reason_code="CHANGED"
+            )
+        with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM market_historicaldiscoverysupersession WHERE id=%s",
+                [supersession.pk],
+            )
+        with self.assertRaises(DatabaseError), transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute("TRUNCATE market_historicaldiscoverysupersession")
+        with self.assertRaises(DatasetQualityError):
+            supersede_discovery_plan(superseded.sha256, superseded.sha256, attempt.pk)
+
+        for old_id, new_id in (
+            (superseded.pk, superseded.pk),
+            (replacement.pk, superseded.pk),
+        ):
+            with (
+                self.subTest(old_id=old_id, new_id=new_id),
+                self.assertRaises(DatabaseError),
+                transaction.atomic(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(
+                    """INSERT INTO market_historicaldiscoverysupersession
+                       (superseded_plan_id,replacement_plan_id,governing_attempt_id,reason_code,
+                        superseded_plan_sha256,replacement_plan_sha256,
+                        governing_terminal_event_sha256,
+                        governing_operational_evidence_sha256,payload,sha256,created_at)
+                       VALUES (%s,%s,%s,'PROVIDER_REQUEST_BOUND_UNSAFE',%s,%s,%s,%s,'{}'::jsonb,%s,now())""",
+                    [
+                        old_id,
+                        new_id,
+                        attempt.pk,
+                        "a" * 64,
+                        "b" * 64,
+                        "c" * 64,
+                        "d" * 64,
+                        "e" * 64,
+                    ],
+                )
+
+    def test_database_rejects_supersession_to_noncanonical_v2_layout(self):
+        superseded = create_discovery_plan(self.single_request_payload("phase-2b1r-discovery-v1"))
+        chunk = superseded.chunks.select_related("instrument").get()
+        with self.assertRaises(OandaError):
+            run_discovery_chunk(
+                chunk.logical_key,
+                FailingInventoryClient(chunk.canonical_request_sha256),
+            )
+        attempt = HistoricalDiscoveryAttempt.objects.get(chunk=chunk)
+        incomplete_v2 = create_discovery_plan(
+            self.single_request_payload("phase-2b1r-discovery-v2")
+        )
+
+        with self.assertRaisesMessage(DatabaseError, "supersession lineage is invalid"):
+            supersede_discovery_plan(
+                superseded.sha256,
+                incomplete_v2.sha256,
+                attempt.pk,
+            )
+        self.assertFalse(HistoricalDiscoverySupersession.objects.exists())
+
     @patch("market.management.commands.discover_historical_inventory.OandaClient")
     def test_command_requires_explicit_execute_before_client_creation(self, client):
         with self.assertRaisesMessage(CommandError, "explicit --execute"):
@@ -915,3 +1246,56 @@ class HistoricalDiscoveryConcurrencyTests(TransactionTestCase):
         self.assertEqual(sum(result[0] == "rejected" for result in results), 1)
         self.assertEqual(HistoricalDiscoveryAttempt.objects.count(), 1)
         self.assertEqual(IngestionRun.objects.count(), 1)
+
+
+class ReplacementDiscoveryPortabilityTests(TransactionTestCase):
+    def test_displaced_primary_keys_do_not_change_v2_identities(self):
+        SourceRegistry.objects.create(
+            name="unrelated source",
+            tier=SourceRegistry.Tier.CONTEXTUAL,
+            base_url="https://example.invalid",
+            acquisition_method="test",
+            retention_policy="test",
+            enabled=False,
+        )
+        Instrument.objects.create(
+            code="NZD_USD",
+            base_currency="NZD",
+            quote_currency="USD",
+            display_order=1,
+            active=False,
+        )
+        source = SourceRegistry.objects.create(
+            name="OANDA v20",
+            tier=SourceRegistry.Tier.ESTABLISHED,
+            base_url="https://developer.oanda.com",
+            acquisition_method="v20 REST API",
+            retention_policy="portability test",
+            enabled=True,
+        )
+        for order, code in enumerate(INSTRUMENTS, 2):
+            base, quote = code.split("_")
+            Instrument.objects.create(
+                code=code,
+                base_currency=base,
+                quote_currency=quote,
+                display_order=order,
+                active=True,
+            )
+
+        payload = build_replacement_discovery_plan()
+        plan = create_discovery_plan(payload)
+
+        self.assertGreater(source.pk, 1)
+        self.assertGreater(plan.chunks.order_by("instrument_id").first().instrument_id, 1)
+        self.assertEqual(
+            plan.sha256,
+            "2a25bbc28fca5d596b26d3d2921fa881e374174fb08cc1dbfb51e47c8b138e3a",
+        )
+        self.assertEqual(
+            plan.canonical_request_manifest_sha256,
+            "04835164d5c2abe633efd1a8ddc58edcc7c9d5e8347c01425df5049d9b74b427",
+        )
+        serialized = json.dumps(plan.payload, sort_keys=True)
+        self.assertNotIn("source_id", serialized)
+        self.assertNotIn("instrument_id", serialized)

@@ -27,6 +27,7 @@ from market.models import (
     HistoricalDiscoveryPlan,
     HistoricalDiscoveryProviderEvidence,
     HistoricalDiscoveryRegistration,
+    HistoricalDiscoverySupersession,
     HistoricalTimestampInventory,
     HistoricalTimestampObservation,
     IngestionRun,
@@ -40,6 +41,9 @@ from market.services import DatasetQualityError
 DISCOVERY_CONTRACT = "oanda-provider-observed-timestamp-discovery"
 DISCOVERY_VERSION = "phase-2b1r-discovery-v1"
 DISCOVERY_PLAN_IDENTITY = "failed-break-phase-2b1r-discovery-plan-v1"
+DISCOVERY_V2_VERSION = "phase-2b1r-discovery-v2"
+DISCOVERY_V2_PLAN_IDENTITY = "failed-break-phase-2b1r-discovery-plan-v2"
+DISCOVERY_V2_H1_MAX_HOURS = 4000
 DISCOVERY_PURPOSE = "provider_timestamp_inventory_discovery"
 DISCOVERY_APPROVAL_IDENTITY = "failed-break-phase-2b1r-discovery-approval-v1"
 SUPERSEDED_DATA_IDENTITY = "oanda-ba-ny17-friday-v1"
@@ -199,6 +203,65 @@ def build_initial_discovery_plan():
     return {**payload, "plan_sha256": canonical_hash(payload)}
 
 
+def build_replacement_discovery_plan():
+    requests = []
+    for instrument in INSTRUMENTS:
+        for granularity in DISCOVERY_GRANULARITIES:
+            candle_range = FROZEN_RANGES[granularity]
+            range_start = parse_timestamp(candle_range["from"])
+            range_end = parse_timestamp(candle_range["to"])
+            boundaries = [(range_start, range_end)]
+            if granularity == "H1":
+                boundaries = []
+                requested_from = range_start
+                while requested_from < range_end:
+                    requested_to = min(
+                        requested_from + timedelta(hours=DISCOVERY_V2_H1_MAX_HOURS),
+                        range_end,
+                    )
+                    boundaries.append((requested_from, requested_to))
+                    requested_from = requested_to
+            for requested_from, requested_to in boundaries:
+                request = canonical_request(
+                    instrument=instrument,
+                    granularity=granularity,
+                    requested_from=requested_from,
+                    requested_to=requested_to,
+                )
+                request_sha = canonical_hash(request)
+                requests.append(
+                    {
+                        "ordinal": len(requests) + 1,
+                        "logical_discovery_key": logical_discovery_key(
+                            request_sha256=request_sha,
+                            instrument=instrument,
+                            granularity=granularity,
+                            requested_from=requested_from,
+                            requested_to=requested_to,
+                            discovery_version=DISCOVERY_V2_VERSION,
+                        ),
+                        "canonical_request": request,
+                        "canonical_request_sha256": request_sha,
+                    }
+                )
+    payload = {
+        "discovery_contract": DISCOVERY_CONTRACT,
+        "discovery_version": DISCOVERY_V2_VERSION,
+        "identity": DISCOVERY_V2_PLAN_IDENTITY,
+        "purpose": DISCOVERY_PURPOSE,
+        "source": {"name": "OANDA v20", "governed_identity": SOURCE_IDENTITY},
+        "environment": "practice",
+        "phase1_spec_hash": PHASE1_SPEC_SHA256,
+        "phase1_manifest_hash": PHASE1_MANIFEST_SHA256,
+        "superseded_data_identity": SUPERSEDED_DATA_IDENTITY,
+        "replacement_data_identity": REPLACEMENT_DATA_IDENTITY,
+        "declared_chunk_count": len(requests),
+        "canonical_request_manifest_sha256": canonical_hash(requests),
+        "requests": requests,
+    }
+    return {**payload, "plan_sha256": canonical_hash(payload)}
+
+
 @transaction.atomic
 def create_discovery_plan(payload):
     supplied = dict(payload)
@@ -335,6 +398,8 @@ def begin_discovery_attempt(logical_key):
     )
     if chunk.plan.sealed_at is not None:
         raise DatasetQualityError("registered discovery plans are sealed")
+    if HistoricalDiscoverySupersession.objects.filter(superseded_plan=chunk.plan).exists():
+        raise DatasetQualityError("superseded discovery plans reject new attempts")
     attempts = chunk.attempts.select_related("ingestion_run")
     if attempts.filter(ingestion_run__status=IngestionRun.Status.SUCCEEDED).exists():
         raise DatasetQualityError("successful discovery chunks cannot be retried")
@@ -691,6 +756,14 @@ def _classify_failure(error, chunk):
     if isinstance(error, DiscoveryResponseError):
         return error
     if isinstance(error, OandaError):
+        if error.failure_kind == "limit":
+            return DiscoveryResponseError(
+                "historical discovery provider limit suspected",
+                DiscoveryFailureCode.PROVIDER_LIMIT_SUSPECTED,
+                "response_validation",
+                {"observation_count": 0},
+                _safe_provider_evidence(chunk, error.provider_evidence),
+            )
         code = {
             "auth": DiscoveryFailureCode.PROVIDER_AUTH_ERROR,
             "http": DiscoveryFailureCode.PROVIDER_HTTP_ERROR,
@@ -858,6 +931,8 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
     )
     if plan.sealed_at is not None:
         raise DatasetQualityError("discovery plan is already sealed")
+    if HistoricalDiscoverySupersession.objects.filter(superseded_plan=plan).exists():
+        raise DatasetQualityError("superseded discovery plans cannot be approved")
     approver = get_user_model().objects.select_for_update().get(pk=approver_id)
     if not approver.is_active or not approver.has_perm("market.approve_historical_discovery"):
         raise PermissionDenied("active governed discovery approval permission is required")
@@ -909,3 +984,83 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         cursor.execute("SET CONSTRAINTS ALL DEFERRED")
     plan.sealed_at = now
     return registration
+
+
+@transaction.atomic
+def supersede_discovery_plan(
+    superseded_plan_sha256,
+    replacement_plan_sha256,
+    governing_attempt_id,
+    reason_code=HistoricalDiscoverySupersession.REASON_PROVIDER_REQUEST_BOUND_UNSAFE,
+):
+    plans = {
+        item.sha256: item
+        for item in HistoricalDiscoveryPlan.objects.select_for_update().filter(
+            sha256__in=(superseded_plan_sha256, replacement_plan_sha256)
+        )
+    }
+    if len(plans) != 2:
+        raise DatasetQualityError("supersession requires two distinct discovery plans")
+    superseded_plan = plans[superseded_plan_sha256]
+    replacement_plan = plans[replacement_plan_sha256]
+    attempt = (
+        HistoricalDiscoveryAttempt.objects.select_for_update()
+        .select_related("chunk", "ingestion_run")
+        .get(pk=governing_attempt_id)
+    )
+    run = attempt.ingestion_run
+    evidence = HistoricalDiscoveryProviderEvidence.objects.select_for_update().get(attempt=attempt)
+    event = AuditEvent.objects.select_for_update().get(
+        subject_type="HistoricalDiscoveryAttempt",
+        subject_id=str(attempt.pk),
+        event_type="market.historical_discovery_failed",
+    )
+    try:
+        superseded_version = int(superseded_plan.version.rsplit("v", 1)[1])
+        replacement_version = int(replacement_plan.version.rsplit("v", 1)[1])
+    except (IndexError, ValueError) as error:
+        raise DatasetQualityError("discovery supersession versions are invalid") from error
+    if (
+        reason_code != HistoricalDiscoverySupersession.REASON_PROVIDER_REQUEST_BOUND_UNSAFE
+        or superseded_plan.pk == replacement_plan.pk
+        or superseded_plan.sealed_at is not None
+        or replacement_plan.sealed_at is not None
+        or attempt.chunk.plan_id != superseded_plan.pk
+        or run.status != IngestionRun.Status.FAILED
+        or run.failure_reason
+        not in {
+            DiscoveryFailureCode.PROVIDER_HTTP_ERROR,
+            DiscoveryFailureCode.PROVIDER_LIMIT_SUSPECTED,
+        }
+        or replacement_version <= superseded_version
+        or superseded_plan.payload["discovery_contract"]
+        != replacement_plan.payload["discovery_contract"]
+        or HistoricalDiscoveryAttempt.objects.filter(chunk__plan=replacement_plan).exists()
+    ):
+        raise DatasetQualityError("discovery supersession lineage is invalid")
+    payload = {
+        "identity": "historical-discovery-supersession-v1",
+        "reason_code": reason_code,
+        "superseded_plan_sha256": superseded_plan.sha256,
+        "superseded_request_manifest_sha256": (superseded_plan.canonical_request_manifest_sha256),
+        "replacement_plan_sha256": replacement_plan.sha256,
+        "replacement_request_manifest_sha256": (replacement_plan.canonical_request_manifest_sha256),
+        "governing_attempt_idempotency_key": attempt.idempotency_key,
+        "governing_run_request_manifest_hash": run.request_manifest_hash,
+        "governing_failure_code": run.failure_reason,
+        "governing_terminal_event_sha256": evidence.terminal_event_sha256,
+        "governing_operational_evidence_sha256": evidence.operational_evidence_sha256,
+        "governing_audit_event_sha256": event.payload["event_sha256"],
+    }
+    return HistoricalDiscoverySupersession.objects.create(
+        superseded_plan=superseded_plan,
+        replacement_plan=replacement_plan,
+        governing_attempt=attempt,
+        reason_code=reason_code,
+        superseded_plan_sha256=superseded_plan.sha256,
+        replacement_plan_sha256=replacement_plan.sha256,
+        governing_terminal_event_sha256=evidence.terminal_event_sha256,
+        governing_operational_evidence_sha256=evidence.operational_evidence_sha256,
+        payload=payload,
+        sha256=canonical_hash(payload),
+    )
