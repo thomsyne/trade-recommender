@@ -4,6 +4,7 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from io import StringIO
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -156,6 +157,28 @@ class OfflineDiscoveryPlanTests(SimpleTestCase):
                     for item in series
                 )
             )
+
+    def test_report_command_renders_both_plan_versions_without_database_access(self):
+        for arguments, expected_identity, expected_sha in (
+            ((), "failed-break-phase-2b1r-discovery-plan-v1", None),
+            (
+                ("--plan-version", "v1"),
+                "failed-break-phase-2b1r-discovery-plan-v1",
+                "292556a591024876c7051212d1c6886cd026a097e141295e9b60257fc5402b33",
+            ),
+            (
+                ("--plan-version", "v2"),
+                "failed-break-phase-2b1r-discovery-plan-v2",
+                "2a25bbc28fca5d596b26d3d2921fa881e374174fb08cc1dbfb51e47c8b138e3a",
+            ),
+        ):
+            with self.subTest(arguments=arguments):
+                stdout = StringIO()
+                call_command("report_provider_observed_discovery_plan", *arguments, stdout=stdout)
+                payload = json.loads(stdout.getvalue())
+                self.assertEqual(payload["identity"], expected_identity)
+                if expected_sha is not None:
+                    self.assertEqual(payload["plan_sha256"], expected_sha)
 
     def test_future_contract_fixture_depends_only_on_semantic_inventory(self):
         semantic = "a" * 64
