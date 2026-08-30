@@ -324,7 +324,7 @@ class HistoricalDiscoveryTests(TestCase):
 
         with self.assertRaisesMessage(
             DatasetQualityError,
-            "supersession replacement plans reject attempts until governed activation",
+            "replacement canary activation rejects this attempt",
         ):
             begin_discovery_attempt(chunk.logical_key)
         self.assertFalse(
@@ -1799,7 +1799,7 @@ class DiscoverySupersessionConcurrencyTests(TransactionTestCase):
         self.assert_single_winner(
             self.insert_supersession,
             lambda cursor: self.insert_attempt(cursor, self.replacement_chunk, 1),
-            "supersession replacement plans reject attempts until governed activation",
+            "replacement canary activation rejects this attempt",
         )
         self.assertEqual(HistoricalDiscoverySupersession.objects.count(), 1)
         self.assertFalse(
