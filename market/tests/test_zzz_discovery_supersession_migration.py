@@ -156,6 +156,7 @@ class HistoricalDiscoverySupersessionMigrationTests(TransactionTestCase):
             MigrationExecutor(connection).migrate(self.previous)
 
     def governance_catalog(self):
+        migration = self.migration_module()
         with connection.cursor() as cursor:
             cursor.execute(
                 r"""SELECT p.proname, md5(p.prosrc) FROM pg_proc p
@@ -165,11 +166,15 @@ class HistoricalDiscoverySupersessionMigrationTests(TransactionTestCase):
             )
             functions = cursor.fetchall()
             cursor.execute(
-                """SELECT t.tgname, c.relname FROM pg_trigger t
-                   JOIN pg_class c ON c.oid = t.tgrelid
-                   WHERE NOT t.tgisinternal ORDER BY t.tgname, c.relname"""
+                migration.FUNCTION_FINGERPRINT_SQL, [list(migration.PREFLIGHT_FUNCTIONS)]
             )
-            return {"functions": functions, "triggers": cursor.fetchall()}
+            required_functions = sorted(cursor.fetchall())
+            cursor.execute(migration.TRIGGER_FINGERPRINT_SQL)
+            return {
+                "functions": functions,
+                "required_functions": required_functions,
+                "triggers": sorted(cursor.fetchall()),
+            }
 
     def assert_no_supersession_objects(self):
         migration = self.migration_module()
@@ -275,18 +280,139 @@ class HistoricalDiscoverySupersessionMigrationTests(TransactionTestCase):
         migration = self.migration_module()
         with connection.cursor() as cursor:
             cursor.execute(
-                """SELECT p.proname, md5(p.prosrc) FROM pg_proc p
-                   JOIN pg_namespace n ON n.oid = p.pronamespace
-                   WHERE n.nspname = current_schema() AND p.proname = ANY(%s)""",
-                [list(migration.PREFLIGHT_FUNCTIONS)],
+                migration.FUNCTION_FINGERPRINT_SQL, [list(migration.PREFLIGHT_FUNCTIONS)]
             )
-            self.assertEqual(dict(cursor.fetchall()), migration.PREFLIGHT_FUNCTIONS)
+            rows = cursor.fetchall()
+            self.assertEqual(len(rows), len(migration.PREFLIGHT_FUNCTIONS))
+            live_functions = {
+                name: (arguments, fingerprint) for name, arguments, fingerprint in rows
+            }
+            self.assertEqual(live_functions, dict(migration.PREFLIGHT_FUNCTIONS))
+            cursor.execute(migration.TRIGGER_FINGERPRINT_SQL)
+            live_triggers = {
+                (table, name): fingerprint for table, name, fingerprint in cursor.fetchall()
+            }
+        for key, expected in sorted(migration.PREFLIGHT_TRIGGERS.items()):
+            self.assertEqual(live_triggers.get(key), expected, key)
+
+    def restore_trigger(self, name, table, definition):
+        with connection.cursor() as cursor:
+            cursor.execute(f"DROP TRIGGER IF EXISTS {name} ON {table}")
+            cursor.execute(definition)
+
+    def assert_preflight_rejects_and_leaves_catalog_intact(self, message):
+        snapshot = self.governance_catalog()
+        with self.assertRaisesMessage(RuntimeError, message):
+            MigrationExecutor(connection).migrate(self.current)
+        self.assertEqual(self.governance_catalog(), snapshot)
+        self.assert_no_supersession_objects()
+
+    def test_preflight_rejects_trigger_calling_wrong_function(self):
+        MigrationExecutor(connection).migrate(self.previous)
+        with connection.cursor() as cursor:
             cursor.execute(
-                """SELECT t.tgname, c.relname FROM pg_trigger t
-                   JOIN pg_class c ON c.oid = t.tgrelid WHERE NOT t.tgisinternal"""
+                """SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t
+                   JOIN pg_class c ON c.oid = t.tgrelid
+                   WHERE t.tgname = 'market_discovery_audit_no_truncate'
+                     AND c.relname = 'market_auditevent'"""
             )
-            live_triggers = set(cursor.fetchall())
-        self.assertEqual(
-            set(migration.PREFLIGHT_TRIGGERS) - live_triggers,
-            set(),
+            original = cursor.fetchone()[0]
+            cursor.execute("DROP TRIGGER market_discovery_audit_no_truncate ON market_auditevent")
+            cursor.execute(
+                """CREATE TRIGGER market_discovery_audit_no_truncate
+                   BEFORE TRUNCATE ON market_auditevent FOR EACH STATEMENT
+                   EXECUTE FUNCTION market_discovery_reject_truncate()"""
+            )
+        try:
+            self.assert_preflight_rejects_and_leaves_catalog_intact(
+                "required trigger market_discovery_audit_no_truncate"
+                " on market_auditevent does not match its 0013 definition"
+            )
+        finally:
+            self.restore_trigger(
+                "market_discovery_audit_no_truncate", "market_auditevent", original
+            )
+        MigrationExecutor(connection).migrate(self.current)
+
+    def test_preflight_rejects_trigger_with_altered_behavior(self):
+        MigrationExecutor(connection).migrate(self.previous)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t
+                   JOIN pg_class c ON c.oid = t.tgrelid
+                   WHERE t.tgname = 'market_discovery_audit_immutable'
+                     AND c.relname = 'market_auditevent'"""
+            )
+            original = cursor.fetchone()[0]
+        cases = (
+            (
+                "narrowed-events",
+                (
+                    "DROP TRIGGER market_discovery_audit_immutable ON market_auditevent",
+                    """CREATE TRIGGER market_discovery_audit_immutable
+                       BEFORE UPDATE ON market_auditevent FOR EACH ROW
+                       EXECUTE FUNCTION market_discovery_audit_reject_mutation()""",
+                ),
+            ),
+            (
+                "statement-level",
+                (
+                    "DROP TRIGGER market_discovery_audit_immutable ON market_auditevent",
+                    """CREATE TRIGGER market_discovery_audit_immutable
+                       BEFORE UPDATE OR DELETE ON market_auditevent FOR EACH STATEMENT
+                       EXECUTE FUNCTION market_discovery_audit_reject_mutation()""",
+                ),
+            ),
+            (
+                "disabled",
+                ("ALTER TABLE market_auditevent DISABLE TRIGGER market_discovery_audit_immutable",),
+            ),
         )
+        for label, tamper_statements in cases:
+            with self.subTest(case=label):
+                with connection.cursor() as cursor:
+                    for statement in tamper_statements:
+                        cursor.execute(statement)
+                try:
+                    self.assert_preflight_rejects_and_leaves_catalog_intact(
+                        "required trigger market_discovery_audit_immutable"
+                        " on market_auditevent does not match its 0013 definition"
+                    )
+                finally:
+                    self.restore_trigger(
+                        "market_discovery_audit_immutable", "market_auditevent", original
+                    )
+        MigrationExecutor(connection).migrate(self.current)
+
+    def test_preflight_rejects_function_metadata_changes_with_same_body(self):
+        MigrationExecutor(connection).migrate(self.previous)
+        cases = (
+            (
+                "security-definer",
+                "market_discovery_reject_mutation",
+                "ALTER FUNCTION market_discovery_reject_mutation() SECURITY DEFINER",
+                "ALTER FUNCTION market_discovery_reject_mutation() SECURITY INVOKER",
+            ),
+            (
+                "volatility",
+                "market_sha256",
+                "ALTER FUNCTION market_sha256(value jsonb) VOLATILE",
+                "ALTER FUNCTION market_sha256(value jsonb) IMMUTABLE",
+            ),
+        )
+        for label, name, tamper, restore in cases:
+            with self.subTest(case=label):
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT md5(prosrc) FROM pg_proc WHERE proname = %s", [name])
+                    body_before = cursor.fetchone()[0]
+                    cursor.execute(tamper)
+                    cursor.execute("SELECT md5(prosrc) FROM pg_proc WHERE proname = %s", [name])
+                    self.assertEqual(cursor.fetchone()[0], body_before)
+                try:
+                    self.assert_preflight_rejects_and_leaves_catalog_intact(
+                        f"required function {name} does not match its 0013 definition"
+                    )
+                finally:
+                    with connection.cursor() as cursor:
+                        cursor.execute(restore)
+        MigrationExecutor(connection).migrate(self.current)

@@ -17,82 +17,199 @@ PREFLIGHT_TABLES = (
     "market_instrument",
     "market_sourceregistry",
 )
-# md5(pg_proc.prosrc) of every governance function migration 0014 depends on,
-# captured from a catalog migrated exactly through 0013. prosrc stores the
-# dollar-quoted body verbatim, so these values are PostgreSQL-version stable.
+# Portable fingerprints of every 0013 governance object migration 0014
+# depends on, captured from a catalog migrated exactly through 0013.
+# Functions are fingerprinted over schema, name, identity arguments, return
+# type, language, volatility, strictness, security-definer, leakproof,
+# parallel safety, configuration (e.g. search_path), and the verbatim
+# dollar-quoted body; triggers over schema, table, name, enabled state,
+# timing/events/level (tgtype), called function schema, name and identity
+# arguments, trigger arguments, constraint/deferrable/initially-deferred
+# properties, any WHEN expression, and the reconstructed definition. Both
+# representations are catalog-derived and OID/primary-key independent.
+FUNCTION_FINGERPRINT_SQL = """
+    SELECT p.proname,
+           pg_get_function_identity_arguments(p.oid),
+           md5(jsonb_build_object(
+             'schema', n.nspname,
+             'name', p.proname,
+             'identity_arguments', pg_get_function_identity_arguments(p.oid),
+             'return_type', pg_catalog.format_type(p.prorettype, NULL),
+             'language', l.lanname,
+             'volatility', p.provolatile::text,
+             'strict', p.proisstrict,
+             'security_definer', p.prosecdef,
+             'leakproof', p.proleakproof,
+             'parallel', p.proparallel::text,
+             'config', to_jsonb(p.proconfig),
+             'source', p.prosrc,
+             'bin', p.probin)::text)
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      JOIN pg_language l ON l.oid = p.prolang
+     WHERE n.nspname = current_schema() AND p.proname = ANY(%s)
+"""
+TRIGGER_FINGERPRINT_SQL = """
+    SELECT c.relname,
+           t.tgname,
+           md5(jsonb_build_object(
+             'schema', n.nspname,
+             'table', c.relname,
+             'name', t.tgname,
+             'enabled', t.tgenabled::text,
+             'type', t.tgtype::int,
+             'function_schema', pn.nspname,
+             'function_name', p.proname,
+             'function_identity_arguments', pg_get_function_identity_arguments(t.tgfoid),
+             'arguments', encode(t.tgargs, 'hex'),
+             'is_constraint', t.tgconstraint <> 0,
+             'deferrable', t.tgdeferrable,
+             'initially_deferred', t.tginitdeferred,
+             'when', pg_get_expr(t.tgqual, t.tgrelid),
+             'definition', pg_get_triggerdef(t.oid))::text)
+      FROM pg_trigger t
+      JOIN pg_class c ON c.oid = t.tgrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_proc p ON p.oid = t.tgfoid
+      JOIN pg_namespace pn ON pn.oid = p.pronamespace
+     WHERE NOT t.tgisinternal AND n.nspname = current_schema()
+"""
 PREFLIGHT_FUNCTIONS = {
-    "market_canonical_json": "e24510e2dd5b5465b0ae07aa8a90d985",
-    "market_discovery_audit_reject_mutation": "f0f3c960291b7dcfaf465056dc3894a7",
-    "market_discovery_audit_reject_truncate": "94f9fc7f4dcc59e4b1414a8562c572b9",
-    "market_discovery_operational_timestamp": "b961d332514ab6d49cf01a3c6bb82d58",
-    "market_discovery_reject_mutation": "c1787d7ad1f6dbb0d7cef179663e5343",
-    "market_discovery_reject_sealed_insert": "fedf6a4051801406242b8796ac67aa70",
-    "market_discovery_reject_truncate": "42b64f019071b3935e618060c9b8f38e",
-    "market_discovery_timestamp": "f50e7d405e5aafa58e498726dc002532",
-    "market_sha256": "3a88ffe577d4388b0617670064ec84f2",
-    "market_validate_discovery_attempt": "da6b5b5e376f827a239afae9e5426875",
-    "market_validate_discovery_audit_insert": "3db14cc7ffbab0ccdf574b77eddc57db",
-    "market_validate_discovery_chunk": "18f0003f52549ef2b94fcb28556f8cca",
-    "market_validate_discovery_inventory_deferred": "47ee0ece0931d64856ff121a56ea0c5a",
-    "market_validate_discovery_observation": "fe53baf1d0ea8851f27ee0f42f1c234b",
-    "market_validate_discovery_plan": "e3f9d1be649fb5268160b57d381e7cbc",
-    "market_validate_discovery_provider_evidence": "10f68501a5e6d96d38298691d483e666",
-    "market_validate_discovery_seal_deferred": "1b89e8783beadd304bbe26bb2f3225a8",
-    "market_validate_discovery_terminal_run": "30838c76d6cdc00a1e15cb200d1f756c",
+    "market_canonical_json": ("value jsonb", "aa43ea03a68b240dfcda6e2404c500a6"),
+    "market_discovery_audit_reject_mutation": ("", "d91bbb0f631c2f39f8bcb229e16cd656"),
+    "market_discovery_audit_reject_truncate": ("", "b5b0de2bd49976d91725d85295861ad3"),
+    "market_discovery_operational_timestamp": (
+        "value timestamp with time zone",
+        "0ade13a9b0800de89465ec203f3a6f45",
+    ),
+    "market_discovery_reject_mutation": ("", "92d96335c5a444cfdb531c1423310a80"),
+    "market_discovery_reject_sealed_insert": ("", "1c07d17226742eb2e6822f3d37052d47"),
+    "market_discovery_reject_truncate": ("", "967b6921befcaf664b08f7456f5dc27d"),
+    "market_discovery_timestamp": (
+        "value timestamp with time zone",
+        "b7dafb1af452f2c208f4b0c2c2ef4dc3",
+    ),
+    "market_sha256": ("value jsonb", "96fd2a64d0e7a49328292c13b3708d98"),
+    "market_validate_discovery_attempt": ("", "a885693dcb97e6346ce49f9d909440fe"),
+    "market_validate_discovery_audit_insert": ("", "5639f8ad20d97c0623649dc2fd7d2f51"),
+    "market_validate_discovery_chunk": ("", "c52d97167722c8845958b7b2169638f1"),
+    "market_validate_discovery_inventory_deferred": ("", "cbabdd794c4287fbe37d9562bd201ded"),
+    "market_validate_discovery_observation": ("", "6a15143e3819769cce91d0bfcc2e8842"),
+    "market_validate_discovery_plan": ("", "a27d41213e8b79e8d42c298561df8baf"),
+    "market_validate_discovery_provider_evidence": ("", "3ada738511255b66c867407858155038"),
+    "market_validate_discovery_seal_deferred": ("", "c06d697d25a9884c226938876708d2fe"),
+    "market_validate_discovery_terminal_run": ("", "ebbd7291f5f12c7f01f98fe29d01e5f3"),
 }
-PREFLIGHT_TRIGGERS = (
-    ("market_discovery_plan_validate", "market_historicaldiscoveryplan"),
-    ("market_discovery_chunk_validate", "market_historicaldiscoverychunk"),
-    ("market_discovery_attempt_validate", "market_historicaldiscoveryattempt"),
-    ("market_discovery_observation_validate", "market_historicaltimestampobservation"),
-    ("market_discovery_provider_unsealed", "market_historicaldiscoveryproviderevidence"),
-    ("market_discovery_provider_validate", "market_historicaldiscoveryproviderevidence"),
-    ("market_discovery_inventory_unsealed", "market_historicaltimestampinventory"),
-    ("market_discovery_inventory_reconstruct", "market_historicaltimestampinventory"),
-    ("market_discovery_audit_validate", "market_auditevent"),
-    ("market_discovery_audit_immutable", "market_auditevent"),
-    ("market_discovery_audit_no_truncate", "market_auditevent"),
-    ("market_discovery_run_terminal", "market_ingestionrun"),
-    ("market_discovery_approval_atomic", "market_historicaldiscoveryapproval"),
-    ("market_discovery_registration_atomic", "market_historicaldiscoveryregistration"),
-    ("market_discovery_plan_seal_atomic", "market_historicaldiscoveryplan"),
+PREFLIGHT_TRIGGERS = {
+    ("market_auditevent", "market_discovery_audit_immutable"): "9e04e08b33ba7fdba47075343422c7f6",
+    ("market_auditevent", "market_discovery_audit_no_truncate"): "77f26dd2ac3edc1df5eac1117ec9c4b8",
+    ("market_auditevent", "market_discovery_audit_validate"): "40a061306928fdc23f5018034229acd1",
     (
-        "market_historicaldiscoveryregistration_append_only",
-        "market_historicaldiscoveryregistration",
-    ),
-    ("market_historicaldiscoveryapproval_append_only", "market_historicaldiscoveryapproval"),
+        "market_historicaldiscoveryapproval",
+        "market_discovery_approval_atomic",
+    ): "aa290706f7435a1c60abc57b355b24d2",
     (
+        "market_historicaldiscoveryapproval",
+        "market_historicaldiscoveryapproval_append_only",
+    ): "c844ea8660aaed503566ac1066d27451",
+    (
+        "market_historicaldiscoveryapproval",
+        "market_historicaldiscoveryapproval_reject_truncate",
+    ): "cbce844045cd2e796a1d3c535d169db3",
+    (
+        "market_historicaldiscoveryattempt",
+        "market_discovery_attempt_validate",
+    ): "b39fdfb53ad1ac0e994277bfd87babae",
+    (
+        "market_historicaldiscoveryattempt",
+        "market_historicaldiscoveryattempt_append_only",
+    ): "6d93c191daa3ecf9f79a881bc0e6006f",
+    (
+        "market_historicaldiscoveryattempt",
+        "market_historicaldiscoveryattempt_reject_truncate",
+    ): "60c90b63ad51933c70e16503fbc32fac",
+    (
+        "market_historicaldiscoverychunk",
+        "market_discovery_chunk_validate",
+    ): "cd35f1ca6dd08175600f9cd8c5f6777c",
+    (
+        "market_historicaldiscoverychunk",
+        "market_historicaldiscoverychunk_append_only",
+    ): "4264f1f4413d8487d8c596f6d3b0bb3a",
+    (
+        "market_historicaldiscoverychunk",
+        "market_historicaldiscoverychunk_reject_truncate",
+    ): "20ee8e7b7426b227457766e6f6e7f421",
+    (
+        "market_historicaldiscoveryplan",
+        "market_discovery_plan_seal_atomic",
+    ): "c0d17766fdbcfc98a1c31858dd2df34f",
+    (
+        "market_historicaldiscoveryplan",
+        "market_discovery_plan_validate",
+    ): "142452d82dba67fa68c732da48bd8550",
+    (
+        "market_historicaldiscoveryplan",
+        "market_historicaldiscoveryplan_reject_truncate",
+    ): "fad12baa827374a0a994e58afa04bc9c",
+    (
+        "market_historicaldiscoveryproviderevidence",
+        "market_discovery_provider_unsealed",
+    ): "d088edbcea3a3308aec0af84ff7ae080",
+    (
+        "market_historicaldiscoveryproviderevidence",
+        "market_discovery_provider_validate",
+    ): "4feaf0411d227ac5cb3bd5215fbd4135",
+    (
+        "market_historicaldiscoveryproviderevidence",
         "market_historicaldiscoveryproviderevidence_append_only",
+    ): "91f3aa96d07ec0f7c7f45034c190d506",
+    (
         "market_historicaldiscoveryproviderevidence",
-    ),
-    (
-        "market_historicaltimestampobservation_append_only",
-        "market_historicaltimestampobservation",
-    ),
-    ("market_historicaltimestampinventory_append_only", "market_historicaltimestampinventory"),
-    ("market_historicaldiscoveryattempt_append_only", "market_historicaldiscoveryattempt"),
-    ("market_historicaldiscoverychunk_append_only", "market_historicaldiscoverychunk"),
-    (
-        "market_historicaldiscoveryregistration_reject_truncate",
-        "market_historicaldiscoveryregistration",
-    ),
-    ("market_historicaldiscoveryapproval_reject_truncate", "market_historicaldiscoveryapproval"),
-    (
         "market_historicaldiscoveryproviderevidence_reject_truncate",
-        "market_historicaldiscoveryproviderevidence",
-    ),
+    ): "c545e154ea88a46e9600cb2e2cd733c7",
     (
-        "market_historicaltimestampobservation_reject_truncate",
-        "market_historicaltimestampobservation",
-    ),
+        "market_historicaldiscoveryregistration",
+        "market_discovery_registration_atomic",
+    ): "3d6b0ab734c4b8a716fd9a55b909d5ff",
     (
-        "market_historicaltimestampinventory_reject_truncate",
+        "market_historicaldiscoveryregistration",
+        "market_historicaldiscoveryregistration_append_only",
+    ): "1b9c446f62b746f9e929a0d8be33c8a2",
+    (
+        "market_historicaldiscoveryregistration",
+        "market_historicaldiscoveryregistration_reject_truncate",
+    ): "c339f3d78175624df4a00895883ab9d9",
+    (
         "market_historicaltimestampinventory",
-    ),
-    ("market_historicaldiscoveryattempt_reject_truncate", "market_historicaldiscoveryattempt"),
-    ("market_historicaldiscoverychunk_reject_truncate", "market_historicaldiscoverychunk"),
-    ("market_historicaldiscoveryplan_reject_truncate", "market_historicaldiscoveryplan"),
-)
+        "market_discovery_inventory_reconstruct",
+    ): "f15462f1f8ece8355c6699322eb09597",
+    (
+        "market_historicaltimestampinventory",
+        "market_discovery_inventory_unsealed",
+    ): "4f61e6b1ea7fc23a424477274bdf3f22",
+    (
+        "market_historicaltimestampinventory",
+        "market_historicaltimestampinventory_append_only",
+    ): "bacde001af1e6692466b8e1973ea9a2c",
+    (
+        "market_historicaltimestampinventory",
+        "market_historicaltimestampinventory_reject_truncate",
+    ): "5c2ff39e5ecac7cdae01ac48d0575314",
+    (
+        "market_historicaltimestampobservation",
+        "market_discovery_observation_validate",
+    ): "ab51c3031892cd203d5220471d9ee406",
+    (
+        "market_historicaltimestampobservation",
+        "market_historicaltimestampobservation_append_only",
+    ): "ec5596e660660931a76ba1a196a5541f",
+    (
+        "market_historicaltimestampobservation",
+        "market_historicaltimestampobservation_reject_truncate",
+    ): "b03d451c0a747265dbde35ca70f9d959",
+    ("market_ingestionrun", "market_discovery_run_terminal"): "f7fac0b7a1b393de30461d5dfc89c978",
+}
 SUPERSESSION_TABLE = "market_historicaldiscoverysupersession"
 SUPERSESSION_FUNCTIONS = (
     "market_discovery_plan_xact_lock",
@@ -122,27 +239,33 @@ def preflight_supersession_governance(apps, schema_editor):
             cursor.execute("SELECT to_regclass(%s)", [table])
             if cursor.fetchone()[0] is None:
                 problems.append(f"required table {table} is missing")
-        cursor.execute(
-            """SELECT p.proname, md5(p.prosrc) FROM pg_proc p
-               JOIN pg_namespace n ON n.oid = p.pronamespace
-               WHERE n.nspname = current_schema() AND p.proname = ANY(%s)""",
-            [list(PREFLIGHT_FUNCTIONS)],
-        )
-        found = dict(cursor.fetchall())
+        cursor.execute(FUNCTION_FINGERPRINT_SQL, [list(PREFLIGHT_FUNCTIONS)])
+        found_functions = {}
+        for name, identity_arguments, fingerprint in cursor.fetchall():
+            found_functions.setdefault(name, []).append((identity_arguments, fingerprint))
         for name, expected in sorted(PREFLIGHT_FUNCTIONS.items()):
-            if name not in found:
+            candidates = found_functions.get(name, [])
+            if not candidates:
                 problems.append(f"required function {name} is missing")
-            elif found[name] != expected:
+            elif len(candidates) > 1:
+                problems.append(f"required function {name} has ambiguous overloads")
+            elif candidates[0] != tuple(expected):
                 problems.append(f"required function {name} does not match its 0013 definition")
-        cursor.execute(
-            """SELECT t.tgname, c.relname FROM pg_trigger t
-               JOIN pg_class c ON c.oid = t.tgrelid WHERE NOT t.tgisinternal"""
-        )
-        triggers = set(cursor.fetchall())
-        trigger_names = {name for name, _ in triggers}
-        for name, table in PREFLIGHT_TRIGGERS:
-            if (name, table) not in triggers:
+        cursor.execute(TRIGGER_FINGERPRINT_SQL)
+        found_triggers = {}
+        for table, name, fingerprint in cursor.fetchall():
+            found_triggers.setdefault((table, name), []).append(fingerprint)
+        trigger_names = {name for _, name in found_triggers}
+        for (table, name), expected in sorted(PREFLIGHT_TRIGGERS.items()):
+            candidates = found_triggers.get((table, name), [])
+            if not candidates:
                 problems.append(f"required trigger {name} on {table} is missing")
+            elif len(candidates) > 1:
+                problems.append(f"required trigger {name} on {table} is ambiguous")
+            elif candidates[0] != expected:
+                problems.append(
+                    f"required trigger {name} on {table} does not match its 0013 definition"
+                )
         cursor.execute("SELECT to_regclass(%s)", [SUPERSESSION_TABLE])
         if cursor.fetchone()[0] is not None:
             problems.append(f"unexpected pre-existing table {SUPERSESSION_TABLE}")
