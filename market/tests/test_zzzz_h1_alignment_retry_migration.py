@@ -4,11 +4,10 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
-from market.historical_discovery import CANARY_V2_LOGICAL_KEY, run_discovery_chunk
 from market.tests.test_replacement_canary_activation import (
-    SucceedingCanaryClient,
     attempt_one_hash,
     build_retry_ready_state,
+    record_attempt_two_success,
     seed_governed_market,
     state_hashes,
 )
@@ -24,13 +23,14 @@ REPLACED_FUNCTIONS = (
 class H1AlignmentRetryMigrationTests(TransactionTestCase):
     current = [("market", "0016_provider_observed_h1_alignment_retry")]
     previous = [("market", "0015_provider_observed_canary_activation")]
+    latest = [("market", "0017_provider_observed_full_discovery_activation")]
 
     def setUp(self):
         super().setUp()
         MigrationExecutor(connection).migrate(self.current)
 
     def tearDown(self):
-        MigrationExecutor(connection).migrate(self.current)
+        MigrationExecutor(connection).migrate(self.latest)
         super().tearDown()
 
     def migration_module(self):
@@ -156,12 +156,7 @@ class H1AlignmentRetryMigrationTests(TransactionTestCase):
         source = seed_governed_market("h1 retry migration reversal guard")
         _, replacement, _, _ = build_retry_ready_state(source)
         MigrationExecutor(connection).migrate(self.current)
-        canary = replacement.chunks.select_related("instrument").get(
-            logical_key=CANARY_V2_LOGICAL_KEY
-        )
-        attempt = run_discovery_chunk(
-            CANARY_V2_LOGICAL_KEY, SucceedingCanaryClient(canary.canonical_request_sha256)
-        )
+        attempt = record_attempt_two_success(source, replacement)
         self.assertEqual(attempt.attempt_number, 2)
 
         with self.assertRaisesMessage(
