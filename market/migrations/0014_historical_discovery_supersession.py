@@ -3,6 +3,165 @@
 import django.db.models.deletion
 from django.db import migrations, models
 
+PREFLIGHT_TABLES = (
+    "market_historicaldiscoveryplan",
+    "market_historicaldiscoverychunk",
+    "market_historicaldiscoveryattempt",
+    "market_historicaldiscoveryproviderevidence",
+    "market_historicaldiscoveryapproval",
+    "market_historicaldiscoveryregistration",
+    "market_historicaltimestampinventory",
+    "market_historicaltimestampobservation",
+    "market_auditevent",
+    "market_ingestionrun",
+    "market_instrument",
+    "market_sourceregistry",
+)
+# md5(pg_proc.prosrc) of every governance function migration 0014 depends on,
+# captured from a catalog migrated exactly through 0013. prosrc stores the
+# dollar-quoted body verbatim, so these values are PostgreSQL-version stable.
+PREFLIGHT_FUNCTIONS = {
+    "market_canonical_json": "e24510e2dd5b5465b0ae07aa8a90d985",
+    "market_discovery_audit_reject_mutation": "f0f3c960291b7dcfaf465056dc3894a7",
+    "market_discovery_audit_reject_truncate": "94f9fc7f4dcc59e4b1414a8562c572b9",
+    "market_discovery_operational_timestamp": "b961d332514ab6d49cf01a3c6bb82d58",
+    "market_discovery_reject_mutation": "c1787d7ad1f6dbb0d7cef179663e5343",
+    "market_discovery_reject_sealed_insert": "fedf6a4051801406242b8796ac67aa70",
+    "market_discovery_reject_truncate": "42b64f019071b3935e618060c9b8f38e",
+    "market_discovery_timestamp": "f50e7d405e5aafa58e498726dc002532",
+    "market_sha256": "3a88ffe577d4388b0617670064ec84f2",
+    "market_validate_discovery_attempt": "da6b5b5e376f827a239afae9e5426875",
+    "market_validate_discovery_audit_insert": "3db14cc7ffbab0ccdf574b77eddc57db",
+    "market_validate_discovery_chunk": "18f0003f52549ef2b94fcb28556f8cca",
+    "market_validate_discovery_inventory_deferred": "47ee0ece0931d64856ff121a56ea0c5a",
+    "market_validate_discovery_observation": "fe53baf1d0ea8851f27ee0f42f1c234b",
+    "market_validate_discovery_plan": "e3f9d1be649fb5268160b57d381e7cbc",
+    "market_validate_discovery_provider_evidence": "10f68501a5e6d96d38298691d483e666",
+    "market_validate_discovery_seal_deferred": "1b89e8783beadd304bbe26bb2f3225a8",
+    "market_validate_discovery_terminal_run": "30838c76d6cdc00a1e15cb200d1f756c",
+}
+PREFLIGHT_TRIGGERS = (
+    ("market_discovery_plan_validate", "market_historicaldiscoveryplan"),
+    ("market_discovery_chunk_validate", "market_historicaldiscoverychunk"),
+    ("market_discovery_attempt_validate", "market_historicaldiscoveryattempt"),
+    ("market_discovery_observation_validate", "market_historicaltimestampobservation"),
+    ("market_discovery_provider_unsealed", "market_historicaldiscoveryproviderevidence"),
+    ("market_discovery_provider_validate", "market_historicaldiscoveryproviderevidence"),
+    ("market_discovery_inventory_unsealed", "market_historicaltimestampinventory"),
+    ("market_discovery_inventory_reconstruct", "market_historicaltimestampinventory"),
+    ("market_discovery_audit_validate", "market_auditevent"),
+    ("market_discovery_audit_immutable", "market_auditevent"),
+    ("market_discovery_audit_no_truncate", "market_auditevent"),
+    ("market_discovery_run_terminal", "market_ingestionrun"),
+    ("market_discovery_approval_atomic", "market_historicaldiscoveryapproval"),
+    ("market_discovery_registration_atomic", "market_historicaldiscoveryregistration"),
+    ("market_discovery_plan_seal_atomic", "market_historicaldiscoveryplan"),
+    (
+        "market_historicaldiscoveryregistration_append_only",
+        "market_historicaldiscoveryregistration",
+    ),
+    ("market_historicaldiscoveryapproval_append_only", "market_historicaldiscoveryapproval"),
+    (
+        "market_historicaldiscoveryproviderevidence_append_only",
+        "market_historicaldiscoveryproviderevidence",
+    ),
+    (
+        "market_historicaltimestampobservation_append_only",
+        "market_historicaltimestampobservation",
+    ),
+    ("market_historicaltimestampinventory_append_only", "market_historicaltimestampinventory"),
+    ("market_historicaldiscoveryattempt_append_only", "market_historicaldiscoveryattempt"),
+    ("market_historicaldiscoverychunk_append_only", "market_historicaldiscoverychunk"),
+    (
+        "market_historicaldiscoveryregistration_reject_truncate",
+        "market_historicaldiscoveryregistration",
+    ),
+    ("market_historicaldiscoveryapproval_reject_truncate", "market_historicaldiscoveryapproval"),
+    (
+        "market_historicaldiscoveryproviderevidence_reject_truncate",
+        "market_historicaldiscoveryproviderevidence",
+    ),
+    (
+        "market_historicaltimestampobservation_reject_truncate",
+        "market_historicaltimestampobservation",
+    ),
+    (
+        "market_historicaltimestampinventory_reject_truncate",
+        "market_historicaltimestampinventory",
+    ),
+    ("market_historicaldiscoveryattempt_reject_truncate", "market_historicaldiscoveryattempt"),
+    ("market_historicaldiscoverychunk_reject_truncate", "market_historicaldiscoverychunk"),
+    ("market_historicaldiscoveryplan_reject_truncate", "market_historicaldiscoveryplan"),
+)
+SUPERSESSION_TABLE = "market_historicaldiscoverysupersession"
+SUPERSESSION_FUNCTIONS = (
+    "market_discovery_plan_xact_lock",
+    "market_validate_discovery_supersession",
+    "market_reject_superseded_discovery_write",
+    "market_discovery_supersession_reject_mutation",
+    "market_discovery_supersession_reject_truncate",
+)
+SUPERSESSION_TRIGGERS = (
+    "market_discovery_supersession_validate",
+    "market_discovery_supersession_immutable",
+    "market_discovery_supersession_no_truncate",
+    "market_discovery_00_superseded_plan",
+    "market_discovery_00_superseded_chunk",
+    "market_discovery_00_superseded_attempt",
+    "market_discovery_00_superseded_approval",
+    "market_discovery_00_superseded_registration",
+)
+
+
+def preflight_supersession_governance(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+    problems = []
+    with schema_editor.connection.cursor() as cursor:
+        for table in PREFLIGHT_TABLES:
+            cursor.execute("SELECT to_regclass(%s)", [table])
+            if cursor.fetchone()[0] is None:
+                problems.append(f"required table {table} is missing")
+        cursor.execute(
+            """SELECT p.proname, md5(p.prosrc) FROM pg_proc p
+               JOIN pg_namespace n ON n.oid = p.pronamespace
+               WHERE n.nspname = current_schema() AND p.proname = ANY(%s)""",
+            [list(PREFLIGHT_FUNCTIONS)],
+        )
+        found = dict(cursor.fetchall())
+        for name, expected in sorted(PREFLIGHT_FUNCTIONS.items()):
+            if name not in found:
+                problems.append(f"required function {name} is missing")
+            elif found[name] != expected:
+                problems.append(f"required function {name} does not match its 0013 definition")
+        cursor.execute(
+            """SELECT t.tgname, c.relname FROM pg_trigger t
+               JOIN pg_class c ON c.oid = t.tgrelid WHERE NOT t.tgisinternal"""
+        )
+        triggers = set(cursor.fetchall())
+        trigger_names = {name for name, _ in triggers}
+        for name, table in PREFLIGHT_TRIGGERS:
+            if (name, table) not in triggers:
+                problems.append(f"required trigger {name} on {table} is missing")
+        cursor.execute("SELECT to_regclass(%s)", [SUPERSESSION_TABLE])
+        if cursor.fetchone()[0] is not None:
+            problems.append(f"unexpected pre-existing table {SUPERSESSION_TABLE}")
+        cursor.execute(
+            """SELECT p.proname FROM pg_proc p
+               JOIN pg_namespace n ON n.oid = p.pronamespace
+               WHERE n.nspname = current_schema() AND p.proname = ANY(%s)""",
+            [list(SUPERSESSION_FUNCTIONS)],
+        )
+        for (name,) in cursor.fetchall():
+            problems.append(f"unexpected pre-existing supersession function {name}")
+        for name in SUPERSESSION_TRIGGERS:
+            if name in trigger_names:
+                problems.append(f"unexpected pre-existing supersession trigger {name}")
+    if problems:
+        raise RuntimeError(
+            "migration 0014 preflight rejected the current catalog: " + "; ".join(problems)
+        )
+
 
 def install_supersession_governance(apps, schema_editor):
     if schema_editor.connection.vendor != "postgresql":
@@ -293,6 +452,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.RunPython(preflight_supersession_governance, migrations.RunPython.noop),
         migrations.CreateModel(
             name="HistoricalDiscoverySupersession",
             fields=[

@@ -154,3 +154,139 @@ class HistoricalDiscoverySupersessionMigrationTests(TransactionTestCase):
             "historical discovery supersession evidence prohibits migration reversal",
         ):
             MigrationExecutor(connection).migrate(self.previous)
+
+    def governance_catalog(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                r"""SELECT p.proname, md5(p.prosrc) FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE n.nspname = current_schema() AND p.proname LIKE 'market\_%'
+                    ORDER BY p.proname"""
+            )
+            functions = cursor.fetchall()
+            cursor.execute(
+                """SELECT t.tgname, c.relname FROM pg_trigger t
+                   JOIN pg_class c ON c.oid = t.tgrelid
+                   WHERE NOT t.tgisinternal ORDER BY t.tgname, c.relname"""
+            )
+            return {"functions": functions, "triggers": cursor.fetchall()}
+
+    def assert_no_supersession_objects(self):
+        migration = self.migration_module()
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass(%s)", [migration.SUPERSESSION_TABLE])
+            self.assertIsNone(cursor.fetchone()[0])
+            cursor.execute(
+                """SELECT count(*) FROM pg_proc p
+                   JOIN pg_namespace n ON n.oid = p.pronamespace
+                   WHERE n.nspname = current_schema() AND p.proname = ANY(%s)""",
+                [list(migration.SUPERSESSION_FUNCTIONS)],
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+            cursor.execute(
+                """SELECT count(*) FROM pg_trigger t WHERE NOT t.tgisinternal
+                   AND t.tgname = ANY(%s)""",
+                [list(migration.SUPERSESSION_TRIGGERS)],
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+
+    def migration_module(self):
+        return __import__(
+            "market.migrations.0014_historical_discovery_supersession",
+            fromlist=["Migration"],
+        )
+
+    def test_preflight_rejects_partial_prior_installation(self):
+        MigrationExecutor(connection).migrate(self.previous)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """CREATE FUNCTION market_validate_discovery_supersession()
+                   RETURNS trigger AS $$BEGIN RETURN NEW; END$$ LANGUAGE plpgsql"""
+            )
+        snapshot = self.governance_catalog()
+        try:
+            with self.assertRaisesMessage(
+                RuntimeError,
+                "unexpected pre-existing supersession function"
+                " market_validate_discovery_supersession",
+            ):
+                MigrationExecutor(connection).migrate(self.current)
+            self.assertEqual(self.governance_catalog(), snapshot)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT to_regclass(%s)", [self.migration_module().SUPERSESSION_TABLE]
+                )
+                self.assertIsNone(cursor.fetchone()[0])
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute("DROP FUNCTION market_validate_discovery_supersession()")
+        MigrationExecutor(connection).migrate(self.current)
+
+    def test_preflight_rejects_altered_0013_governance(self):
+        MigrationExecutor(connection).migrate(self.previous)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_get_functiondef('market_discovery_reject_mutation()'::regprocedure)"
+            )
+            original = cursor.fetchone()[0]
+            cursor.execute(
+                """CREATE OR REPLACE FUNCTION market_discovery_reject_mutation()
+                   RETURNS trigger AS $$BEGIN RETURN NEW; END$$ LANGUAGE plpgsql"""
+            )
+        snapshot = self.governance_catalog()
+        try:
+            with self.assertRaisesMessage(
+                RuntimeError,
+                "required function market_discovery_reject_mutation"
+                " does not match its 0013 definition",
+            ):
+                MigrationExecutor(connection).migrate(self.current)
+            self.assertEqual(self.governance_catalog(), snapshot)
+            self.assert_no_supersession_objects()
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute(original)
+        MigrationExecutor(connection).migrate(self.current)
+
+    def test_preflight_rejects_missing_0013_governance(self):
+        MigrationExecutor(connection).migrate(self.previous)
+        with connection.cursor() as cursor:
+            cursor.execute("DROP TRIGGER market_discovery_audit_no_truncate ON market_auditevent")
+        snapshot = self.governance_catalog()
+        try:
+            with self.assertRaisesMessage(
+                RuntimeError,
+                "required trigger market_discovery_audit_no_truncate"
+                " on market_auditevent is missing",
+            ):
+                MigrationExecutor(connection).migrate(self.current)
+            self.assertEqual(self.governance_catalog(), snapshot)
+            self.assert_no_supersession_objects()
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """CREATE TRIGGER market_discovery_audit_no_truncate
+                       BEFORE TRUNCATE ON market_auditevent FOR EACH STATEMENT
+                       EXECUTE FUNCTION market_discovery_audit_reject_truncate()"""
+                )
+        MigrationExecutor(connection).migrate(self.current)
+
+    def test_preflight_constants_match_live_0013_catalog(self):
+        migration = self.migration_module()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT p.proname, md5(p.prosrc) FROM pg_proc p
+                   JOIN pg_namespace n ON n.oid = p.pronamespace
+                   WHERE n.nspname = current_schema() AND p.proname = ANY(%s)""",
+                [list(migration.PREFLIGHT_FUNCTIONS)],
+            )
+            self.assertEqual(dict(cursor.fetchall()), migration.PREFLIGHT_FUNCTIONS)
+            cursor.execute(
+                """SELECT t.tgname, c.relname FROM pg_trigger t
+                   JOIN pg_class c ON c.oid = t.tgrelid WHERE NOT t.tgisinternal"""
+            )
+            live_triggers = set(cursor.fetchall())
+        self.assertEqual(
+            set(migration.PREFLIGHT_TRIGGERS) - live_triggers,
+            set(),
+        )
