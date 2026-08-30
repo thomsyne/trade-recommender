@@ -74,6 +74,17 @@ CANARY_V2_REQUESTED_FROM = "2009-12-31T15:00:00Z"
 CANARY_V2_REQUESTED_TO = "2010-06-16T07:00:00Z"
 CANARY_V2_ATTEMPT_NUMBER = 1
 CANARY_V2_IDEMPOTENCY_KEY = f"historical-discovery-attempt:{CANARY_V2_LOGICAL_KEY}:1"
+# Gate 3R H1-alignment correction: after the governed attempt-1 structural
+# failure (HTTP 200, 2,932 observations, 106 misaligned, nothing stored), the
+# only permitted replacement-plan attempt is the diagnostic retry, attempt 2 of
+# the same canary, and only while the exact attempt-1 failure ledger holds.
+CANARY_RETRY_ATTEMPT_NUMBER = 2
+CANARY_RETRY_IDEMPOTENCY_KEY = f"historical-discovery-attempt:{CANARY_V2_LOGICAL_KEY}:2"
+CANARY_ATTEMPT1_FETCHED_COUNT = 2932
+CANARY_ATTEMPT1_MISALIGNED_COUNT = 106
+# Hard bound on retained structural issue samples; documented to exceed the
+# 106 alignment issues observed by canary attempt 1.
+DISCOVERY_STRUCTURAL_SAMPLE_LIMIT = 256
 DISCOVERY_PURPOSE = "provider_timestamp_inventory_discovery"
 DISCOVERY_APPROVAL_IDENTITY = "failed-break-phase-2b1r-discovery-approval-v1"
 SUPERSEDED_DATA_IDENTITY = "oanda-ba-ny17-friday-v1"
@@ -424,6 +435,7 @@ def _validate_replacement_canary_activation(chunk):
     supersession = HistoricalDiscoverySupersession.objects.filter(replacement_plan=plan).first()
     if supersession is None:
         return
+    rejection = DatasetQualityError("replacement canary activation rejects this attempt")
     if (
         plan.version != DISCOVERY_V2_VERSION
         or plan.identity != DISCOVERY_V2_PLAN_IDENTITY
@@ -442,7 +454,6 @@ def _validate_replacement_canary_activation(chunk):
         or chunk.granularity != CANARY_V2_GRANULARITY
         or chunk.requested_from != parse_timestamp(CANARY_V2_REQUESTED_FROM)
         or chunk.requested_to != parse_timestamp(CANARY_V2_REQUESTED_TO)
-        or HistoricalDiscoveryAttempt.objects.filter(chunk__plan=plan).exists()
         or HistoricalDiscoveryApproval.objects.filter(plan=plan).exists()
         or HistoricalDiscoveryRegistration.objects.filter(plan=plan).exists()
         or IngestionRun.objects.filter(
@@ -450,7 +461,52 @@ def _validate_replacement_canary_activation(chunk):
             parameters__purpose=DISCOVERY_PURPOSE,
         ).exists()
     ):
-        raise DatasetQualityError("replacement canary activation rejects this attempt")
+        raise rejection
+    attempts = list(
+        HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").filter(chunk__plan=plan)
+    )
+    if not attempts:
+        # Zero attempts: the original 0015-approved one-shot rule applies and
+        # the deterministic next attempt is exactly canary attempt 1.
+        return
+    if len(attempts) != 1:
+        raise rejection
+    governing = attempts[0]
+    run = governing.ingestion_run
+    evidence = HistoricalDiscoveryProviderEvidence.objects.filter(attempt=governing).first()
+    failure_events = list(
+        AuditEvent.objects.filter(
+            subject_type="HistoricalDiscoveryAttempt",
+            subject_id=str(governing.pk),
+            event_type="market.historical_discovery_failed",
+        )
+    )
+    diagnostics = failure_events[0].payload.get("diagnostics", {}) if failure_events else {}
+    if (
+        governing.chunk_id != chunk.pk
+        or governing.attempt_number != CANARY_V2_ATTEMPT_NUMBER
+        or governing.idempotency_key != CANARY_V2_IDEMPOTENCY_KEY
+        or run.status != IngestionRun.Status.FAILED
+        or run.failure_reason != DiscoveryFailureCode.STRUCTURE_INVALID
+        or run.fetched_count != CANARY_ATTEMPT1_FETCHED_COUNT
+        or run.stored_count != 0
+        or run.rejected_count != CANARY_ATTEMPT1_FETCHED_COUNT
+        or run.finished_at is None
+        or evidence is None
+        or evidence.http_status != 200
+        or evidence.endpoint_identity
+        != f"oanda-v20-practice:GET:/v3/instruments/{CANARY_V2_INSTRUMENT}/candles"
+        or evidence.canonical_request_sha256 != CANARY_V2_REQUEST_SHA256
+        or not evidence.provider_request_id
+        or evidence.unavailable_fields != []
+        or len(failure_events) != 1
+        or failure_events[0].payload.get("event_sha256") != evidence.terminal_event_sha256
+        or diagnostics.get("issue_counts", {}).get("timestamp_misaligned")
+        != CANARY_ATTEMPT1_MISALIGNED_COUNT
+        or HistoricalTimestampInventory.objects.filter(chunk__plan=plan).exists()
+        or HistoricalTimestampObservation.objects.filter(inventory__chunk__plan=plan).exists()
+    ):
+        raise rejection
 
 
 @transaction.atomic
@@ -544,6 +600,23 @@ def _aligned(timestamp, granularity):
     )
 
 
+def _h1_utc_whole_hour(timestamp):
+    return (
+        timezone.is_aware(timestamp)
+        and timestamp.utcoffset() == timedelta(0)
+        and not (timestamp.minute or timestamp.second or timestamp.microsecond)
+    )
+
+
+def _observation_aligned(chunk, discovery_version, timestamp):
+    # Provider-observed discovery v2+ accepts any whole-hour UTC H1 timestamp;
+    # exact historical membership comes from the provider-observed inventory,
+    # not the synthetic market-open calendar. v1, D and W keep prior behavior.
+    if chunk.granularity == "H1" and discovery_version != DISCOVERY_VERSION:
+        return _h1_utc_whole_hour(timestamp)
+    return _aligned(timestamp, chunk.granularity)
+
+
 def _validate_response(chunk, observations, raw_evidence):
     evidence = _safe_provider_evidence(chunk, raw_evidence)
     required = {
@@ -590,6 +663,7 @@ def _validate_response(chunk, observations, raw_evidence):
         )
     issues = []
     timestamps = []
+    discovery_version = chunk.plan.version
     for index, item in enumerate(observations):
         if not isinstance(item, StructuralObservation):
             issues.append({"index": index, "code": "malformed_observation"})
@@ -597,7 +671,7 @@ def _validate_response(chunk, observations, raw_evidence):
         timestamps.append(item.timestamp)
         if not chunk.requested_from <= item.timestamp < chunk.requested_to:
             issues.append({"index": index, "code": "timestamp_out_of_range"})
-        if not _aligned(item.timestamp, chunk.granularity):
+        if not _observation_aligned(chunk, discovery_version, item.timestamp):
             issues.append({"index": index, "code": "timestamp_misaligned"})
         if type(item.complete) is not bool:
             issues.append({"index": index, "code": "completeness_missing"})
@@ -616,22 +690,100 @@ def _validate_response(chunk, observations, raw_evidence):
     if not observations:
         issues.append({"index": None, "code": "empty_response"})
     if issues:
-        counts = {}
-        for issue in issues:
-            counts[issue["code"]] = counts.get(issue["code"], 0) + 1
         raise DiscoveryResponseError(
             "discovery response contains invalid structural observations",
             DiscoveryFailureCode.STRUCTURE_INVALID,
             "response_validation",
-            {
-                "issue_counts": dict(sorted(counts.items())),
-                "issue_samples": issues[:32],
-                "diagnostic_truncated": len(issues) > 32,
-            },
+            _structural_diagnostics(issues, observations),
             evidence,
             len(observations),
         )
     return tuple(observations), evidence
+
+
+def _issue_observation(issue, observations):
+    index = issue["index"]
+    if type(index) is int and 0 <= index < len(observations):
+        item = observations[index]
+        if isinstance(item, StructuralObservation):
+            return item
+    return None
+
+
+def _safe_observation_timestamp(item):
+    if (
+        item is not None
+        and isinstance(item.timestamp, datetime)
+        and timezone.is_aware(item.timestamp)
+    ):
+        return item.timestamp
+    return None
+
+
+def _structural_issue_sample(issue, observations):
+    item = _issue_observation(issue, observations)
+    timestamp = _safe_observation_timestamp(item)
+    local = timestamp.astimezone(NEW_YORK) if timestamp is not None else None
+    return {
+        "code": issue["code"],
+        "index": issue["index"],
+        "timestamp_utc": canonical_timestamp(timestamp) if timestamp is not None else None,
+        "timestamp_new_york": local.isoformat() if local is not None else None,
+        "new_york_weekday": local.weekday() if local is not None else None,
+        "utc_offset_seconds": (
+            int(timestamp.utcoffset().total_seconds()) if timestamp is not None else None
+        ),
+        "complete": item.complete if item is not None and type(item.complete) is bool else None,
+        "volume": (
+            item.volume
+            if item is not None and type(item.volume) is int and not isinstance(item.volume, bool)
+            else None
+        ),
+        "bid_present": item.bid_present is True if item is not None else None,
+        "ask_present": item.ask_present is True if item is not None else None,
+    }
+
+
+def _structural_diagnostics(issues, observations):
+    counts = {}
+    weekday_counts = {}
+    hour_counts = {}
+    offset_counts = {}
+    invalid_timestamps = set()
+    for issue in issues:
+        counts[issue["code"]] = counts.get(issue["code"], 0) + 1
+        timestamp = _safe_observation_timestamp(_issue_observation(issue, observations))
+        if timestamp is None:
+            continue
+        local = timestamp.astimezone(NEW_YORK)
+        weekday = str(local.weekday())
+        hour = str(local.hour)
+        offset = str(int(timestamp.utcoffset().total_seconds()))
+        weekday_counts[weekday] = weekday_counts.get(weekday, 0) + 1
+        hour_counts[hour] = hour_counts.get(hour, 0) + 1
+        offset_counts[offset] = offset_counts.get(offset, 0) + 1
+        invalid_timestamps.add(canonical_timestamp(timestamp))
+    observed = sorted(
+        canonical_timestamp(item.timestamp)
+        for item in observations
+        if isinstance(item, StructuralObservation) and _safe_observation_timestamp(item) is not None
+    )
+    return {
+        "observation_count": len(observations),
+        "issue_counts": dict(sorted(counts.items())),
+        "issue_samples": [
+            _structural_issue_sample(issue, observations)
+            for issue in issues[:DISCOVERY_STRUCTURAL_SAMPLE_LIMIT]
+        ],
+        "diagnostic_truncated": len(issues) > DISCOVERY_STRUCTURAL_SAMPLE_LIMIT,
+        "first_observed_timestamp": observed[0] if observed else None,
+        "last_observed_timestamp": observed[-1] if observed else None,
+        "observed_timestamp_set_sha256": canonical_hash(observed),
+        "invalid_timestamp_set_sha256": canonical_hash(sorted(invalid_timestamps)),
+        "issue_counts_by_new_york_weekday": dict(sorted(weekday_counts.items())),
+        "issue_counts_by_new_york_hour": dict(sorted(hour_counts.items())),
+        "issue_counts_by_utc_offset": dict(sorted(offset_counts.items())),
+    }
 
 
 def _terminal_event_body(attempt, *, code, stage, evidence, diagnostics, occurred_at):

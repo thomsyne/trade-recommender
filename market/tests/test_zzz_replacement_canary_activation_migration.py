@@ -1,13 +1,13 @@
 from importlib import import_module
 
-from django.db import connection
+from django.db import connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
-from market.historical_discovery import CANARY_V2_LOGICAL_KEY, run_discovery_chunk
+from market.historical_discovery import CANARY_V2_LOGICAL_KEY
 from market.tests.test_replacement_canary_activation import (
-    SucceedingCanaryClient,
     build_superseded_state,
+    insert_raw_canary_attempt,
     seed_governed_market,
     state_hashes,
 )
@@ -18,13 +18,14 @@ ACTIVATION_SIGNATURE = "market_validate_replacement_canary_attempt"
 class ReplacementCanaryActivationMigrationTests(TransactionTestCase):
     current = [("market", "0015_provider_observed_canary_activation")]
     previous = [("market", "0014_historical_discovery_supersession")]
+    latest = [("market", "0016_provider_observed_h1_alignment_retry")]
 
     def setUp(self):
         super().setUp()
         MigrationExecutor(connection).migrate(self.current)
 
     def tearDown(self):
-        MigrationExecutor(connection).migrate(self.current)
+        MigrationExecutor(connection).migrate(self.latest)
         super().tearDown()
 
     def migration_module(self):
@@ -140,15 +141,13 @@ class ReplacementCanaryActivationMigrationTests(TransactionTestCase):
         self.assertEqual(state_hashes(superseded, replacement), expected)
 
     def test_reversal_prohibited_after_replacement_attempt(self):
-        seed_governed_market("canary activation reversal guard")
+        source = seed_governed_market("canary activation reversal guard")
         _, replacement, _ = build_superseded_state()
         canary = replacement.chunks.select_related("instrument").get(
             logical_key=CANARY_V2_LOGICAL_KEY
         )
-        attempt = run_discovery_chunk(
-            CANARY_V2_LOGICAL_KEY, SucceedingCanaryClient(canary.canonical_request_sha256)
-        )
-        self.assertEqual(attempt.attempt_number, 1)
+        with transaction.atomic(), connection.cursor() as cursor:
+            insert_raw_canary_attempt(cursor, source.pk, canary, 1)
 
         with self.assertRaisesMessage(
             RuntimeError,
