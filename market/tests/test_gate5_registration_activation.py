@@ -41,7 +41,7 @@ from market.models import (
 from market.services import DatasetQualityError
 from market.tests.test_gate4_full_discovery import Gate4FixtureTestCase, WaveSuccessClient
 from market.tests.test_replacement_canary_activation import (
-    MIGRATION_0018,
+    MIGRATION_0019,
     migrate_to,
     state_hashes,
 )
@@ -184,7 +184,7 @@ class Gate5DecisionArtifactTests(TransactionTestCase):
 
 class Gate5InstalledGovernanceTests(TransactionTestCase):
     def tearDown(self):
-        migrate_to(MIGRATION_0018)
+        migrate_to(MIGRATION_0019)
         super().tearDown()
 
     def test_gate5_functions_are_installed_with_the_reviewed_bodies(self):
