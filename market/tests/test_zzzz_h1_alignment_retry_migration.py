@@ -135,11 +135,15 @@ class H1AlignmentRetryMigrationTests(TransactionTestCase):
         MigrationExecutor(connection).migrate(self.current)
 
     def test_state_is_byte_identical_across_empty_reverse_and_reapply(self):
-        seed_governed_market("h1 retry migration byte identity")
-        superseded, replacement, _, _ = build_retry_ready_state()
+        MigrationExecutor(connection).migrate(self.previous)
+        source = seed_governed_market("h1 retry migration byte identity")
+        superseded, replacement, _, _ = build_retry_ready_state(source)
         expected = state_hashes(superseded, replacement)
         expected_ledger = attempt_one_hash()
 
+        MigrationExecutor(connection).migrate(self.current)
+        self.assertEqual(state_hashes(superseded, replacement), expected)
+        self.assertEqual(attempt_one_hash(), expected_ledger)
         MigrationExecutor(connection).migrate(self.previous)
         self.assertEqual(state_hashes(superseded, replacement), expected)
         self.assertEqual(attempt_one_hash(), expected_ledger)
@@ -148,8 +152,10 @@ class H1AlignmentRetryMigrationTests(TransactionTestCase):
         self.assertEqual(attempt_one_hash(), expected_ledger)
 
     def test_reversal_prohibited_after_retry_attempt(self):
-        seed_governed_market("h1 retry migration reversal guard")
-        _, replacement, _, _ = build_retry_ready_state()
+        MigrationExecutor(connection).migrate(self.previous)
+        source = seed_governed_market("h1 retry migration reversal guard")
+        _, replacement, _, _ = build_retry_ready_state(source)
+        MigrationExecutor(connection).migrate(self.current)
         canary = replacement.chunks.select_related("instrument").get(
             logical_key=CANARY_V2_LOGICAL_KEY
         )

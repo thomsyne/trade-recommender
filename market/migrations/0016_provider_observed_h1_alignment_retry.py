@@ -583,13 +583,6 @@ RETRY_ACTIVATION_PROSRC = r"""
           SELECT count(*) INTO attempt_total FROM market_historicaldiscoveryattempt a
             JOIN market_historicaldiscoverychunk c ON c.id=a.chunk_id
             WHERE c.plan_id=plan_key;
-          IF attempt_total=0 THEN
-            IF new_attempt_number<>1 OR new_idempotency_key<>'historical-discovery-attempt:'
-               ||'63db29db49868205e76c52507dab8da30d4a740fac41e709a1edbb1ea100b88d:1'
-            THEN RAISE EXCEPTION 'replacement canary activation rejects this attempt';
-            END IF;
-            RETURN;
-          END IF;
           IF attempt_total<>1 THEN
             RAISE EXCEPTION 'replacement canary activation rejects this attempt';
           END IF;
@@ -620,6 +613,8 @@ RETRY_ACTIVATION_PROSRC = r"""
              OR governing_run.finished_at IS NULL
              OR governing_evidence.id IS NULL
              OR governing_evidence.http_status<>200
+             OR governing_evidence.http_method<>'GET'
+             OR governing_evidence.environment<>'practice'
              OR governing_evidence.endpoint_identity<>
                 'oanda-v20-practice:GET:/v3/instruments/AUD_USD/candles'
              OR governing_evidence.canonical_request_sha256<>
@@ -627,10 +622,22 @@ RETRY_ACTIVATION_PROSRC = r"""
              OR coalesce(governing_evidence.provider_request_id,'')=''
              OR governing_evidence.unavailable_fields<>'[]'::jsonb
              OR failure_event_count<>1
+             OR EXISTS(SELECT 1 FROM market_auditevent success_audit
+                       WHERE success_audit.subject_type='HistoricalDiscoveryAttempt'
+                         AND success_audit.subject_id=governing.id::text
+                         AND success_audit.event_type=
+                             'market.historical_discovery_succeeded')
+             OR failure_event.event_type IS DISTINCT FROM
+                'market.historical_discovery_failed'
              OR failure_event.payload->>'event_sha256' IS DISTINCT FROM
                 governing_evidence.terminal_event_sha256
-             OR (failure_event.payload->'diagnostics'->'issue_counts'
-                 ->>'timestamp_misaligned')::bigint IS DISTINCT FROM 106
+             OR market_sha256(failure_event.payload-'event_sha256') IS DISTINCT FROM
+                governing_evidence.terminal_event_sha256
+             OR failure_event.payload->>'error_code' IS DISTINCT FROM
+                'DISCOVERY_STRUCTURE_INVALID'
+             OR failure_event.payload->>'stage' IS DISTINCT FROM 'response_validation'
+             OR failure_event.payload->'diagnostics'->'issue_counts' IS DISTINCT FROM
+                jsonb_build_object('timestamp_misaligned',106)
              OR EXISTS(SELECT 1 FROM market_historicaltimestampinventory inv
                        JOIN market_historicaldiscoverychunk c ON c.id=inv.chunk_id
                        WHERE c.plan_id=plan_key)
@@ -709,6 +716,8 @@ def install_h1_alignment_retry(apps, schema_editor):
         CREATE FUNCTION market_discovery_structural_diagnostics_valid(
           diagnostics jsonb, fetched integer) RETURNS boolean AS $$
         DECLARE total_issues bigint; sample jsonb; sample_count integer;
+                sample_utc timestamptz; weekday_sum bigint; hour_sum bigint;
+                offset_sum bigint;
         BEGIN
           IF jsonb_typeof(diagnostics)<>'object'
              OR (SELECT array_agg(key ORDER BY key)
@@ -740,11 +749,39 @@ def install_h1_alignment_retry(apps, schema_editor):
           THEN RETURN false; END IF;
           IF EXISTS(SELECT 1 FROM jsonb_each(diagnostics->'issue_counts') pair
                     WHERE jsonb_typeof(pair.value)<>'number'
-                       OR (pair.value)::text::bigint<1
-                       OR pair.key !~ '^[a-z_]{1,40}$')
+                       OR (pair.value)::text !~ '^[1-9][0-9]{0,9}$'
+                       OR pair.key NOT IN ('malformed_observation',
+                          'timestamp_out_of_range','timestamp_misaligned',
+                          'completeness_missing','incomplete','invalid_volume',
+                          'bid_missing','ask_missing','unordered_timestamps',
+                          'duplicate_timestamps','empty_response'))
+          THEN RETURN false; END IF;
+          IF EXISTS(SELECT 1 FROM jsonb_each(
+                      diagnostics->'issue_counts_by_new_york_weekday') pair
+                    WHERE pair.key !~ '^[0-6]$'
+                       OR jsonb_typeof(pair.value)<>'number'
+                       OR (pair.value)::text !~ '^[1-9][0-9]{0,9}$')
+             OR EXISTS(SELECT 1 FROM jsonb_each(
+                      diagnostics->'issue_counts_by_new_york_hour') pair
+                    WHERE pair.key !~ '^([0-9]|1[0-9]|2[0-3])$'
+                       OR jsonb_typeof(pair.value)<>'number'
+                       OR (pair.value)::text !~ '^[1-9][0-9]{0,9}$')
+             OR EXISTS(SELECT 1 FROM jsonb_each(
+                      diagnostics->'issue_counts_by_utc_offset') pair
+                    WHERE pair.key !~ '^-?[0-9]{1,6}$'
+                       OR jsonb_typeof(pair.value)<>'number'
+                       OR (pair.value)::text !~ '^[1-9][0-9]{0,9}$')
           THEN RETURN false; END IF;
           SELECT coalesce(sum(value::bigint),0) INTO total_issues
             FROM jsonb_each_text(diagnostics->'issue_counts');
+          SELECT coalesce(sum(value::bigint),0) INTO weekday_sum
+            FROM jsonb_each_text(diagnostics->'issue_counts_by_new_york_weekday');
+          SELECT coalesce(sum(value::bigint),0) INTO hour_sum
+            FROM jsonb_each_text(diagnostics->'issue_counts_by_new_york_hour');
+          SELECT coalesce(sum(value::bigint),0) INTO offset_sum
+            FROM jsonb_each_text(diagnostics->'issue_counts_by_utc_offset');
+          IF weekday_sum<>hour_sum OR hour_sum<>offset_sum OR weekday_sum>total_issues
+          THEN RETURN false; END IF;
           sample_count := jsonb_array_length(diagnostics->'issue_samples');
           IF sample_count<>LEAST(total_issues,256)
              OR (diagnostics->'diagnostic_truncated')::text::boolean
@@ -759,22 +796,53 @@ def install_h1_alignment_retry(apps, schema_editor):
                            'new_york_weekday','timestamp_new_york','timestamp_utc',
                            'utc_offset_seconds','volume']
                OR jsonb_typeof(sample->'code')<>'string'
+               OR sample->>'code' NOT IN ('malformed_observation',
+                  'timestamp_out_of_range','timestamp_misaligned',
+                  'completeness_missing','incomplete','invalid_volume',
+                  'bid_missing','ask_missing','unordered_timestamps',
+                  'duplicate_timestamps','empty_response')
                OR NOT diagnostics->'issue_counts' ? (sample->>'code')
                OR jsonb_typeof(sample->'index') NOT IN ('number','null')
+               OR (jsonb_typeof(sample->'index')='number' AND
+                   ((sample->'index')::text !~ '^(0|[1-9][0-9]{0,9})$'
+                    OR (sample->>'index')::bigint>=fetched))
                OR jsonb_typeof(sample->'timestamp_utc') NOT IN ('string','null')
                OR (jsonb_typeof(sample->'timestamp_utc')='string'
                    AND sample->>'timestamp_utc'
                        !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$')
                OR jsonb_typeof(sample->'timestamp_new_york') NOT IN ('string','null')
                OR (jsonb_typeof(sample->'timestamp_new_york')='string'
-                   AND length(sample->>'timestamp_new_york')>40)
+                   AND sample->>'timestamp_new_york'
+                       !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?[+-]\d{2}:\d{2}$')
+               OR (jsonb_typeof(sample->'timestamp_utc')
+                   <>jsonb_typeof(sample->'timestamp_new_york'))
                OR jsonb_typeof(sample->'new_york_weekday') NOT IN ('number','null')
+               OR (jsonb_typeof(sample->'new_york_weekday')='number'
+                   AND (sample->'new_york_weekday')::text !~ '^[0-6]$')
                OR jsonb_typeof(sample->'utc_offset_seconds') NOT IN ('number','null')
+               OR (jsonb_typeof(sample->'utc_offset_seconds')='number'
+                   AND (sample->'utc_offset_seconds')::text !~ '^-?[0-9]{1,6}$')
                OR jsonb_typeof(sample->'complete') NOT IN ('boolean','null')
                OR jsonb_typeof(sample->'volume') NOT IN ('number','null')
+               OR (jsonb_typeof(sample->'volume')='number'
+                   AND (sample->'volume')::text !~ '^(0|[1-9][0-9]{0,18})$')
                OR jsonb_typeof(sample->'bid_present') NOT IN ('boolean','null')
                OR jsonb_typeof(sample->'ask_present') NOT IN ('boolean','null')
             THEN RETURN false; END IF;
+            IF jsonb_typeof(sample->'timestamp_utc')='string' THEN
+              sample_utc := (sample->>'timestamp_utc')::timestamptz;
+              IF (sample->>'timestamp_new_york')::timestamptz IS DISTINCT FROM sample_utc
+                 OR jsonb_typeof(sample->'new_york_weekday')<>'number'
+                 OR (sample->>'new_york_weekday')::int
+                    <>(extract(isodow FROM (sample_utc
+                        AT TIME ZONE 'America/New_York'))::int - 1)
+                 OR jsonb_typeof(sample->'utc_offset_seconds')<>'number'
+                 OR (sample->>'utc_offset_seconds')::int
+                    <>(extract(epoch FROM (
+                        (sample_utc AT TIME ZONE 'America/New_York')
+                        -(sample_utc AT TIME ZONE 'UTC'))))::int
+              THEN RETURN false; END IF;
+            END IF;
           END LOOP;
           RETURN true;
         END $$ LANGUAGE plpgsql;

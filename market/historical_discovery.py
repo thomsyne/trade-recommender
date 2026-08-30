@@ -465,10 +465,6 @@ def _validate_replacement_canary_activation(chunk):
     attempts = list(
         HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").filter(chunk__plan=plan)
     )
-    if not attempts:
-        # Zero attempts: the original 0015-approved one-shot rule applies and
-        # the deterministic next attempt is exactly canary attempt 1.
-        return
     if len(attempts) != 1:
         raise rejection
     governing = attempts[0]
@@ -481,7 +477,13 @@ def _validate_replacement_canary_activation(chunk):
             event_type="market.historical_discovery_failed",
         )
     )
-    diagnostics = failure_events[0].payload.get("diagnostics", {}) if failure_events else {}
+    success_events = AuditEvent.objects.filter(
+        subject_type="HistoricalDiscoveryAttempt",
+        subject_id=str(governing.pk),
+        event_type="market.historical_discovery_succeeded",
+    ).exists()
+    payload = failure_events[0].payload if failure_events else {}
+    diagnostics = payload.get("diagnostics", {})
     if (
         governing.chunk_id != chunk.pk
         or governing.attempt_number != CANARY_V2_ATTEMPT_NUMBER
@@ -497,12 +499,19 @@ def _validate_replacement_canary_activation(chunk):
         or evidence.endpoint_identity
         != f"oanda-v20-practice:GET:/v3/instruments/{CANARY_V2_INSTRUMENT}/candles"
         or evidence.canonical_request_sha256 != CANARY_V2_REQUEST_SHA256
+        or evidence.http_method != "GET"
+        or evidence.environment != "practice"
         or not evidence.provider_request_id
         or evidence.unavailable_fields != []
         or len(failure_events) != 1
-        or failure_events[0].payload.get("event_sha256") != evidence.terminal_event_sha256
-        or diagnostics.get("issue_counts", {}).get("timestamp_misaligned")
-        != CANARY_ATTEMPT1_MISALIGNED_COUNT
+        or success_events
+        or payload.get("event_sha256") != evidence.terminal_event_sha256
+        or canonical_hash({key: value for key, value in payload.items() if key != "event_sha256"})
+        != evidence.terminal_event_sha256
+        or payload.get("error_code") != DiscoveryFailureCode.STRUCTURE_INVALID
+        or payload.get("stage") != "response_validation"
+        or diagnostics.get("issue_counts")
+        != {"timestamp_misaligned": CANARY_ATTEMPT1_MISALIGNED_COUNT}
         or HistoricalTimestampInventory.objects.filter(chunk__plan=plan).exists()
         or HistoricalTimestampObservation.objects.filter(inventory__chunk__plan=plan).exists()
     ):
@@ -731,7 +740,7 @@ def _structural_issue_sample(issue, observations):
         "timestamp_new_york": local.isoformat() if local is not None else None,
         "new_york_weekday": local.weekday() if local is not None else None,
         "utc_offset_seconds": (
-            int(timestamp.utcoffset().total_seconds()) if timestamp is not None else None
+            int(local.utcoffset().total_seconds()) if local is not None else None
         ),
         "complete": item.complete if item is not None and type(item.complete) is bool else None,
         "volume": (
@@ -758,7 +767,7 @@ def _structural_diagnostics(issues, observations):
         local = timestamp.astimezone(NEW_YORK)
         weekday = str(local.weekday())
         hour = str(local.hour)
-        offset = str(int(timestamp.utcoffset().total_seconds()))
+        offset = str(int(local.utcoffset().total_seconds()))
         weekday_counts[weekday] = weekday_counts.get(weekday, 0) + 1
         hour_counts[hour] = hour_counts.get(hour, 0) + 1
         offset_counts[offset] = offset_counts.get(offset, 0) + 1

@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from datetime import timezone as datetime_timezone
 
 from django.db import connection
@@ -18,8 +18,11 @@ from market.historical_discovery import (
     _h1_utc_whole_hour,
     _observation_aligned,
     _validate_response,
+    build_replacement_discovery_plan,
     canonical_hash,
     canonical_timestamp,
+    create_discovery_plan,
+    logical_discovery_key,
     run_discovery_chunk,
 )
 from market.models import AuditEvent, HistoricalDiscoveryAttempt
@@ -57,6 +60,40 @@ def evidence_for(chunk, request_id="alignment-test-request"):
         "provider_request_id": request_id,
         "canonical_request_sha256": chunk.canonical_request_sha256,
     }
+
+
+def standalone_h1_plan_payload():
+    """A one-request, non-superseded plan carrying the exact canary H1
+    request under a distinct version, used to exercise the failure audit
+    round-trip without touching the gated replacement plan."""
+    base = build_replacement_discovery_plan()
+    item = json.loads(json.dumps(base["requests"][1]))
+    version = "phase-2b1r-discovery-v9"
+    request = item["canonical_request"]
+    start = datetime.fromisoformat(request["from"].replace("Z", "+00:00"))
+    end = datetime.fromisoformat(request["to"].replace("Z", "+00:00"))
+    item["ordinal"] = 1
+    item["logical_discovery_key"] = logical_discovery_key(
+        request_sha256=item["canonical_request_sha256"],
+        instrument=request["instrument"],
+        granularity=request["granularity"],
+        requested_from=start,
+        requested_to=end,
+        discovery_version=version,
+    )
+    body = {
+        key: value
+        for key, value in base.items()
+        if key not in {"requests", "plan_sha256", "canonical_request_manifest_sha256"}
+    }
+    body.update(
+        discovery_version=version,
+        identity="standalone-h1-diagnostics-plan",
+        declared_chunk_count=1,
+        requests=[item],
+        canonical_request_manifest_sha256=canonical_hash([item]),
+    )
+    return {**body, "plan_sha256": canonical_hash(body)}
 
 
 class H1AlignmentPolicyTests(TestCase):
@@ -186,7 +223,7 @@ class StructuralDiagnosticsTests(TestCase):
         )
         self.assertEqual(
             diagnostics["issue_counts_by_utc_offset"],
-            {"0": CANARY_ATTEMPT1_MISALIGNED_COUNT},
+            {"-14400": CANARY_ATTEMPT1_MISALIGNED_COUNT},
         )
         expected_sample_keys = {
             "code",
@@ -203,12 +240,28 @@ class StructuralDiagnosticsTests(TestCase):
         for sample in diagnostics["issue_samples"]:
             self.assertEqual(set(sample), expected_sample_keys)
             self.assertEqual(sample["code"], "timestamp_misaligned")
-            self.assertEqual(sample["utc_offset_seconds"], 0)
+            self.assertEqual(sample["utc_offset_seconds"], -14400)
             self.assertTrue(sample["complete"])
             self.assertEqual(sample["volume"], 1)
             self.assertTrue(sample["bid_present"])
             self.assertTrue(sample["ask_present"])
             self.assertEqual(observations[sample["index"]].timestamp.minute, 30)
+
+    def test_offset_grouping_distinguishes_est_and_edt(self):
+        observations = [
+            StructuralObservation(datetime(2010, 1, 4, 12, 30, tzinfo=UTC), True, 1, True, True),
+            StructuralObservation(datetime(2010, 6, 7, 12, 30, tzinfo=UTC), True, 1, True, True),
+        ]
+        with self.assertRaises(DiscoveryResponseError) as raised:
+            _validate_response(self.canary, observations, evidence_for(self.canary))
+        diagnostics = raised.exception.diagnostics
+        self.assertEqual(diagnostics["issue_counts_by_utc_offset"], {"-18000": 1, "-14400": 1})
+        offsets = {
+            sample["timestamp_utc"]: sample["utc_offset_seconds"]
+            for sample in diagnostics["issue_samples"]
+        }
+        self.assertEqual(offsets["2010-01-04T12:30:00Z"], -18000)
+        self.assertEqual(offsets["2010-06-07T12:30:00Z"], -14400)
 
     def test_diagnostic_truncation_is_deterministic_and_bounded(self):
         observations = [
@@ -235,14 +288,16 @@ class StructuralDiagnosticsTests(TestCase):
             self.assertNotIn(marker, serialized)
 
     def test_failure_audit_round_trips_revised_diagnostics_through_postgresql(self):
+        plan = create_discovery_plan(standalone_h1_plan_payload())
+        chunk = plan.chunks.select_related("instrument").get()
         try:
             run_discovery_chunk(
-                CANARY_V2_LOGICAL_KEY,
-                MisalignedCanaryClient(self.canary.canonical_request_sha256),
+                chunk.logical_key,
+                MisalignedCanaryClient(chunk.canonical_request_sha256),
             )
         except DatasetQualityError:
             pass
-        attempt = HistoricalDiscoveryAttempt.objects.get(chunk=self.canary)
+        attempt = HistoricalDiscoveryAttempt.objects.get(chunk=chunk)
         event = AuditEvent.objects.get(
             event_type="market.historical_discovery_failed",
             subject_id=str(attempt.pk),
@@ -267,6 +322,23 @@ class StructuralDiagnosticsTests(TestCase):
         forged_sample = json.loads(json.dumps(valid))
         forged_sample["issue_samples"][0]["price"] = "1.2345"
         forged_sha = {**valid, "observed_timestamp_set_sha256": "not-a-hash"}
+
+        def variant(**overrides):
+            clone = json.loads(json.dumps(valid))
+            clone["issue_samples"][0].update(overrides)
+            return clone
+
+        unknown_code = json.loads(json.dumps(valid))
+        unknown_code["issue_counts"] = {"raw_body_leak": CANARY_ATTEMPT1_MISALIGNED_COUNT}
+        for sample in unknown_code["issue_samples"]:
+            sample["code"] = "raw_body_leak"
+        fabricated_grouping = json.loads(json.dumps(valid))
+        fabricated_grouping["issue_counts_by_utc_offset"] = {"-14400": 9999}
+        inconsistent_new_york = variant(timestamp_new_york="2010-06-01T08:30:00-04:00")
+        wrong_offset = variant(utc_offset_seconds=-18000)
+        wrong_weekday = variant(new_york_weekday=99)
+        negative_index = variant(index=-1)
+        negative_volume = variant(volume=-5)
         cases = (
             ("extra-key", forged_extra),
             ("missing-key", forged_missing),
@@ -274,6 +346,13 @@ class StructuralDiagnosticsTests(TestCase):
             ("wrong-truncated", forged_truncated),
             ("sample-extra-key", forged_sample),
             ("bad-sha", forged_sha),
+            ("unknown-issue-code", unknown_code),
+            ("negative-index", negative_index),
+            ("weekday-99", wrong_weekday),
+            ("negative-volume", negative_volume),
+            ("inconsistent-new-york-timestamp", inconsistent_new_york),
+            ("wrong-utc-offset", wrong_offset),
+            ("fabricated-grouping-counts", fabricated_grouping),
         )
         with connection.cursor() as cursor:
             cursor.execute(

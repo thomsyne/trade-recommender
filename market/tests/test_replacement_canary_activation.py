@@ -10,7 +10,7 @@ from django.contrib.auth.models import Permission
 from django.core.management import call_command
 from django.db import DatabaseError, close_old_connections, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import TransactionTestCase, override_settings
 
 from market.historical_acquisition import INSTRUMENTS
 from market.historical_discovery import (
@@ -22,7 +22,13 @@ from market.historical_discovery import (
     CANARY_V2_REQUEST_SHA256,
     DISCOVERY_PURPOSE,
     GOVERNING_CANARY_LOGICAL_KEY,
+    DiscoveryFailureCode,
+    DiscoveryResponseError,
     StructuralObservation,
+    _classify_failure,
+    _record_failure,
+    _record_success,
+    _validate_response,
     approve_and_register_discovery,
     begin_discovery_attempt,
     build_initial_discovery_plan,
@@ -45,6 +51,8 @@ from market.oanda import OandaError
 from market.services import DatasetQualityError
 
 CANARY_START = datetime(2009, 12, 31, 15, tzinfo=UTC)
+MIGRATION_0015 = [("market", "0015_provider_observed_canary_activation")]
+MIGRATION_0016 = [("market", "0016_provider_observed_h1_alignment_retry")]
 V1_LINEAGE_HASH_SQL = """
     SELECT market_sha256(jsonb_build_object(
              'plan',to_jsonb(p),'chunks',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.ordinal)
@@ -91,6 +99,10 @@ ATTEMPT_ONE_HASH_SQL = """
       JOIN market_ingestionrun r ON r.id=a.ingestion_run_id
      WHERE a.idempotency_key=%s
 """
+
+
+def migrate_to(targets):
+    MigrationExecutor(connection).migrate(targets)
 
 
 class FailingCanaryClient:
@@ -142,7 +154,7 @@ class SucceedingCanaryClient:
 
 
 class MisalignedCanaryClient:
-    """Reproduces the governed attempt-1 ledger: 2,932 observations of which
+    """Mirrors the governed attempt-1 response: 2,932 observations of which
     exactly 106 carry non-zero minutes and fail the corrected H1 policy."""
 
     def __init__(self, request_sha256):
@@ -217,24 +229,87 @@ def build_superseded_state():
     return superseded, replacement, supersession
 
 
-def build_attempt_one_failure(replacement):
+def legacy_structural_diagnostics(issue_counts, sample_code):
+    """The 0013-era diagnostics shape the production attempt-1 ledger carries:
+    3 keys, at most 32 two-field samples, deterministic truncation flag."""
+    total = sum(issue_counts.values())
+    return {
+        "issue_counts": dict(sorted(issue_counts.items())),
+        "issue_samples": [{"code": sample_code, "index": index} for index in range(min(total, 32))],
+        "diagnostic_truncated": total > 32,
+    }
+
+
+def canary_raw_evidence(request_sha256, request_id="canary-attempt-one-ledger"):
+    return {
+        "endpoint_identity": "oanda-v20-practice:GET:/v3/instruments/AUD_USD/candles",
+        "http_method": "GET",
+        "oanda_environment": "practice",
+        "http_status": 200,
+        "provider_request_id": request_id,
+        "canonical_request_sha256": request_sha256,
+    }
+
+
+def record_attempt_one_ledger(
+    source,
+    replacement,
+    *,
+    issue_counts=None,
+    fetched=CANARY_ATTEMPT1_FETCHED_COUNT,
+    http_failure=False,
+    succeed=False,
+):
+    """Constructs the attempt-1 ledger under the 0015 migration state, where
+    the one-shot rule authorized exactly attempt 1. The schema must be at
+    0015 when this is called; production authorization is not broadened."""
     canary = replacement.chunks.select_related("plan", "instrument").get(
         logical_key=CANARY_V2_LOGICAL_KEY
     )
-    try:
-        run_discovery_chunk(
-            CANARY_V2_LOGICAL_KEY, MisalignedCanaryClient(canary.canonical_request_sha256)
+    with transaction.atomic(), connection.cursor() as cursor:
+        insert_raw_canary_attempt(cursor, source.pk, canary, 1)
+    attempt = HistoricalDiscoveryAttempt.objects.get(chunk=canary, attempt_number=1)
+    if succeed:
+        observations = [
+            StructuralObservation(canary.requested_from, True, 1, True, True),
+            StructuralObservation(canary.requested_from + timedelta(hours=1), True, 1, True, True),
+        ]
+        validated, sanitized = _validate_response(
+            canary, observations, canary_raw_evidence(canary.canonical_request_sha256)
         )
-    except DatasetQualityError:
-        pass
-    return HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get(
-        chunk=canary, attempt_number=1
-    )
+        _record_success(attempt.pk, validated, sanitized)
+    elif http_failure:
+        error = OandaError(
+            "safe mocked HTTP failure",
+            failure_kind="http",
+            provider_evidence={
+                "endpoint_identity": ("oanda-v20-practice:GET:/v3/instruments/AUD_USD/candles"),
+                "http_method": "GET",
+                "oanda_environment": "practice",
+                "http_status": 400,
+                "provider_request_id": "canary-attempt-one-http",
+                "canonical_request_sha256": canary.canonical_request_sha256,
+            },
+        )
+        _record_failure(attempt.pk, _classify_failure(error, canary))
+    else:
+        counts = issue_counts or {"timestamp_misaligned": CANARY_ATTEMPT1_MISALIGNED_COUNT}
+        failure = DiscoveryResponseError(
+            "discovery response contains invalid structural observations",
+            DiscoveryFailureCode.STRUCTURE_INVALID,
+            "response_validation",
+            legacy_structural_diagnostics(counts, next(iter(sorted(counts)))),
+            canary_raw_evidence(canary.canonical_request_sha256),
+            fetched,
+        )
+        _record_failure(attempt.pk, failure)
+    return HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get(pk=attempt.pk)
 
 
-def build_retry_ready_state():
+def build_retry_ready_state(source):
+    """Full production-mirroring fixture; requires the 0015 schema."""
     superseded, replacement, supersession = build_superseded_state()
-    attempt_one = build_attempt_one_failure(replacement)
+    attempt_one = record_attempt_one_ledger(source, replacement)
     return superseded, replacement, supersession, attempt_one
 
 
@@ -290,23 +365,35 @@ def insert_raw_canary_attempt(cursor, source_pk, chunk, number, idempotency_key=
     )
 
 
-class ReplacementCanaryRetryTests(TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        cls.source = seed_governed_market("canary retry test")
+class RetryFixtureTestCase(TransactionTestCase):
+    """Builds the attempt-1 ledger under 0015, then applies 0016."""
+
+    retention_policy = "canary retry fixture"
+
+    def setUp(self):
+        super().setUp()
+        migrate_to(MIGRATION_0015)
+        self.source = seed_governed_market(self.retention_policy)
         (
-            cls.superseded,
-            cls.replacement,
-            cls.supersession,
-            cls.attempt_one,
-        ) = build_retry_ready_state()
-        cls.canary = cls.replacement.chunks.select_related("instrument").get(
+            self.superseded,
+            self.replacement,
+            self.supersession,
+            self.attempt_one,
+        ) = build_retry_ready_state(self.source)
+        migrate_to(MIGRATION_0016)
+        self.canary = self.replacement.chunks.select_related("instrument").get(
             logical_key=CANARY_V2_LOGICAL_KEY
         )
-        cls.v1_canary = cls.superseded.chunks.select_related("instrument").get(
+        self.v1_canary = self.superseded.chunks.select_related("instrument").get(
             logical_key=GOVERNING_CANARY_LOGICAL_KEY
         )
 
+    def tearDown(self):
+        migrate_to(MIGRATION_0016)
+        super().tearDown()
+
+
+class ReplacementCanaryRetryTests(RetryFixtureTestCase):
     def test_attempt_one_ledger_matches_the_governing_finding(self):
         self.assertEqual(self.canary.canonical_request_sha256, CANARY_V2_REQUEST_SHA256)
         run = self.attempt_one.ingestion_run
@@ -370,7 +457,7 @@ class ReplacementCanaryRetryTests(TestCase):
             HistoricalDiscoveryAttempt.objects.filter(chunk__plan=self.replacement).count(), 1
         )
 
-        with connection.cursor() as cursor:
+        with transaction.atomic(), connection.cursor() as cursor:
             insert_raw_canary_attempt(cursor, self.source.pk, self.canary, 2)
         retry = HistoricalDiscoveryAttempt.objects.get(chunk=self.canary, attempt_number=2)
         self.assertEqual(retry.idempotency_key, CANARY_RETRY_IDEMPOTENCY_KEY)
@@ -573,25 +660,21 @@ class ReplacementCanaryRetryTests(TestCase):
         self.assertEqual(result["status"], IngestionRun.Status.SUCCEEDED)
 
 
-class ReplacementCanaryLedgerGateTests(TestCase):
-    @classmethod
-    def setUpTestData(cls):
-        cls.source = seed_governed_market("canary ledger gate test")
-        cls.superseded, cls.replacement, cls.supersession = build_superseded_state()
-        cls.canary = cls.replacement.chunks.select_related("instrument").get(
+class ReplacementCanaryLedgerGateTests(TransactionTestCase):
+    def setUp(self):
+        super().setUp()
+        migrate_to(MIGRATION_0015)
+        self.source = seed_governed_market("canary ledger gate test")
+        self.superseded, self.replacement, self.supersession = build_superseded_state()
+        self.canary = self.replacement.chunks.select_related("instrument").get(
             logical_key=CANARY_V2_LOGICAL_KEY
         )
 
-    def test_retry_is_rejected_when_attempt_one_failure_code_differs(self):
-        with self.assertRaises(OandaError):
-            run_discovery_chunk(
-                CANARY_V2_LOGICAL_KEY,
-                FailingCanaryClient(self.canary.canonical_request_sha256),
-            )
-        attempt = HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get(
-            chunk=self.canary
-        )
-        self.assertEqual(attempt.ingestion_run.failure_reason, "DISCOVERY_PROVIDER_HTTP_ERROR")
+    def tearDown(self):
+        migrate_to(MIGRATION_0016)
+        super().tearDown()
+
+    def assert_retry_rejected_everywhere(self):
         with self.assertRaisesMessage(
             DatasetQualityError, "replacement canary activation rejects this attempt"
         ):
@@ -605,54 +688,58 @@ class ReplacementCanaryLedgerGateTests(TestCase):
         ):
             insert_raw_canary_attempt(cursor, self.source.pk, self.canary, 2)
 
-    def test_retry_is_rejected_when_attempt_one_counts_and_issues_differ(self):
-        observation = StructuralObservation(self.canary.requested_from, True, 1, True, True)
-        request_sha = self.canary.canonical_request_sha256
-        client = type(
-            "DuplicateClient",
-            (),
-            {
-                "fetch_historical_inventory": lambda *_: (
-                    [observation, observation],
-                    {
-                        "endpoint_identity": (
-                            "oanda-v20-practice:GET:/v3/instruments/AUD_USD/candles"
-                        ),
-                        "http_method": "GET",
-                        "oanda_environment": "practice",
-                        "http_status": 200,
-                        "provider_request_id": "wrong-counts",
-                        "canonical_request_sha256": request_sha,
-                    },
-                )
-            },
-        )()
-        with self.assertRaises(DatasetQualityError):
-            run_discovery_chunk(CANARY_V2_LOGICAL_KEY, client)
-        attempt = HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get(
-            chunk=self.canary
+    def test_zero_attempts_fail_closed_under_0016(self):
+        migrate_to(MIGRATION_0016)
+        self.assert_retry_rejected_everywhere()
+        with (
+            self.assertRaisesMessage(
+                DatabaseError, "replacement canary activation rejects this attempt"
+            ),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            insert_raw_canary_attempt(cursor, self.source.pk, self.canary, 1)
+        self.assertFalse(
+            HistoricalDiscoveryAttempt.objects.filter(chunk__plan=self.replacement).exists()
+        )
+
+    def test_retry_is_rejected_when_attempt_one_failure_code_differs(self):
+        attempt = record_attempt_one_ledger(self.source, self.replacement, http_failure=True)
+        self.assertEqual(attempt.ingestion_run.failure_reason, "DISCOVERY_PROVIDER_HTTP_ERROR")
+        migrate_to(MIGRATION_0016)
+        self.assert_retry_rejected_everywhere()
+
+    def test_retry_is_rejected_when_attempt_one_counts_differ(self):
+        attempt = record_attempt_one_ledger(
+            self.source,
+            self.replacement,
+            issue_counts={"duplicate_timestamps": 1},
+            fetched=2,
         )
         self.assertEqual(attempt.ingestion_run.failure_reason, "DISCOVERY_STRUCTURE_INVALID")
-        self.assertNotEqual(attempt.ingestion_run.fetched_count, CANARY_ATTEMPT1_FETCHED_COUNT)
-        with self.assertRaisesMessage(
-            DatasetQualityError, "replacement canary activation rejects this attempt"
-        ):
-            begin_discovery_attempt(CANARY_V2_LOGICAL_KEY)
-        with (
-            self.assertRaisesMessage(
-                DatabaseError, "replacement canary activation rejects this attempt"
-            ),
-            transaction.atomic(),
-            connection.cursor() as cursor,
-        ):
-            insert_raw_canary_attempt(cursor, self.source.pk, self.canary, 2)
+        self.assertEqual(attempt.ingestion_run.fetched_count, 2)
+        migrate_to(MIGRATION_0016)
+        self.assert_retry_rejected_everywhere()
+
+    def test_retry_is_rejected_when_extra_issue_category_present(self):
+        attempt = record_attempt_one_ledger(
+            self.source,
+            self.replacement,
+            issue_counts={
+                "timestamp_misaligned": CANARY_ATTEMPT1_MISALIGNED_COUNT,
+                "incomplete": 1,
+            },
+        )
+        run = attempt.ingestion_run
+        self.assertEqual(run.failure_reason, "DISCOVERY_STRUCTURE_INVALID")
+        self.assertEqual(run.fetched_count, CANARY_ATTEMPT1_FETCHED_COUNT)
+        migrate_to(MIGRATION_0016)
+        self.assert_retry_rejected_everywhere()
 
     def test_retry_is_rejected_when_attempt_one_succeeded_with_inventory(self):
-        run_discovery_chunk(
-            CANARY_V2_LOGICAL_KEY,
-            SucceedingCanaryClient(self.canary.canonical_request_sha256),
-        )
+        record_attempt_one_ledger(self.source, self.replacement, succeed=True)
         self.assertTrue(HistoricalTimestampInventory.objects.filter(chunk=self.canary).exists())
+        migrate_to(MIGRATION_0016)
         with self.assertRaises(DatasetQualityError):
             begin_discovery_attempt(CANARY_V2_LOGICAL_KEY)
         with (
@@ -663,23 +750,8 @@ class ReplacementCanaryLedgerGateTests(TestCase):
             insert_raw_canary_attempt(cursor, self.source.pk, self.canary, 2)
 
 
-class ReplacementCanaryRetryConcurrencyTests(TransactionTestCase):
-    def setUp(self):
-        # Earlier migration-cycle TransactionTestCases deliberately leave the
-        # schema downgraded; restore the retry schema unconditionally.
-        MigrationExecutor(connection).migrate(
-            [("market", "0016_provider_observed_h1_alignment_retry")]
-        )
-        self.source = seed_governed_market("canary retry concurrency")
-        (
-            self.superseded,
-            self.replacement,
-            self.supersession,
-            self.attempt_one,
-        ) = build_retry_ready_state()
-        self.canary = self.replacement.chunks.select_related("instrument").get(
-            logical_key=CANARY_V2_LOGICAL_KEY
-        )
+class ReplacementCanaryRetryConcurrencyTests(RetryFixtureTestCase):
+    retention_policy = "canary retry concurrency"
 
     def test_two_concurrent_service_retries_produce_exactly_one_attempt(self):
         barrier = threading.Barrier(2)
