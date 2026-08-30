@@ -301,10 +301,57 @@ class OandaClientTests(SimpleTestCase):
         self.assertNotIn("SECRET_PRICE", serialized)
         self.assertNotIn("test-token", serialized)
 
+    def test_discovery_recognizes_allowlisted_provider_limit_category(self):
+        def handler(request):
+            return httpx.Response(
+                400,
+                headers={"RequestID": "provider-limit-category"},
+                json={
+                    "errorCategory": "range-limit",
+                    "errorMessage": "raw provider prose with SECRET_PRICE must be discarded",
+                },
+            )
+
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+        with self.assertRaises(OandaError) as raised:
+            client.fetch_historical_inventory("AUD_USD", "H1", start, start + timedelta(hours=1))
+
+        error = raised.exception
+        self.assertEqual(error.failure_kind, "limit")
+        self.assertEqual(str(error), "OANDA discovery request returned HTTP 400")
+        serialized = repr(error.provider_evidence)
+        self.assertNotIn("SECRET_PRICE", serialized)
+        self.assertNotIn("test-token", serialized)
+
+    def test_discovery_limit_shaped_bodies_on_non_400_statuses_stay_generic(self):
+        start = datetime(2018, 12, 21, 22, tzinfo=UTC)
+        for status in (409, 429, 500):
+            with self.subTest(status=status):
+
+                def handler(request):
+                    return httpx.Response(
+                        status,
+                        headers={"RequestID": "non-400-limit-shaped"},
+                        json={"errorCode": "MAXIMUM_RESULTS_EXCEEDED"},
+                    )
+
+                client = OandaClient("test-token", transport=httpx.MockTransport(handler))
+                with self.assertRaises(OandaError) as raised:
+                    client.fetch_historical_inventory(
+                        "AUD_USD", "H1", start, start + timedelta(hours=1)
+                    )
+                self.assertEqual(raised.exception.failure_kind, "http")
+                self.assertEqual(
+                    str(raised.exception),
+                    f"OANDA discovery request returned HTTP {status}",
+                )
+
     def test_discovery_unknown_malformed_and_hostile_http_400_stay_generic(self):
         bodies = (
             {"errorCode": "UNRECOGNIZED", "errorMessage": "SECRET_BODY"},
             ["MAXIMUM_RESULTS_EXCEEDED"],
+            b"",
             b"not-json SECRET_BODY",
             b'{"errorCode":"MAXIMUM_RESULTS_EXCEEDED","padding":"' + b"x" * 4097 + b'"}',
             {"errorCode": "MAXIMUM_RESULTS_EXCEEDED;AUTHORIZATION=Bearer secret"},
