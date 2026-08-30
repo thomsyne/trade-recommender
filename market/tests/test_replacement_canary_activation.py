@@ -2,21 +2,19 @@ import json
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from io import StringIO
-from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
-from django.core.management import call_command
 from django.db import DatabaseError, close_old_connections, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase, override_settings
+from django.test import TransactionTestCase
 
 from market.historical_acquisition import INSTRUMENTS
 from market.historical_discovery import (
     CANARY_ATTEMPT1_FETCHED_COUNT,
     CANARY_ATTEMPT1_MISALIGNED_COUNT,
     CANARY_RETRY_IDEMPOTENCY_KEY,
+    CANARY_SUCCESS_OBSERVATION_COUNT,
     CANARY_V2_IDEMPOTENCY_KEY,
     CANARY_V2_LOGICAL_KEY,
     CANARY_V2_REQUEST_SHA256,
@@ -53,6 +51,7 @@ from market.services import DatasetQualityError
 CANARY_START = datetime(2009, 12, 31, 15, tzinfo=UTC)
 MIGRATION_0015 = [("market", "0015_provider_observed_canary_activation")]
 MIGRATION_0016 = [("market", "0016_provider_observed_h1_alignment_retry")]
+MIGRATION_0017 = [("market", "0017_provider_observed_full_discovery_activation")]
 V1_LINEAGE_HASH_SQL = """
     SELECT market_sha256(jsonb_build_object(
              'plan',to_jsonb(p),'chunks',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.ordinal)
@@ -306,6 +305,57 @@ def record_attempt_one_ledger(
     return HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get(pk=attempt.pk)
 
 
+def full_inventory_observations():
+    return [
+        StructuralObservation(CANARY_START + timedelta(hours=hour), True, 1, True, True)
+        for hour in range(CANARY_SUCCESS_OBSERVATION_COUNT)
+    ]
+
+
+def record_attempt_two_success(source, replacement):
+    """Constructs the governed attempt-2 success under the 0016 migration
+    state, whose retry gate authorized exactly attempt 2 on the ledger."""
+    canary = replacement.chunks.select_related("plan", "instrument").get(
+        logical_key=CANARY_V2_LOGICAL_KEY
+    )
+    with transaction.atomic(), connection.cursor() as cursor:
+        insert_raw_canary_attempt(cursor, source.pk, canary, 2)
+    attempt = HistoricalDiscoveryAttempt.objects.get(chunk=canary, attempt_number=2)
+    validated, sanitized = _validate_response(
+        canary,
+        full_inventory_observations(),
+        canary_raw_evidence(
+            canary.canonical_request_sha256, request_id="canary-attempt-two-success"
+        ),
+    )
+    _record_success(attempt.pk, validated, sanitized)
+    return HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get(pk=attempt.pk)
+
+
+def record_attempt_two_failure(source, replacement):
+    """Constructs a terminal attempt-2 failure under the 0016 migration state."""
+    canary = replacement.chunks.select_related("plan", "instrument").get(
+        logical_key=CANARY_V2_LOGICAL_KEY
+    )
+    with transaction.atomic(), connection.cursor() as cursor:
+        insert_raw_canary_attempt(cursor, source.pk, canary, 2)
+    attempt = HistoricalDiscoveryAttempt.objects.get(chunk=canary, attempt_number=2)
+    error = OandaError(
+        "safe mocked HTTP failure",
+        failure_kind="http",
+        provider_evidence={
+            "endpoint_identity": "oanda-v20-practice:GET:/v3/instruments/AUD_USD/candles",
+            "http_method": "GET",
+            "oanda_environment": "practice",
+            "http_status": 400,
+            "provider_request_id": "canary-attempt-two-http",
+            "canonical_request_sha256": canary.canonical_request_sha256,
+        },
+    )
+    _record_failure(attempt.pk, _classify_failure(error, canary))
+    return HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get(pk=attempt.pk)
+
+
 def build_retry_ready_state(source):
     """Full production-mirroring fixture; requires the 0015 schema."""
     superseded, replacement, supersession = build_superseded_state()
@@ -389,7 +439,7 @@ class RetryFixtureTestCase(TransactionTestCase):
         )
 
     def tearDown(self):
-        migrate_to(MIGRATION_0016)
+        migrate_to(MIGRATION_0017)
         super().tearDown()
 
 
@@ -403,21 +453,6 @@ class ReplacementCanaryRetryTests(RetryFixtureTestCase):
         self.assertEqual(run.fetched_count, CANARY_ATTEMPT1_FETCHED_COUNT)
         self.assertEqual(run.stored_count, 0)
         self.assertEqual(run.rejected_count, CANARY_ATTEMPT1_FETCHED_COUNT)
-
-    def test_exact_retry_attempt_two_succeeds_through_service(self):
-        before = state_hashes(self.superseded, self.replacement)
-        ledger_before = attempt_one_hash()
-        client = SucceedingCanaryClient(self.canary.canonical_request_sha256)
-
-        attempt = run_discovery_chunk(CANARY_V2_LOGICAL_KEY, client)
-
-        self.assertEqual(len(client.calls), 1)
-        self.assertEqual(attempt.attempt_number, 2)
-        self.assertEqual(attempt.idempotency_key, CANARY_RETRY_IDEMPOTENCY_KEY)
-        self.assertEqual(attempt.ingestion_run.status, IngestionRun.Status.SUCCEEDED)
-        self.assertTrue(HistoricalTimestampInventory.objects.filter(chunk=self.canary).exists())
-        self.assertEqual(state_hashes(self.superseded, self.replacement), before)
-        self.assertEqual(attempt_one_hash(), ledger_before)
 
     def test_every_other_v2_chunk_is_rejected(self):
         other_chunks = list(
@@ -463,10 +498,7 @@ class ReplacementCanaryRetryTests(RetryFixtureTestCase):
         self.assertEqual(retry.idempotency_key, CANARY_RETRY_IDEMPOTENCY_KEY)
 
     def test_attempt_three_and_retry_are_rejected_after_success(self):
-        run_discovery_chunk(
-            CANARY_V2_LOGICAL_KEY,
-            SucceedingCanaryClient(self.canary.canonical_request_sha256),
-        )
+        record_attempt_two_success(self.source, self.replacement)
         with self.assertRaises(DatasetQualityError):
             begin_discovery_attempt(CANARY_V2_LOGICAL_KEY)
         with (
@@ -482,11 +514,7 @@ class ReplacementCanaryRetryTests(RetryFixtureTestCase):
         )
 
     def test_attempt_three_and_retry_are_rejected_after_failure(self):
-        with self.assertRaises(OandaError):
-            run_discovery_chunk(
-                CANARY_V2_LOGICAL_KEY,
-                FailingCanaryClient(self.canary.canonical_request_sha256),
-            )
+        record_attempt_two_failure(self.source, self.replacement)
         with self.assertRaisesMessage(
             DatasetQualityError, "replacement canary activation rejects this attempt"
         ):
@@ -611,54 +639,6 @@ class ReplacementCanaryRetryTests(RetryFixtureTestCase):
                 ]
             )
 
-    @override_settings(OANDA_DISCOVERY_TOKEN="mocked-discovery-token", OANDA_ENVIRONMENT="practice")
-    def test_discovery_command_uses_exactly_one_mocked_provider_request(self):
-        calls = []
-        request_sha = self.canary.canonical_request_sha256
-        requested_from = self.canary.requested_from
-        requested_to = self.canary.requested_to
-
-        class MockedClient:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def fetch_historical_inventory(self, instrument, granularity, start, end):
-                calls.append((instrument, granularity, start, end))
-                return (
-                    [StructuralObservation(start, True, 10, True, True)],
-                    {
-                        "endpoint_identity": (
-                            f"oanda-v20-practice:GET:/v3/instruments/{instrument}/candles"
-                        ),
-                        "http_method": "GET",
-                        "oanda_environment": "practice",
-                        "http_status": 200,
-                        "provider_request_id": "canary-command-request",
-                        "canonical_request_sha256": request_sha,
-                    },
-                )
-
-        with patch(
-            "market.management.commands.discover_historical_inventory.OandaClient",
-            return_value=MockedClient(),
-        ) as client_factory:
-            stdout = StringIO()
-            call_command(
-                "discover_historical_inventory",
-                "--logical-discovery-key",
-                CANARY_V2_LOGICAL_KEY,
-                "--execute",
-                stdout=stdout,
-            )
-        client_factory.assert_called_once_with("mocked-discovery-token", "practice")
-        self.assertEqual(calls, [("AUD_USD", "H1", requested_from, requested_to)])
-        result = json.loads(stdout.getvalue())
-        self.assertEqual(result["attempt_number"], 2)
-        self.assertEqual(result["status"], IngestionRun.Status.SUCCEEDED)
-
 
 class ReplacementCanaryLedgerGateTests(TransactionTestCase):
     def setUp(self):
@@ -671,7 +651,7 @@ class ReplacementCanaryLedgerGateTests(TransactionTestCase):
         )
 
     def tearDown(self):
-        migrate_to(MIGRATION_0016)
+        migrate_to(MIGRATION_0017)
         super().tearDown()
 
     def assert_retry_rejected_everywhere(self):
@@ -752,31 +732,6 @@ class ReplacementCanaryLedgerGateTests(TransactionTestCase):
 
 class ReplacementCanaryRetryConcurrencyTests(RetryFixtureTestCase):
     retention_policy = "canary retry concurrency"
-
-    def test_two_concurrent_service_retries_produce_exactly_one_attempt(self):
-        barrier = threading.Barrier(2)
-        outcomes = []
-
-        def start_retry():
-            close_old_connections()
-            try:
-                barrier.wait(5)
-                begin_discovery_attempt(CANARY_V2_LOGICAL_KEY)
-                outcomes.append("committed")
-            except (DatasetQualityError, DatabaseError):
-                outcomes.append("rejected")
-            finally:
-                close_old_connections()
-
-        threads = [threading.Thread(target=start_retry) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(15)
-        self.assertEqual(sorted(outcomes), ["committed", "rejected"])
-        self.assertEqual(
-            HistoricalDiscoveryAttempt.objects.filter(chunk__plan=self.replacement).count(), 2
-        )
 
     def test_two_concurrent_raw_retries_produce_exactly_one_attempt(self):
         result = {}

@@ -85,6 +85,17 @@ CANARY_ATTEMPT1_MISALIGNED_COUNT = 106
 # Hard bound on retained structural issue samples; documented to exceed the
 # 106 alignment issues observed by canary attempt 1.
 DISCOVERY_STRUCTURAL_SAMPLE_LIMIT = 256
+# Gate 4 full-discovery activation: once the exact canary success lineage is
+# established (attempt 2 succeeded with the full 2,932-observation inventory),
+# each of the remaining 131 v2 chunks is authorized for exactly attempt 1.
+CANARY_SUCCESS_OBSERVATION_COUNT = 2932
+# Semantic inventory hash recorded by the governed canary success on the
+# research database. It is reproducible from the immutable observation rows;
+# used by wave-manifest tooling, never as an enforcement pin (test inventories
+# legitimately differ).
+CANARY_SEMANTIC_INVENTORY_SHA256_RECORDED = (
+    "fdf82569dc323bc58cadb5b48d5309fc0ec987c5caf66e16a1225d478b09e9de"
+)
 DISCOVERY_PURPOSE = "provider_timestamp_inventory_discovery"
 DISCOVERY_APPROVAL_IDENTITY = "failed-break-phase-2b1r-discovery-approval-v1"
 SUPERSEDED_DATA_IDENTITY = "oanda-ba-ny17-friday-v1"
@@ -430,6 +441,166 @@ def future_data_contract_semantic_hash(*, global_semantic_inventory_sha256):
     )
 
 
+def _verify_canary_success_lineage(plan, rejection):
+    canary = (
+        HistoricalDiscoveryChunk.objects.select_related("instrument")
+        .filter(plan=plan, logical_key=CANARY_V2_LOGICAL_KEY)
+        .first()
+    )
+    if (
+        canary is None
+        or canary.canonical_request_sha256 != CANARY_V2_REQUEST_SHA256
+        or canary.ordinal != CANARY_V2_ORDINAL
+        or canary.instrument.code != CANARY_V2_INSTRUMENT
+        or canary.granularity != CANARY_V2_GRANULARITY
+        or canary.requested_from != parse_timestamp(CANARY_V2_REQUESTED_FROM)
+        or canary.requested_to != parse_timestamp(CANARY_V2_REQUESTED_TO)
+    ):
+        raise rejection
+    attempts = {
+        attempt.attempt_number: attempt
+        for attempt in HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").filter(
+            chunk=canary
+        )
+    }
+    if set(attempts) != {1, 2}:
+        raise rejection
+    _verify_canary_attempt_one_ledger(canary, attempts[1], rejection)
+    _verify_canary_attempt_two_success(canary, attempts[2], rejection)
+    return canary
+
+
+def _canary_attempt_events(attempt):
+    failure_events = list(
+        AuditEvent.objects.filter(
+            subject_type="HistoricalDiscoveryAttempt",
+            subject_id=str(attempt.pk),
+            event_type="market.historical_discovery_failed",
+        )
+    )
+    success_events = list(
+        AuditEvent.objects.filter(
+            subject_type="HistoricalDiscoveryAttempt",
+            subject_id=str(attempt.pk),
+            event_type="market.historical_discovery_succeeded",
+        )
+    )
+    evidence = HistoricalDiscoveryProviderEvidence.objects.filter(attempt=attempt).first()
+    return failure_events, success_events, evidence
+
+
+def _verify_canary_attempt_one_ledger(canary, governing, rejection):
+    run = governing.ingestion_run
+    failure_events, success_events, evidence = _canary_attempt_events(governing)
+    payload = failure_events[0].payload if failure_events else {}
+    diagnostics = payload.get("diagnostics", {})
+    if (
+        governing.idempotency_key != CANARY_V2_IDEMPOTENCY_KEY
+        or run.status != IngestionRun.Status.FAILED
+        or run.failure_reason != DiscoveryFailureCode.STRUCTURE_INVALID
+        or run.fetched_count != CANARY_ATTEMPT1_FETCHED_COUNT
+        or run.stored_count != 0
+        or run.rejected_count != CANARY_ATTEMPT1_FETCHED_COUNT
+        or run.finished_at is None
+        or evidence is None
+        or evidence.http_status != 200
+        or evidence.http_method != "GET"
+        or evidence.environment != "practice"
+        or evidence.endpoint_identity
+        != f"oanda-v20-practice:GET:/v3/instruments/{CANARY_V2_INSTRUMENT}/candles"
+        or evidence.canonical_request_sha256 != CANARY_V2_REQUEST_SHA256
+        or not evidence.provider_request_id
+        or evidence.unavailable_fields != []
+        or len(failure_events) != 1
+        or success_events
+        or payload.get("event_sha256") != evidence.terminal_event_sha256
+        or canonical_hash({key: value for key, value in payload.items() if key != "event_sha256"})
+        != evidence.terminal_event_sha256
+        or payload.get("error_code") != DiscoveryFailureCode.STRUCTURE_INVALID
+        or payload.get("stage") != "response_validation"
+        or diagnostics.get("issue_counts")
+        != {"timestamp_misaligned": CANARY_ATTEMPT1_MISALIGNED_COUNT}
+    ):
+        raise rejection
+
+
+def _verify_canary_attempt_two_success(canary, retry, rejection):
+    run = retry.ingestion_run
+    failure_events, success_events, evidence = _canary_attempt_events(retry)
+    payload = success_events[0].payload if success_events else {}
+    if (
+        retry.idempotency_key != CANARY_RETRY_IDEMPOTENCY_KEY
+        or run.status != IngestionRun.Status.SUCCEEDED
+        or run.failure_reason != ""
+        or run.fetched_count != CANARY_SUCCESS_OBSERVATION_COUNT
+        or run.stored_count != CANARY_SUCCESS_OBSERVATION_COUNT
+        or run.rejected_count != 0
+        or run.finished_at is None
+        or evidence is None
+        or evidence.http_status != 200
+        or evidence.http_method != "GET"
+        or evidence.environment != "practice"
+        or evidence.endpoint_identity
+        != f"oanda-v20-practice:GET:/v3/instruments/{CANARY_V2_INSTRUMENT}/candles"
+        or evidence.canonical_request_sha256 != CANARY_V2_REQUEST_SHA256
+        or not evidence.provider_request_id
+        or evidence.unavailable_fields != []
+        or len(success_events) != 1
+        or failure_events
+        or payload.get("event_sha256") != evidence.terminal_event_sha256
+        or canonical_hash({key: value for key, value in payload.items() if key != "event_sha256"})
+        != evidence.terminal_event_sha256
+    ):
+        raise rejection
+    evidence_fields = {field: getattr(evidence, field) for field in PROVIDER_FIELDS}
+    evidence_fields["unavailable_fields"] = evidence.unavailable_fields
+    if (
+        _operational_hash(retry, run, evidence_fields, evidence.terminal_event_sha256)
+        != evidence.operational_evidence_sha256
+    ):
+        raise rejection
+    inventories = list(HistoricalTimestampInventory.objects.filter(chunk=canary))
+    if (
+        len(inventories) != 1
+        or inventories[0].accepted_attempt_id != retry.pk
+        or inventories[0].observation_count != CANARY_SUCCESS_OBSERVATION_COUNT
+    ):
+        raise rejection
+    inventory = inventories[0]
+    observations = [
+        StructuralObservation(
+            row.timestamp, row.complete, row.volume, row.bid_present, row.ask_present
+        )
+        for row in HistoricalTimestampObservation.objects.filter(inventory=inventory).order_by(
+            "timestamp"
+        )
+    ]
+    timestamps = [item.timestamp for item in observations]
+    if (
+        len(observations) != CANARY_SUCCESS_OBSERVATION_COUNT
+        or len(set(timestamps)) != CANARY_SUCCESS_OBSERVATION_COUNT
+        or timestamps != sorted(timestamps)
+        or not all(
+            item.complete is True
+            and item.bid_present is True
+            and item.ask_present is True
+            and type(item.volume) is int
+            and item.volume >= 0
+            and canary.requested_from <= item.timestamp < canary.requested_to
+            and _h1_utc_whole_hour(item.timestamp)
+            for item in observations
+        )
+    ):
+        raise rejection
+    timestamp_sha, structural_sha, semantic_sha = semantic_inventory_hashes(canary, observations)
+    if (
+        timestamp_sha != inventory.timestamp_set_sha256
+        or structural_sha != inventory.structural_observation_sha256
+        or semantic_sha != inventory.semantic_inventory_sha256
+    ):
+        raise rejection
+
+
 def _validate_replacement_canary_activation(chunk):
     plan = chunk.plan
     supersession = HistoricalDiscoverySupersession.objects.filter(replacement_plan=plan).first()
@@ -447,13 +618,6 @@ def _validate_replacement_canary_activation(chunk):
         or supersession.reason_code
         != HistoricalDiscoverySupersession.REASON_PROVIDER_REQUEST_BOUND_UNSAFE
         or supersession.sha256 != canonical_hash(supersession.payload)
-        or chunk.logical_key != CANARY_V2_LOGICAL_KEY
-        or chunk.canonical_request_sha256 != CANARY_V2_REQUEST_SHA256
-        or chunk.ordinal != CANARY_V2_ORDINAL
-        or chunk.instrument.code != CANARY_V2_INSTRUMENT
-        or chunk.granularity != CANARY_V2_GRANULARITY
-        or chunk.requested_from != parse_timestamp(CANARY_V2_REQUESTED_FROM)
-        or chunk.requested_to != parse_timestamp(CANARY_V2_REQUESTED_TO)
         or HistoricalDiscoveryApproval.objects.filter(plan=plan).exists()
         or HistoricalDiscoveryRegistration.objects.filter(plan=plan).exists()
         or IngestionRun.objects.filter(
@@ -462,59 +626,11 @@ def _validate_replacement_canary_activation(chunk):
         ).exists()
     ):
         raise rejection
-    attempts = list(
-        HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").filter(chunk__plan=plan)
-    )
-    if len(attempts) != 1:
+    _verify_canary_success_lineage(plan, rejection)
+    if chunk.logical_key == CANARY_V2_LOGICAL_KEY:
+        # The canary is permanently closed after its governed success.
         raise rejection
-    governing = attempts[0]
-    run = governing.ingestion_run
-    evidence = HistoricalDiscoveryProviderEvidence.objects.filter(attempt=governing).first()
-    failure_events = list(
-        AuditEvent.objects.filter(
-            subject_type="HistoricalDiscoveryAttempt",
-            subject_id=str(governing.pk),
-            event_type="market.historical_discovery_failed",
-        )
-    )
-    success_events = AuditEvent.objects.filter(
-        subject_type="HistoricalDiscoveryAttempt",
-        subject_id=str(governing.pk),
-        event_type="market.historical_discovery_succeeded",
-    ).exists()
-    payload = failure_events[0].payload if failure_events else {}
-    diagnostics = payload.get("diagnostics", {})
-    if (
-        governing.chunk_id != chunk.pk
-        or governing.attempt_number != CANARY_V2_ATTEMPT_NUMBER
-        or governing.idempotency_key != CANARY_V2_IDEMPOTENCY_KEY
-        or run.status != IngestionRun.Status.FAILED
-        or run.failure_reason != DiscoveryFailureCode.STRUCTURE_INVALID
-        or run.fetched_count != CANARY_ATTEMPT1_FETCHED_COUNT
-        or run.stored_count != 0
-        or run.rejected_count != CANARY_ATTEMPT1_FETCHED_COUNT
-        or run.finished_at is None
-        or evidence is None
-        or evidence.http_status != 200
-        or evidence.endpoint_identity
-        != f"oanda-v20-practice:GET:/v3/instruments/{CANARY_V2_INSTRUMENT}/candles"
-        or evidence.canonical_request_sha256 != CANARY_V2_REQUEST_SHA256
-        or evidence.http_method != "GET"
-        or evidence.environment != "practice"
-        or not evidence.provider_request_id
-        or evidence.unavailable_fields != []
-        or len(failure_events) != 1
-        or success_events
-        or payload.get("event_sha256") != evidence.terminal_event_sha256
-        or canonical_hash({key: value for key, value in payload.items() if key != "event_sha256"})
-        != evidence.terminal_event_sha256
-        or payload.get("error_code") != DiscoveryFailureCode.STRUCTURE_INVALID
-        or payload.get("stage") != "response_validation"
-        or diagnostics.get("issue_counts")
-        != {"timestamp_misaligned": CANARY_ATTEMPT1_MISALIGNED_COUNT}
-        or HistoricalTimestampInventory.objects.filter(chunk__plan=plan).exists()
-        or HistoricalTimestampObservation.objects.filter(inventory__chunk__plan=plan).exists()
-    ):
+    if HistoricalDiscoveryAttempt.objects.filter(chunk=chunk).exists():
         raise rejection
 
 
