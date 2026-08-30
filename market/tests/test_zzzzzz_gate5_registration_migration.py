@@ -131,6 +131,31 @@ class Gate5RegistrationMigrationTests(TransactionTestCase):
                 cursor.execute(original)
         MigrationExecutor(connection).migrate(self.current)
 
+    def test_preflight_rejects_altered_evidence_governance(self):
+        """The battery must cover evidence governance beyond the functions
+        0018 replaces: altering the observation validator blocks activation."""
+        MigrationExecutor(connection).migrate(self.previous)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_get_functiondef('market_validate_discovery_observation()'::regprocedure)"
+            )
+            original = cursor.fetchone()[0]
+            cursor.execute(
+                """CREATE OR REPLACE FUNCTION market_validate_discovery_observation()
+                   RETURNS trigger AS $$BEGIN RETURN NEW; END$$ LANGUAGE plpgsql"""
+            )
+        try:
+            with self.assertRaisesMessage(
+                RuntimeError,
+                "required 0017 function market_validate_discovery_observation"
+                " does not match its 0017 definition",
+            ):
+                MigrationExecutor(connection).migrate(self.current)
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute(original)
+        MigrationExecutor(connection).migrate(self.current)
+
     def test_state_is_byte_identical_across_empty_reverse_and_reapply(self):
         source, superseded, replacement = self.build_gate5_state()
         expected = state_hashes(superseded, replacement)

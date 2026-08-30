@@ -12,7 +12,7 @@ from django.contrib.auth.models import Permission
 from django.core.exceptions import PermissionDenied
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import DatabaseError, close_old_connections, connection, transaction
+from django.db import DatabaseError, connection, transaction
 from django.test import TransactionTestCase
 
 from market.historical_discovery import (
@@ -54,7 +54,15 @@ DECISION_ARTIFACT_PATH = (
     / "v1"
     / "phase-2b1r-gate5-approval-decision.json"
 )
-GATE5_SEAL_FUNCTION_MD5 = "7aa33da6d813f9474e229e427944ab63"
+COMPLETION_SUMMARY_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "strategy"
+    / "failed-break"
+    / "v1"
+    / "phase-2b1r-gate4-discovery-completion-summary.md"
+)
+GATE5_SEAL_FUNCTION_MD5 = "5ef0117c6a32cca8a81322a7766d8f52"
 GATE5_REJECT_FUNCTION_MD5 = "b48181153e3caa0a52496311b200fc15"
 
 
@@ -226,7 +234,9 @@ class Gate5ApprovalRejectionTests(Gate4FixtureTestCase):
         with self.assertRaisesMessage(
             DatasetQualityError, "only the approved replacement discovery plan may be approved"
         ):
-            approve_and_register_discovery(other.sha256, user.pk, GATE5_APPROVAL_DECISION_SHA256)
+            approve_and_register_discovery(
+                other.sha256, user.pk, DISCOVERY_COMPLETION_SUMMARY_SHA256
+            )
         with (
             self.assertRaisesMessage(
                 DatabaseError, "only the approved replacement discovery plan may be approved"
@@ -249,7 +259,7 @@ class Gate5ApprovalRejectionTests(Gate4FixtureTestCase):
             DatasetQualityError, "superseded discovery plans cannot be approved"
         ):
             approve_and_register_discovery(
-                self.superseded.sha256, user.pk, GATE5_APPROVAL_DECISION_SHA256
+                self.superseded.sha256, user.pk, DISCOVERY_COMPLETION_SUMMARY_SHA256
             )
         with (
             self.assertRaisesMessage(DatabaseError, "superseded discovery plans reject new writes"),
@@ -265,13 +275,14 @@ class Gate5ApprovalRejectionTests(Gate4FixtureTestCase):
             )
         self.assertEqual(registration_state(), (0, 0, 0))
 
-    def test_wrong_decision_artifact_hash_is_rejected(self):
+    def test_wrong_cross_series_hash_is_rejected(self):
         user = approver_user("gate5-wrong-artifact")
-        with self.assertRaisesMessage(
-            DatasetQualityError,
-            "gate5 approval requires the committed approval-decision artifact hash",
-        ):
-            approve_and_register_discovery(self.replacement.sha256, user.pk, "a" * 64)
+        for wrong in ("a" * 64, GATE5_APPROVAL_DECISION_SHA256):
+            with self.assertRaisesMessage(
+                DatasetQualityError,
+                "gate5 approval requires the committed cross-series completion-summary hash",
+            ):
+                approve_and_register_discovery(self.replacement.sha256, user.pk, wrong)
         self.assertEqual(registration_state(), (0, 0, 0))
 
     def test_incomplete_registration_state_is_rejected_at_both_layers(self):
@@ -280,7 +291,7 @@ class Gate5ApprovalRejectionTests(Gate4FixtureTestCase):
             DatasetQualityError, "every discovery chunk requires an accepted inventory"
         ):
             approve_and_register_discovery(
-                self.replacement.sha256, user.pk, GATE5_APPROVAL_DECISION_SHA256
+                self.replacement.sha256, user.pk, DISCOVERY_COMPLETION_SUMMARY_SHA256
             )
         for statement, params in (
             (
@@ -351,18 +362,90 @@ class Gate5ApprovalRejectionTests(Gate4FixtureTestCase):
             )
         self.assertEqual(registration_state(), (0, 0, 0))
 
+    def test_tampered_observation_fails_inventory_replay_despite_stored_hashes(self):
+        """Self-consistent forgery: the stored summary hashes are left intact
+        while an underlying observation row is altered with triggers disabled.
+        Gate 5 must replay the hashes from the rows and reject."""
+        user = approver_user("gate5-observation-forger")
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_historicaltimestampobservation DISABLE TRIGGER USER")
+            try:
+                cursor.execute(
+                    """UPDATE market_historicaltimestampobservation SET volume=volume+1
+                       WHERE id=(SELECT min(o.id)
+                                 FROM market_historicaltimestampobservation o
+                                 JOIN market_historicaltimestampinventory i
+                                   ON i.id=o.inventory_id
+                                 JOIN market_historicaldiscoverychunk c ON c.id=i.chunk_id
+                                 WHERE c.plan_id=%s)""",
+                    [self.replacement.pk],
+                )
+            finally:
+                cursor.execute(
+                    "ALTER TABLE market_historicaltimestampobservation ENABLE TRIGGER USER"
+                )
+        with (
+            self.assertRaisesMessage(DatabaseError, "gate5 inventory replay does not reconstruct"),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoveryapproval
+                   (plan_id,approved_by_id,global_semantic_inventory_sha256,
+                    accepted_operational_evidence_set_sha256,payload,sha256,approved_at)
+                   VALUES (%s,%s,%s,%s,'{}'::jsonb,%s,now())""",
+                [self.replacement.pk, user.pk, "a" * 64, "b" * 64, "c" * 64],
+            )
+        self.assertEqual(registration_state(), (0, 0, 0))
+
+    def test_tampered_evidence_fails_operational_replay_despite_stored_hashes(self):
+        user = approver_user("gate5-evidence-forger")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "ALTER TABLE market_historicaldiscoveryproviderevidence DISABLE TRIGGER USER"
+            )
+            try:
+                cursor.execute(
+                    """UPDATE market_historicaldiscoveryproviderevidence
+                       SET provider_request_id='forged-request-id'
+                       WHERE attempt_id=(SELECT min(a.id)
+                                 FROM market_historicaldiscoveryattempt a
+                                 JOIN market_historicaldiscoverychunk c ON c.id=a.chunk_id
+                                 WHERE c.plan_id=%s)""",
+                    [self.replacement.pk],
+                )
+            finally:
+                cursor.execute(
+                    "ALTER TABLE market_historicaldiscoveryproviderevidence ENABLE TRIGGER USER"
+                )
+        with (
+            self.assertRaisesMessage(
+                DatabaseError, "gate5 operational evidence replay does not reconstruct"
+            ),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoveryapproval
+                   (plan_id,approved_by_id,global_semantic_inventory_sha256,
+                    accepted_operational_evidence_set_sha256,payload,sha256,approved_at)
+                   VALUES (%s,%s,%s,%s,'{}'::jsonb,%s,now())""",
+                [self.replacement.pk, user.pk, "a" * 64, "b" * 64, "c" * 64],
+            )
+        self.assertEqual(registration_state(), (0, 0, 0))
+
     def test_permission_and_active_user_still_required(self):
         no_permission = get_user_model().objects.create_user("gate5-no-permission")
         with self.assertRaises(PermissionDenied):
             approve_and_register_discovery(
-                self.replacement.sha256, no_permission.pk, GATE5_APPROVAL_DECISION_SHA256
+                self.replacement.sha256, no_permission.pk, DISCOVERY_COMPLETION_SUMMARY_SHA256
             )
         inactive = approver_user("gate5-inactive")
         inactive.is_active = False
         inactive.save(update_fields=["is_active"])
         with self.assertRaises(PermissionDenied):
             approve_and_register_discovery(
-                self.replacement.sha256, inactive.pk, GATE5_APPROVAL_DECISION_SHA256
+                self.replacement.sha256, inactive.pk, DISCOVERY_COMPLETION_SUMMARY_SHA256
             )
         self.assertEqual(registration_state(), (0, 0, 0))
 
@@ -376,13 +459,13 @@ class Gate5ApprovalRejectionTests(Gate4FixtureTestCase):
             barrier.wait(timeout=10)
             try:
                 approve_and_register_discovery(
-                    self.replacement.sha256, user.pk, GATE5_APPROVAL_DECISION_SHA256
+                    self.replacement.sha256, user.pk, DISCOVERY_COMPLETION_SUMMARY_SHA256
                 )
                 outcomes.append("committed")
             except DatasetQualityError as error:
                 outcomes.append(str(error))
             finally:
-                close_old_connections()
+                connection.close()
 
         threads = [threading.Thread(target=attempt) for _ in range(2)]
         for thread in threads:
@@ -408,7 +491,7 @@ class Gate5ApprovalRejectionTests(Gate4FixtureTestCase):
             DatasetQualityError, "gate5 registration state does not reconstruct"
         ):
             approve_and_register_discovery(
-                self.replacement.sha256, user.pk, GATE5_APPROVAL_DECISION_SHA256
+                self.replacement.sha256, user.pk, DISCOVERY_COMPLETION_SUMMARY_SHA256
             )
         for statement, params in (
             (
@@ -443,12 +526,22 @@ class Gate5ApprovalRejectionTests(Gate4FixtureTestCase):
 class Gate5CommandTests(Gate4FixtureTestCase):
     retention_policy = "gate5 command fixture"
 
-    def call(self, *, plan_sha256=None, artifact=None, approver="gate5-operator", execute=True):
+    def call(
+        self,
+        *,
+        plan_sha256=None,
+        artifact=None,
+        summary=None,
+        approver="gate5-operator",
+        execute=True,
+    ):
         arguments = [
             "--plan-sha256",
             plan_sha256 or DISCOVERY_V2_PLAN_SHA256,
             "--decision-artifact",
             artifact or str(DECISION_ARTIFACT_PATH),
+            "--completion-summary",
+            summary or str(COMPLETION_SUMMARY_PATH),
             "--approver",
             approver,
         ]
@@ -493,19 +586,62 @@ class Gate5CommandTests(Gate4FixtureTestCase):
                 self.call(artifact=self.write_artifact(content))
         self.assertEqual(registration_state(), (0, 0, 0))
 
+    def test_command_verifies_the_completion_summary_byte_for_byte(self):
+        approver_user("gate5-operator")
+        summary_bytes = COMPLETION_SUMMARY_PATH.read_bytes()
+        for content in (summary_bytes + b"\n", summary_bytes.replace(b"132", b"133", 1)):
+            with self.assertRaisesMessage(
+                CommandError,
+                "completion summary does not match the committed cross-series report",
+            ):
+                self.call(summary=self.write_artifact(content))
+        self.assertEqual(registration_state(), (0, 0, 0))
+
     def test_command_requires_an_existing_django_approver(self):
         with self.assertRaisesMessage(CommandError, "approver must be an existing Django user"):
             self.call(approver="gate5-nonexistent")
         self.assertEqual(registration_state(), (0, 0, 0))
 
-    def test_command_without_execute_is_a_read_only_dry_run(self):
+    def test_dry_run_performs_complete_validation_and_reports_not_ready(self):
+        """The dry run reconstructs every count and identity in a rolled-back
+        transaction; on this incomplete fixture it must report the exact
+        shortfalls, run PostgreSQL's Gate 5 validator, and write nothing."""
         approver_user("gate5-operator")
-        output = self.call(execute=False)
-        report = json.loads(output)
+        with self.assertRaisesMessage(CommandError, "gate5 dry run is not ready"):
+            self.call(execute=False)
+        output = StringIO()
+        with self.assertRaises(CommandError):
+            call_command(
+                "approve_discovery_registration",
+                "--plan-sha256",
+                DISCOVERY_V2_PLAN_SHA256,
+                "--decision-artifact",
+                str(DECISION_ARTIFACT_PATH),
+                "--completion-summary",
+                str(COMPLETION_SUMMARY_PATH),
+                "--approver",
+                "gate5-operator",
+                stdout=output,
+            )
+        report = json.loads(output.getvalue())
         self.assertEqual(report["event"], "gate5_dry_run")
         self.assertFalse(report["executed"])
-        self.assertTrue(report["unsealed_plan_present"])
-        self.assertEqual(report["artifact_sha256"], GATE5_APPROVAL_DECISION_SHA256)
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["plan_sealed"])
+        self.assertTrue(report["approver_active"])
+        self.assertTrue(report["approver_has_permission"])
+        self.assertEqual(report["supersession_lineage_count"], 1)
+        self.assertEqual(report["canary_lineage"], "reconstructed")
+        self.assertEqual(report["chunk_count"], GATE5_ACCEPTED_INVENTORY_COUNT)
+        self.assertEqual(report["inventory_count"], 1)
+        self.assertIn("inventory count does not match the pin", report["problems"])
+        self.assertIn("observation count does not match the pin", report["problems"])
+        self.assertIn("every discovery chunk requires an accepted inventory", report["problems"])
+        self.assertTrue(
+            any("gate5" in item for item in report["problems"]),
+            report["problems"],
+        )
+        self.assertIn("postgresql_gate5_validator", report)
         self.assertEqual(registration_state(), (0, 0, 0))
 
     def test_command_execute_fails_closed_without_the_complete_state(self):

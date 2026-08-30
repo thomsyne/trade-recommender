@@ -262,7 +262,7 @@ class Gate4ActivationTests(Gate4FixtureTestCase):
         )
         with self.assertRaisesMessage(
             DatasetQualityError,
-            "gate5 approval requires the committed approval-decision artifact hash",
+            "gate5 approval requires the committed cross-series completion-summary hash",
         ):
             approve_and_register_discovery(self.replacement.sha256, approver.pk, "a" * 64)
         with (

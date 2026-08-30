@@ -1409,9 +1409,9 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         raise PermissionDenied("active governed discovery approval permission is required")
     if not re.fullmatch(r"[0-9a-f]{64}", cross_series_report_sha256):
         raise ValueError("cross-series report SHA-256 is invalid")
-    if cross_series_report_sha256 != GATE5_APPROVAL_DECISION_SHA256:
+    if cross_series_report_sha256 != DISCOVERY_COMPLETION_SUMMARY_SHA256:
         raise DatasetQualityError(
-            "gate5 approval requires the committed approval-decision artifact hash"
+            "gate5 approval requires the committed cross-series completion-summary hash"
         )
     chunk_hash, semantic_hash, operational_hash = _registration_hashes(plan)
     observation_count = HistoricalTimestampObservation.objects.filter(
@@ -1433,6 +1433,7 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         "global_semantic_inventory_sha256": semantic_hash,
         "accepted_operational_evidence_set_sha256": operational_hash,
         "cross_series_report_sha256": cross_series_report_sha256,
+        "approval_decision_sha256": GATE5_APPROVAL_DECISION_SHA256,
         "approved_by": approver.get_username(),
         "approved_at": now.astimezone(UTC).isoformat(timespec="microseconds"),
     }
