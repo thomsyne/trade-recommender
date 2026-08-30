@@ -9,6 +9,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.core.management import call_command
 from django.db import DatabaseError, close_old_connections, connection, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.test import TestCase, TransactionTestCase, override_settings
 
 from market.historical_acquisition import INSTRUMENTS
@@ -493,6 +494,11 @@ class ReplacementCanaryActivationTests(TestCase):
 
 class ReplacementCanaryConcurrencyTests(TransactionTestCase):
     def setUp(self):
+        # Earlier migration-cycle TransactionTestCases deliberately leave the
+        # schema downgraded; restore the activation schema unconditionally.
+        MigrationExecutor(connection).migrate(
+            [("market", "0015_provider_observed_canary_activation")]
+        )
         self.source = seed_governed_market("canary activation concurrency")
         self.superseded, self.replacement, self.supersession = build_superseded_state()
         self.canary = self.replacement.chunks.select_related("instrument").get(
