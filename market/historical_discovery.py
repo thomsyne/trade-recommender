@@ -63,6 +63,17 @@ GOVERNING_CANARY_TERMINAL_EVENT_SHA256 = (
 GOVERNING_CANARY_OPERATIONAL_EVIDENCE_SHA256 = (
     "0854a7c391c8fd4562a4e24001438de252ff39c7869629b3abfdea4d709028a0"
 )
+# Gate 3R single-canary activation: the only replacement-plan attempt the
+# governance permits is attempt 1 of this exact approved v2 chunk.
+CANARY_V2_LOGICAL_KEY = "63db29db49868205e76c52507dab8da30d4a740fac41e709a1edbb1ea100b88d"
+CANARY_V2_REQUEST_SHA256 = "3ec01ff455aeef4b6977fb7350dfa8fd98dae744a886c22ad84d597947677ff1"
+CANARY_V2_ORDINAL = 2
+CANARY_V2_INSTRUMENT = "AUD_USD"
+CANARY_V2_GRANULARITY = "H1"
+CANARY_V2_REQUESTED_FROM = "2009-12-31T15:00:00Z"
+CANARY_V2_REQUESTED_TO = "2010-06-16T07:00:00Z"
+CANARY_V2_ATTEMPT_NUMBER = 1
+CANARY_V2_IDEMPOTENCY_KEY = f"historical-discovery-attempt:{CANARY_V2_LOGICAL_KEY}:1"
 DISCOVERY_PURPOSE = "provider_timestamp_inventory_discovery"
 DISCOVERY_APPROVAL_IDENTITY = "failed-break-phase-2b1r-discovery-approval-v1"
 SUPERSEDED_DATA_IDENTITY = "oanda-ba-ny17-friday-v1"
@@ -408,6 +419,40 @@ def future_data_contract_semantic_hash(*, global_semantic_inventory_sha256):
     )
 
 
+def _validate_replacement_canary_activation(chunk):
+    plan = chunk.plan
+    supersession = HistoricalDiscoverySupersession.objects.filter(replacement_plan=plan).first()
+    if supersession is None:
+        return
+    if (
+        plan.version != DISCOVERY_V2_VERSION
+        or plan.identity != DISCOVERY_V2_PLAN_IDENTITY
+        or plan.sha256 != DISCOVERY_V2_PLAN_SHA256
+        or canonical_hash(plan.payload) != DISCOVERY_V2_PLAN_SHA256
+        or plan.canonical_request_manifest_sha256 != DISCOVERY_V2_MANIFEST_SHA256
+        or canonical_hash(plan.payload["requests"]) != DISCOVERY_V2_MANIFEST_SHA256
+        or supersession.replacement_plan_sha256 != plan.sha256
+        or supersession.reason_code
+        != HistoricalDiscoverySupersession.REASON_PROVIDER_REQUEST_BOUND_UNSAFE
+        or supersession.sha256 != canonical_hash(supersession.payload)
+        or chunk.logical_key != CANARY_V2_LOGICAL_KEY
+        or chunk.canonical_request_sha256 != CANARY_V2_REQUEST_SHA256
+        or chunk.ordinal != CANARY_V2_ORDINAL
+        or chunk.instrument.code != CANARY_V2_INSTRUMENT
+        or chunk.granularity != CANARY_V2_GRANULARITY
+        or chunk.requested_from != parse_timestamp(CANARY_V2_REQUESTED_FROM)
+        or chunk.requested_to != parse_timestamp(CANARY_V2_REQUESTED_TO)
+        or HistoricalDiscoveryAttempt.objects.filter(chunk__plan=plan).exists()
+        or HistoricalDiscoveryApproval.objects.filter(plan=plan).exists()
+        or HistoricalDiscoveryRegistration.objects.filter(plan=plan).exists()
+        or IngestionRun.objects.filter(
+            status=IngestionRun.Status.RUNNING,
+            parameters__purpose=DISCOVERY_PURPOSE,
+        ).exists()
+    ):
+        raise DatasetQualityError("replacement canary activation rejects this attempt")
+
+
 @transaction.atomic
 def begin_discovery_attempt(logical_key):
     chunk = (
@@ -419,10 +464,7 @@ def begin_discovery_attempt(logical_key):
         raise DatasetQualityError("registered discovery plans are sealed")
     if HistoricalDiscoverySupersession.objects.filter(superseded_plan=chunk.plan).exists():
         raise DatasetQualityError("superseded discovery plans reject new attempts")
-    if HistoricalDiscoverySupersession.objects.filter(replacement_plan=chunk.plan).exists():
-        raise DatasetQualityError(
-            "supersession replacement plans reject attempts until governed activation"
-        )
+    _validate_replacement_canary_activation(chunk)
     attempts = chunk.attempts.select_related("ingestion_run")
     if attempts.filter(ingestion_run__status=IngestionRun.Status.SUCCEEDED).exists():
         raise DatasetQualityError("successful discovery chunks cannot be retried")
@@ -956,6 +998,10 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         raise DatasetQualityError("discovery plan is already sealed")
     if HistoricalDiscoverySupersession.objects.filter(superseded_plan=plan).exists():
         raise DatasetQualityError("superseded discovery plans cannot be approved")
+    if HistoricalDiscoverySupersession.objects.filter(replacement_plan=plan).exists():
+        raise DatasetQualityError(
+            "supersession replacement plans reject approval until governed activation"
+        )
     approver = get_user_model().objects.select_for_update().get(pk=approver_id)
     if not approver.is_active or not approver.has_perm("market.approve_historical_discovery"):
         raise PermissionDenied("active governed discovery approval permission is required")
