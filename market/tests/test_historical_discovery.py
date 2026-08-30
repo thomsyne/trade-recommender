@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
-from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import DatabaseError, close_old_connections, connection, transaction
@@ -916,103 +916,96 @@ class HistoricalDiscoveryTests(TestCase):
         self.assertLess(time.monotonic() - started, 15)
         self.assertEqual(HistoricalTimestampObservation.objects.count(), 4999)
 
-    def test_incomplete_or_unauthorized_plan_cannot_be_sealed(self):
+    def test_generic_plans_can_never_be_sealed_under_gate5(self):
         plan = self.create_plan()
         user = get_user_model().objects.create_user("reviewer")
 
-        with self.assertRaises(PermissionDenied):
+        with self.assertRaisesMessage(
+            DatasetQualityError, "only the approved replacement discovery plan may be approved"
+        ):
             approve_and_register_discovery(plan.sha256, user.pk, "a" * 64)
         permission = Permission.objects.get(codename="approve_historical_discovery")
         user.user_permissions.add(permission)
-        with self.assertRaisesMessage(DatasetQualityError, "accepted inventory"):
+        self.run_success(plan)
+        with self.assertRaisesMessage(
+            DatasetQualityError, "only the approved replacement discovery plan may be approved"
+        ):
             approve_and_register_discovery(plan.sha256, user.pk, "a" * 64)
         self.assertFalse(HistoricalDiscoveryApproval.objects.exists())
         self.assertFalse(HistoricalDiscoveryRegistration.objects.exists())
-
-        user.user_permissions.add(Permission.objects.get(codename="approve_historical_discovery"))
-        user.is_active = False
-        user.save(update_fields=["is_active"])
-        with self.assertRaises(PermissionDenied):
-            approve_and_register_discovery(plan.sha256, user.pk, "a" * 64)
-
-    def test_approval_registration_and_seal_commit_atomically(self):
-        plan = self.create_plan()
-        self.run_success(plan)
-        user = get_user_model().objects.create_user("approver")
-        user.user_permissions.add(Permission.objects.get(codename="approve_historical_discovery"))
-
-        with (
-            patch(
-                "market.historical_discovery.HistoricalDiscoveryRegistration.objects.create",
-                side_effect=DatabaseError("synthetic registration failure"),
-            ),
-            self.assertRaises(DatabaseError),
-        ):
-            approve_and_register_discovery(plan.sha256, user.pk, "b" * 64)
-        self.assertFalse(HistoricalDiscoveryApproval.objects.exists())
         plan.refresh_from_db()
         self.assertIsNone(plan.sealed_at)
 
-        registration = approve_and_register_discovery(plan.sha256, user.pk, "b" * 64)
-        plan.refresh_from_db()
-        self.assertIsNotNone(plan.sealed_at)
-        self.assertEqual(registration.registered_at, plan.sealed_at)
-        self.assertEqual(
-            _registration_hashes(plan)[1], registration.global_semantic_inventory_sha256
-        )
-        self.assertEqual(registration.approval.payload["cross_series_report_sha256"], "b" * 64)
-        with self.assertRaisesMessage(DatasetQualityError, "sealed"):
-            begin_discovery_attempt(plan.chunks.get().logical_key)
-        inventory = HistoricalTimestampInventory.objects.get()
-        with self.assertRaises(DatabaseError), transaction.atomic():
-            HistoricalTimestampObservation.objects.create(
-                inventory=inventory,
-                timestamp=inventory.observations.get().timestamp + timedelta(weeks=1),
-                complete=True,
-                volume=1,
-                bid_present=True,
-                ask_present=True,
+    def test_database_rejects_raw_full_seal_bypass_of_generic_plan(self):
+        plan = self.create_plan()
+        self.run_success(plan)
+        user = get_user_model().objects.create_user("seal-forger")
+        user.user_permissions.add(Permission.objects.get(codename="approve_historical_discovery"))
+        chunk_hash, semantic_hash, operational_hash = _registration_hashes(plan)
+        with (
+            self.assertRaisesMessage(
+                DatabaseError,
+                "only the approved replacement discovery plan may be approved",
+            ),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoveryapproval
+                   (plan_id,approved_by_id,global_semantic_inventory_sha256,
+                    accepted_operational_evidence_set_sha256,payload,sha256,approved_at)
+                   VALUES (%s,%s,%s,%s,'{}'::jsonb,%s,now()) RETURNING id""",
+                [plan.pk, user.pk, semantic_hash, operational_hash, "c" * 64],
             )
+            approval_id = cursor.fetchone()[0]
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoveryregistration
+                   (plan_id,approval_id,ordered_chunk_manifest_sha256,
+                    global_semantic_inventory_sha256,
+                    accepted_operational_evidence_set_sha256,cross_series_report_sha256,
+                    payload,report_sha256,registered_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,'{}'::jsonb,%s,now()) RETURNING registered_at""",
+                [
+                    plan.pk,
+                    approval_id,
+                    chunk_hash,
+                    semantic_hash,
+                    operational_hash,
+                    "d" * 64,
+                    "e" * 64,
+                ],
+            )
+            registered_at = cursor.fetchone()[0]
+            cursor.execute(
+                "UPDATE market_historicaldiscoveryplan SET sealed_at=%s WHERE id=%s",
+                [registered_at, plan.pk],
+            )
+            cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        self.assertFalse(HistoricalDiscoveryApproval.objects.exists())
+        self.assertFalse(HistoricalDiscoveryRegistration.objects.exists())
+        plan.refresh_from_db()
+        self.assertIsNone(plan.sealed_at)
 
-    def test_database_rejects_forged_approval_payload_and_hash(self):
+    def test_database_rejects_raw_partial_approval_of_generic_plan(self):
         plan = self.create_plan()
         self.run_success(plan)
         user = get_user_model().objects.create_user("approval-forger")
-        user.user_permissions.add(Permission.objects.get(codename="approve_historical_discovery"))
-        original = HistoricalDiscoveryApproval.objects.create
-
-        def forged_create(**kwargs):
-            kwargs["payload"] = {**kwargs["payload"], "raw_url": "https://forbidden.invalid"}
-            kwargs["sha256"] = "f" * 64
-            return original(**kwargs)
-
         with (
-            patch.object(HistoricalDiscoveryApproval.objects, "create", side_effect=forged_create),
-            self.assertRaises(DatabaseError),
-        ):
-            approve_and_register_discovery(plan.sha256, user.pk, "c" * 64)
-        self.assertFalse(HistoricalDiscoveryApproval.objects.exists())
-        self.assertFalse(HistoricalDiscoveryRegistration.objects.exists())
-
-    def test_database_rejects_forged_registration_payload_and_hash(self):
-        plan = self.create_plan()
-        self.run_success(plan)
-        user = get_user_model().objects.create_user("registration-forger")
-        user.user_permissions.add(Permission.objects.get(codename="approve_historical_discovery"))
-        original = HistoricalDiscoveryRegistration.objects.create
-
-        def forged_create(**kwargs):
-            kwargs["payload"] = {**kwargs["payload"], "body": "forbidden"}
-            kwargs["report_sha256"] = "f" * 64
-            return original(**kwargs)
-
-        with (
-            patch.object(
-                HistoricalDiscoveryRegistration.objects, "create", side_effect=forged_create
+            self.assertRaisesMessage(
+                DatabaseError,
+                "only the approved replacement discovery plan may be approved",
             ),
-            self.assertRaises(DatabaseError),
+            transaction.atomic(),
+            connection.cursor() as cursor,
         ):
-            approve_and_register_discovery(plan.sha256, user.pk, "d" * 64)
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoveryapproval
+                   (plan_id,approved_by_id,global_semantic_inventory_sha256,
+                    accepted_operational_evidence_set_sha256,payload,sha256,approved_at)
+                   VALUES (%s,%s,%s,%s,'{}'::jsonb,%s,now())""",
+                [plan.pk, user.pk, "a" * 64, "b" * 64, "c" * 64],
+            )
+            cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
         self.assertFalse(HistoricalDiscoveryApproval.objects.exists())
         self.assertFalse(HistoricalDiscoveryRegistration.objects.exists())
 

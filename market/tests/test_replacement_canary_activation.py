@@ -52,6 +52,7 @@ CANARY_START = datetime(2009, 12, 31, 15, tzinfo=UTC)
 MIGRATION_0015 = [("market", "0015_provider_observed_canary_activation")]
 MIGRATION_0016 = [("market", "0016_provider_observed_h1_alignment_retry")]
 MIGRATION_0017 = [("market", "0017_provider_observed_full_discovery_activation")]
+MIGRATION_0018 = [("market", "0018_provider_observed_discovery_registration_activation")]
 V1_LINEAGE_HASH_SQL = """
     SELECT market_sha256(jsonb_build_object(
              'plan',to_jsonb(p),'chunks',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.ordinal)
@@ -439,7 +440,7 @@ class RetryFixtureTestCase(TransactionTestCase):
         )
 
     def tearDown(self):
-        migrate_to(MIGRATION_0017)
+        migrate_to(MIGRATION_0018)
         super().tearDown()
 
 
@@ -549,8 +550,7 @@ class ReplacementCanaryRetryTests(RetryFixtureTestCase):
             Permission.objects.get(codename="approve_historical_discovery")
         )
         with self.assertRaisesMessage(
-            DatasetQualityError,
-            "supersession replacement plans reject approval until governed activation",
+            DatasetQualityError, "gate5 canary lineage does not reconstruct"
         ):
             approve_and_register_discovery(self.replacement.sha256, approver.pk, "a" * 64)
         with (
@@ -651,7 +651,7 @@ class ReplacementCanaryLedgerGateTests(TransactionTestCase):
         )
 
     def tearDown(self):
-        migrate_to(MIGRATION_0017)
+        migrate_to(MIGRATION_0018)
         super().tearDown()
 
     def assert_retry_rejected_everywhere(self):
