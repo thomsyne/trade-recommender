@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import time
@@ -460,17 +461,15 @@ class Gate4WaveRunnerTests(Gate4FixtureTestCase):
             chunk=self.canary
         ).semantic_inventory_sha256
         self.manifest = build_wave_manifest(semantic)
-        self.manifest_path = tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".json",
-            dir="/private/tmp/claude-501/-Users-oluwatomisintaiwo-Projects-trade-recommender/38fe33f5-9aef-4f32-a2d2-e19b07143666/scratchpad",
-            delete=False,
+        manifest_dir = tempfile.TemporaryDirectory(
+            prefix="gate4-wave-manifest-", ignore_cleanup_errors=True
         )
-        json.dump(self.manifest, self.manifest_path, sort_keys=True)
-        self.manifest_path.close()
+        self.addCleanup(manifest_dir.cleanup)
+        self.manifest_file = os.path.join(manifest_dir.name, "wave-manifest.json")
+        self.write_manifest(self.manifest)
 
     def write_manifest(self, manifest):
-        with open(self.manifest_path.name, "w", encoding="utf-8") as handle:
+        with open(self.manifest_file, "w", encoding="utf-8") as handle:
             json.dump(manifest, handle, sort_keys=True)
 
     def run_wave(self, client, wave=1, max_chunks=2, resume=False):
@@ -482,7 +481,7 @@ class Gate4WaveRunnerTests(Gate4FixtureTestCase):
             call_command(
                 "run_discovery_wave",
                 "--manifest",
-                self.manifest_path.name,
+                self.manifest_file,
                 "--plan-sha256",
                 self.manifest["v2_plan_sha256"],
                 "--manifest-sha256",
@@ -578,7 +577,7 @@ class Gate4WaveRunnerTests(Gate4FixtureTestCase):
                     call_command(
                         "run_discovery_wave",
                         "--manifest",
-                        self.manifest_path.name,
+                        self.manifest_file,
                         "--plan-sha256",
                         self.manifest["v2_plan_sha256"],
                         "--manifest-sha256",
@@ -599,7 +598,7 @@ class Gate4WaveRunnerTests(Gate4FixtureTestCase):
             call_command(
                 "run_discovery_wave",
                 "--manifest",
-                self.manifest_path.name,
+                self.manifest_file,
                 "--plan-sha256",
                 self.manifest["v2_plan_sha256"],
                 "--manifest-sha256",
@@ -613,7 +612,7 @@ class Gate4WaveRunnerTests(Gate4FixtureTestCase):
             call_command(
                 "run_discovery_wave",
                 "--manifest",
-                self.manifest_path.name,
+                self.manifest_file,
                 "--plan-sha256",
                 "f" * 64,
                 "--manifest-sha256",
@@ -641,7 +640,7 @@ class Gate4WaveRunnerTests(Gate4FixtureTestCase):
             call_command(
                 "run_discovery_wave",
                 "--manifest",
-                self.manifest_path.name,
+                self.manifest_file,
                 "--plan-sha256",
                 self.manifest["v2_plan_sha256"],
                 "--manifest-sha256",
