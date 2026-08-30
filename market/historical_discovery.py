@@ -44,6 +44,25 @@ DISCOVERY_PLAN_IDENTITY = "failed-break-phase-2b1r-discovery-plan-v1"
 DISCOVERY_V2_VERSION = "phase-2b1r-discovery-v2"
 DISCOVERY_V2_PLAN_IDENTITY = "failed-break-phase-2b1r-discovery-plan-v2"
 DISCOVERY_V2_H1_MAX_HOURS = 4000
+DISCOVERY_V1_PLAN_SHA256 = "292556a591024876c7051212d1c6886cd026a097e141295e9b60257fc5402b33"
+DISCOVERY_V1_MANIFEST_SHA256 = "a3cf7ef1f484d2379bfd1ef94769216b2ed9b41635cad7cadbd71a8de251bb2e"
+DISCOVERY_V2_PLAN_SHA256 = "2a25bbc28fca5d596b26d3d2921fa881e374174fb08cc1dbfb51e47c8b138e3a"
+DISCOVERY_V2_MANIFEST_SHA256 = "04835164d5c2abe633efd1a8ddc58edcc7c9d5e8347c01425df5049d9b74b427"
+GOVERNING_CANARY_LOGICAL_KEY = "c8e22e7d02432f7022094152182d39eec6571cdf98700f9272735e52fdf8b827"
+GOVERNING_CANARY_REQUEST_SHA256 = "beb847b0404bb9facf37ec5354b7bbdfa22335a17d7f9abdcb4178bdf0e8494d"
+GOVERNING_CANARY_ATTEMPT_NUMBER = 1
+GOVERNING_CANARY_IDEMPOTENCY_KEY = f"historical-discovery-attempt:{GOVERNING_CANARY_LOGICAL_KEY}:1"
+# Recorded production Gate 3 evidence hashes. These two values are not portable
+# identities: they derive from an ingestion-run primary key, wall-clock
+# microsecond timestamps, and the withheld provider request id, so they are
+# bound through the immutable provider-evidence and audit chain rather than
+# hard-coded into enforcement.
+GOVERNING_CANARY_TERMINAL_EVENT_SHA256 = (
+    "ac09dc4487659e13728178cc0e3d19e825ea2a7d597b5247c87605fdf2817791"
+)
+GOVERNING_CANARY_OPERATIONAL_EVIDENCE_SHA256 = (
+    "0854a7c391c8fd4562a4e24001438de252ff39c7869629b3abfdea4d709028a0"
+)
 DISCOVERY_PURPOSE = "provider_timestamp_inventory_discovery"
 DISCOVERY_APPROVAL_IDENTITY = "failed-break-phase-2b1r-discovery-approval-v1"
 SUPERSEDED_DATA_IDENTITY = "oanda-ba-ny17-friday-v1"
@@ -1025,13 +1044,25 @@ def supersede_discovery_plan(
         or superseded_plan.pk == replacement_plan.pk
         or superseded_plan.sealed_at is not None
         or replacement_plan.sealed_at is not None
+        or superseded_plan.version != DISCOVERY_VERSION
+        or superseded_plan.identity != DISCOVERY_PLAN_IDENTITY
+        or superseded_plan.sha256 != DISCOVERY_V1_PLAN_SHA256
+        or canonical_hash(superseded_plan.payload) != DISCOVERY_V1_PLAN_SHA256
+        or superseded_plan.canonical_request_manifest_sha256 != DISCOVERY_V1_MANIFEST_SHA256
+        or canonical_hash(superseded_plan.payload["requests"]) != DISCOVERY_V1_MANIFEST_SHA256
+        or replacement_plan.version != DISCOVERY_V2_VERSION
+        or replacement_plan.identity != DISCOVERY_V2_PLAN_IDENTITY
+        or replacement_plan.sha256 != DISCOVERY_V2_PLAN_SHA256
+        or canonical_hash(replacement_plan.payload) != DISCOVERY_V2_PLAN_SHA256
+        or replacement_plan.canonical_request_manifest_sha256 != DISCOVERY_V2_MANIFEST_SHA256
+        or canonical_hash(replacement_plan.payload["requests"]) != DISCOVERY_V2_MANIFEST_SHA256
         or attempt.chunk.plan_id != superseded_plan.pk
+        or attempt.chunk.logical_key != GOVERNING_CANARY_LOGICAL_KEY
+        or attempt.chunk.canonical_request_sha256 != GOVERNING_CANARY_REQUEST_SHA256
+        or attempt.attempt_number != GOVERNING_CANARY_ATTEMPT_NUMBER
+        or attempt.idempotency_key != GOVERNING_CANARY_IDEMPOTENCY_KEY
         or run.status != IngestionRun.Status.FAILED
-        or run.failure_reason
-        not in {
-            DiscoveryFailureCode.PROVIDER_HTTP_ERROR,
-            DiscoveryFailureCode.PROVIDER_LIMIT_SUSPECTED,
-        }
+        or run.failure_reason != DiscoveryFailureCode.PROVIDER_HTTP_ERROR
         or replacement_version <= superseded_version
         or superseded_plan.payload["discovery_contract"]
         != replacement_plan.payload["discovery_contract"]

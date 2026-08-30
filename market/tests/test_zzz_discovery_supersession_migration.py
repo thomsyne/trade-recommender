@@ -4,6 +4,7 @@ from django.test import TransactionTestCase
 
 from market.historical_acquisition import INSTRUMENTS
 from market.historical_discovery import (
+    GOVERNING_CANARY_LOGICAL_KEY,
     build_initial_discovery_plan,
     build_replacement_discovery_plan,
     create_discovery_plan,
@@ -68,7 +69,9 @@ class HistoricalDiscoverySupersessionMigrationTests(TransactionTestCase):
 
     def create_failed_v1(self):
         plan = create_discovery_plan(build_initial_discovery_plan())
-        chunk = plan.chunks.select_related("instrument").order_by("ordinal").first()
+        chunk = plan.chunks.select_related("instrument").get(
+            logical_key=GOVERNING_CANARY_LOGICAL_KEY
+        )
         with self.assertRaises(OandaError):
             run_discovery_chunk(chunk.logical_key, FailedClient(chunk))
         return plan, HistoricalDiscoveryAttempt.objects.get(chunk=chunk)

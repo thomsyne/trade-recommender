@@ -19,6 +19,8 @@ from django.utils import timezone
 from market.historical_acquisition import FROZEN_RANGES, INSTRUMENTS
 from market.historical_discovery import (
     DISCOVERY_PROVIDER_MAX_CANDLES,
+    GOVERNING_CANARY_LOGICAL_KEY,
+    GOVERNING_CANARY_REQUEST_SHA256,
     DiscoveryFailureCode,
     DiscoveryPersistenceError,
     DiscoveryResponseError,
@@ -292,15 +294,20 @@ class HistoricalDiscoveryTests(TestCase):
         )()
         return run_discovery_chunk(chunk.logical_key, client)
 
-    def create_supersession(self):
-        superseded = create_discovery_plan(self.single_request_payload("phase-2b1r-discovery-v1"))
-        chunk = superseded.chunks.select_related("instrument").get()
+    def create_failed_canary_plan(self):
+        superseded = create_discovery_plan(build_initial_discovery_plan())
+        chunk = superseded.chunks.select_related("instrument").get(
+            logical_key=GOVERNING_CANARY_LOGICAL_KEY
+        )
         with self.assertRaises(OandaError):
             run_discovery_chunk(
                 chunk.logical_key,
                 FailingInventoryClient(chunk.canonical_request_sha256),
             )
-        attempt = HistoricalDiscoveryAttempt.objects.get(chunk=chunk)
+        return superseded, chunk, HistoricalDiscoveryAttempt.objects.get(chunk=chunk)
+
+    def create_supersession(self):
+        superseded, _, attempt = self.create_failed_canary_plan()
         replacement = create_discovery_plan(build_replacement_discovery_plan())
         supersession = supersede_discovery_plan(
             superseded.sha256,
@@ -995,13 +1002,7 @@ class HistoricalDiscoveryTests(TestCase):
         self.assertFalse(HistoricalDiscoveryRegistration.objects.exists())
 
     def test_supersession_preserves_v1_evidence_and_blocks_all_old_plan_writes(self):
-        superseded = create_discovery_plan(self.single_request_payload("phase-2b1r-discovery-v1"))
-        chunk = superseded.chunks.select_related("instrument").get()
-        with self.assertRaises(OandaError):
-            run_discovery_chunk(
-                chunk.logical_key,
-                FailingInventoryClient(chunk.canonical_request_sha256),
-            )
+        superseded, chunk, attempt = self.create_failed_canary_plan()
         attempt = HistoricalDiscoveryAttempt.objects.select_related("ingestion_run").get(
             chunk=chunk
         )
@@ -1161,25 +1162,308 @@ class HistoricalDiscoveryTests(TestCase):
                     ],
                 )
 
-    def test_database_rejects_supersession_to_noncanonical_v2_layout(self):
-        superseded = create_discovery_plan(self.single_request_payload("phase-2b1r-discovery-v1"))
-        chunk = superseded.chunks.select_related("instrument").get()
-        with self.assertRaises(OandaError):
-            run_discovery_chunk(
-                chunk.logical_key,
-                FailingInventoryClient(chunk.canonical_request_sha256),
+    def self_consistent_variant_payload(self, *, version, identity, mutate_requests=None):
+        base = build_replacement_discovery_plan()
+        requests = [
+            dict(item, canonical_request=dict(item["canonical_request"]))
+            for item in base["requests"]
+        ]
+        if mutate_requests:
+            requests = mutate_requests(requests)
+        rebuilt = []
+        for ordinal, item in enumerate(requests, 1):
+            request = item["canonical_request"]
+            start = datetime.fromisoformat(request["from"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(request["to"].replace("Z", "+00:00"))
+            request_sha = canonical_hash(request)
+            rebuilt.append(
+                {
+                    "ordinal": ordinal,
+                    "logical_discovery_key": logical_discovery_key(
+                        request_sha256=request_sha,
+                        instrument=request["instrument"],
+                        granularity=request["granularity"],
+                        requested_from=start,
+                        requested_to=end,
+                        discovery_version=version,
+                    ),
+                    "canonical_request": request,
+                    "canonical_request_sha256": request_sha,
+                }
             )
-        attempt = HistoricalDiscoveryAttempt.objects.get(chunk=chunk)
+        body = {
+            key: value
+            for key, value in base.items()
+            if key not in {"requests", "plan_sha256", "canonical_request_manifest_sha256"}
+        }
+        body.update(
+            discovery_version=version,
+            identity=identity,
+            declared_chunk_count=len(rebuilt),
+            requests=rebuilt,
+            canonical_request_manifest_sha256=canonical_hash(rebuilt),
+        )
+        return {**body, "plan_sha256": canonical_hash(body)}
+
+    def raw_insert_plan(self, payload):
+        body = {key: value for key, value in payload.items() if key != "plan_sha256"}
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoveryplan
+                   (identity,version,source_id,purpose,environment,phase1_spec_hash,
+                    phase1_manifest_hash,superseded_data_identity,declared_chunk_count,
+                    canonical_request_manifest,canonical_request_manifest_sha256,payload,
+                    sha256,sealed_at,created_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s::jsonb,%s,NULL,now())
+                   RETURNING id""",
+                [
+                    body["identity"],
+                    body["discovery_version"],
+                    self.source.pk,
+                    body["purpose"],
+                    body["environment"],
+                    body["phase1_spec_hash"],
+                    body["phase1_manifest_hash"],
+                    body["superseded_data_identity"],
+                    body["declared_chunk_count"],
+                    json.dumps(body["requests"]),
+                    body["canonical_request_manifest_sha256"],
+                    json.dumps(body),
+                    payload["plan_sha256"],
+                ],
+            )
+            return cursor.fetchone()[0]
+
+    def raw_supersession_row(self, superseded, replacement, attempt, overrides=None):
+        evidence = HistoricalDiscoveryProviderEvidence.objects.get(attempt=attempt)
+        run = attempt.ingestion_run
+        event = AuditEvent.objects.get(
+            subject_type="HistoricalDiscoveryAttempt",
+            subject_id=str(attempt.pk),
+            event_type="market.historical_discovery_failed",
+        )
+        payload = {
+            "identity": "historical-discovery-supersession-v1",
+            "reason_code": "PROVIDER_REQUEST_BOUND_UNSAFE",
+            "superseded_plan_sha256": superseded["sha256"],
+            "superseded_request_manifest_sha256": superseded["manifest_sha256"],
+            "replacement_plan_sha256": replacement["sha256"],
+            "replacement_request_manifest_sha256": replacement["manifest_sha256"],
+            "governing_attempt_idempotency_key": attempt.idempotency_key,
+            "governing_run_request_manifest_hash": run.request_manifest_hash,
+            "governing_failure_code": run.failure_reason,
+            "governing_terminal_event_sha256": evidence.terminal_event_sha256,
+            "governing_operational_evidence_sha256": evidence.operational_evidence_sha256,
+            "governing_audit_event_sha256": event.payload["event_sha256"],
+        }
+        row = {
+            "superseded_plan_id": superseded["id"],
+            "replacement_plan_id": replacement["id"],
+            "governing_attempt_id": attempt.pk,
+            "reason_code": "PROVIDER_REQUEST_BOUND_UNSAFE",
+            "superseded_plan_sha256": superseded["sha256"],
+            "replacement_plan_sha256": replacement["sha256"],
+            "governing_terminal_event_sha256": evidence.terminal_event_sha256,
+            "governing_operational_evidence_sha256": evidence.operational_evidence_sha256,
+            "payload": payload,
+        }
+        row.update(overrides or {})
+        row["sha256"] = canonical_hash(row["payload"])
+        return row
+
+    def raw_supersede(self, row):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """INSERT INTO market_historicaldiscoverysupersession
+                   (superseded_plan_id,replacement_plan_id,governing_attempt_id,reason_code,
+                    superseded_plan_sha256,replacement_plan_sha256,
+                    governing_terminal_event_sha256,governing_operational_evidence_sha256,
+                    payload,sha256,created_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,now())""",
+                [
+                    row["superseded_plan_id"],
+                    row["replacement_plan_id"],
+                    row["governing_attempt_id"],
+                    row["reason_code"],
+                    row["superseded_plan_sha256"],
+                    row["replacement_plan_sha256"],
+                    row["governing_terminal_event_sha256"],
+                    row["governing_operational_evidence_sha256"],
+                    json.dumps(row["payload"]),
+                    row["sha256"],
+                ],
+            )
+
+    def test_supersession_rejects_non_pinned_replacement_plans(self):
+        superseded, _, attempt = self.create_failed_canary_plan()
         incomplete_v2 = create_discovery_plan(
             self.single_request_payload("phase-2b1r-discovery-v2")
         )
 
-        with self.assertRaisesMessage(DatabaseError, "supersession lineage is invalid"):
-            supersede_discovery_plan(
-                superseded.sha256,
-                incomplete_v2.sha256,
-                attempt.pk,
+        with self.assertRaisesMessage(DatasetQualityError, "supersession lineage is invalid"):
+            supersede_discovery_plan(superseded.sha256, incomplete_v2.sha256, attempt.pk)
+        self.assertFalse(HistoricalDiscoverySupersession.objects.exists())
+
+    def test_supersession_rejects_variant_plans_in_service_and_database(self):
+        superseded, _, attempt = self.create_failed_canary_plan()
+        superseded_ref = {
+            "id": superseded.pk,
+            "sha256": superseded.sha256,
+            "manifest_sha256": superseded.canonical_request_manifest_sha256,
+        }
+        pinned_identity = "failed-break-phase-2b1r-discovery-plan-v2"
+
+        def shift_first_h1(requests):
+            for item in requests:
+                request = item["canonical_request"]
+                if request["granularity"] == "H1" and request["instrument"] == "AUD_USD":
+                    end = datetime.fromisoformat(request["to"].replace("Z", "+00:00"))
+                    request["to"] = (end + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+                    break
+            return requests
+
+        def drop_last_chunk(requests):
+            return requests[:-1]
+
+        def duplicate_last_chunk(requests):
+            return [*requests, dict(requests[-1])]
+
+        def swap_instrument(requests):
+            for item in requests:
+                if item["canonical_request"]["instrument"] == "AUD_USD":
+                    item["canonical_request"]["instrument"] = "NZD_USD"
+            return requests
+
+        variants = (
+            (
+                "v3-plan",
+                "phase-2b1r-discovery-v3",
+                "failed-break-phase-2b1r-discovery-plan-v3",
+                None,
+            ),
+            ("shifted-h1", "phase-2b1r-discovery-v2", pinned_identity, shift_first_h1),
+            ("missing-chunk", "phase-2b1r-discovery-v2", pinned_identity, drop_last_chunk),
+            ("added-chunk", "phase-2b1r-discovery-v2", pinned_identity, duplicate_last_chunk),
+            ("instrument-swap", "phase-2b1r-discovery-v2", pinned_identity, swap_instrument),
+        )
+        for label, version, identity, mutation in variants:
+            with self.subTest(variant=label):
+                marker = transaction.savepoint()
+                try:
+                    payload = self.self_consistent_variant_payload(
+                        version=version, identity=identity, mutate_requests=mutation
+                    )
+                    self.assertNotEqual(
+                        payload["plan_sha256"],
+                        "2a25bbc28fca5d596b26d3d2921fa881e374174fb08cc1dbfb51e47c8b138e3a",
+                    )
+                    variant_id = self.raw_insert_plan(payload)
+                    with self.assertRaisesMessage(
+                        DatasetQualityError, "supersession lineage is invalid"
+                    ):
+                        supersede_discovery_plan(
+                            superseded.sha256, payload["plan_sha256"], attempt.pk
+                        )
+                    row = self.raw_supersession_row(
+                        superseded_ref,
+                        {
+                            "id": variant_id,
+                            "sha256": payload["plan_sha256"],
+                            "manifest_sha256": payload["canonical_request_manifest_sha256"],
+                        },
+                        attempt,
+                    )
+                    with (
+                        self.assertRaisesMessage(
+                            DatabaseError, "discovery supersession lineage is invalid"
+                        ),
+                        transaction.atomic(),
+                    ):
+                        self.raw_supersede(row)
+                finally:
+                    transaction.savepoint_rollback(marker)
+        self.assertFalse(HistoricalDiscoverySupersession.objects.exists())
+
+    def test_supersession_rejects_non_canary_governing_evidence(self):
+        superseded = create_discovery_plan(build_initial_discovery_plan())
+        other_chunk = superseded.chunks.select_related("instrument").get(ordinal=1)
+        self.assertNotEqual(other_chunk.logical_key, GOVERNING_CANARY_LOGICAL_KEY)
+        with self.assertRaises(OandaError):
+            run_discovery_chunk(
+                other_chunk.logical_key,
+                FailingInventoryClient(other_chunk.canonical_request_sha256),
             )
+        other_attempt = HistoricalDiscoveryAttempt.objects.get(chunk=other_chunk)
+        canary_chunk = superseded.chunks.select_related("instrument").get(
+            logical_key=GOVERNING_CANARY_LOGICAL_KEY
+        )
+        self.assertEqual(canary_chunk.canonical_request_sha256, GOVERNING_CANARY_REQUEST_SHA256)
+        for _ in range(2):
+            with self.assertRaises(OandaError):
+                run_discovery_chunk(
+                    canary_chunk.logical_key,
+                    FailingInventoryClient(canary_chunk.canonical_request_sha256),
+                )
+        retry_attempt = HistoricalDiscoveryAttempt.objects.get(chunk=canary_chunk, attempt_number=2)
+        replacement = create_discovery_plan(build_replacement_discovery_plan())
+
+        for label, governing in (
+            ("different-chunk", other_attempt),
+            ("retry-attempt", retry_attempt),
+        ):
+            with (
+                self.subTest(governing=label),
+                self.assertRaisesMessage(DatasetQualityError, "supersession lineage is invalid"),
+            ):
+                supersede_discovery_plan(superseded.sha256, replacement.sha256, governing.pk)
+
+        canary_attempt = HistoricalDiscoveryAttempt.objects.get(
+            chunk=canary_chunk, attempt_number=1
+        )
+        superseded_ref = {
+            "id": superseded.pk,
+            "sha256": superseded.sha256,
+            "manifest_sha256": superseded.canonical_request_manifest_sha256,
+        }
+        replacement_ref = {
+            "id": replacement.pk,
+            "sha256": replacement.sha256,
+            "manifest_sha256": replacement.canonical_request_manifest_sha256,
+        }
+        mutations = (
+            ("terminal-event-hash", {"governing_terminal_event_sha256": "f" * 64}, None),
+            (
+                "operational-evidence-hash",
+                {"governing_operational_evidence_sha256": "f" * 64},
+                None,
+            ),
+            ("audit-event-hash", None, {"governing_audit_event_sha256": "f" * 64}),
+            (
+                "idempotency-key",
+                None,
+                {"governing_attempt_idempotency_key": "historical-discovery-attempt:forged:1"},
+            ),
+            (
+                "request-manifest-hash",
+                None,
+                {"superseded_request_manifest_sha256": "f" * 64},
+            ),
+        )
+        for label, column_overrides, payload_overrides in mutations:
+            with self.subTest(mutation=label):
+                row = self.raw_supersession_row(
+                    superseded_ref, replacement_ref, canary_attempt, column_overrides
+                )
+                if payload_overrides:
+                    row["payload"] = {**row["payload"], **payload_overrides}
+                    row["sha256"] = canonical_hash(row["payload"])
+                with (
+                    self.assertRaisesMessage(
+                        DatabaseError, "discovery supersession lineage is invalid"
+                    ),
+                    transaction.atomic(),
+                ):
+                    self.raw_supersede(row)
         self.assertFalse(HistoricalDiscoverySupersession.objects.exists())
 
     @patch("market.management.commands.discover_historical_inventory.OandaClient")

@@ -19,7 +19,8 @@ def install_supersession_governance(apps, schema_editor):
             WHERE id=NEW.superseded_plan_id;
           SELECT * INTO STRICT replacement FROM market_historicaldiscoveryplan
             WHERE id=NEW.replacement_plan_id;
-          SELECT a.id,a.idempotency_key,c.plan_id,r.request_manifest_hash,r.status,
+          SELECT a.id,a.attempt_number,a.idempotency_key,c.plan_id,c.logical_key,
+                 c.canonical_request_sha256,r.request_manifest_hash,r.status,
                  r.failure_reason,e.terminal_event_sha256,e.operational_evidence_sha256
             INTO STRICT lineage FROM market_historicaldiscoveryattempt a
             JOIN market_historicaldiscoverychunk c ON c.id=a.chunk_id
@@ -110,6 +111,30 @@ def install_supersession_governance(apps, schema_editor):
              OR superseded_version IS NULL OR replacement_version IS NULL
              OR replacement_version<=superseded_version
              OR superseded.sealed_at IS NOT NULL OR replacement.sealed_at IS NOT NULL
+             OR superseded.version<>'phase-2b1r-discovery-v1'
+             OR superseded.identity<>'failed-break-phase-2b1r-discovery-plan-v1'
+             OR superseded.sha256<>
+                '292556a591024876c7051212d1c6886cd026a097e141295e9b60257fc5402b33'
+             OR market_sha256(superseded.payload)<>
+                '292556a591024876c7051212d1c6886cd026a097e141295e9b60257fc5402b33'
+             OR superseded.canonical_request_manifest_sha256<>
+                'a3cf7ef1f484d2379bfd1ef94769216b2ed9b41635cad7cadbd71a8de251bb2e'
+             OR market_sha256(superseded.payload->'requests')<>
+                'a3cf7ef1f484d2379bfd1ef94769216b2ed9b41635cad7cadbd71a8de251bb2e'
+             OR market_sha256(superseded.canonical_request_manifest)<>
+                'a3cf7ef1f484d2379bfd1ef94769216b2ed9b41635cad7cadbd71a8de251bb2e'
+             OR replacement.version<>'phase-2b1r-discovery-v2'
+             OR replacement.identity<>'failed-break-phase-2b1r-discovery-plan-v2'
+             OR replacement.sha256<>
+                '2a25bbc28fca5d596b26d3d2921fa881e374174fb08cc1dbfb51e47c8b138e3a'
+             OR market_sha256(replacement.payload)<>
+                '2a25bbc28fca5d596b26d3d2921fa881e374174fb08cc1dbfb51e47c8b138e3a'
+             OR replacement.canonical_request_manifest_sha256<>
+                '04835164d5c2abe633efd1a8ddc58edcc7c9d5e8347c01425df5049d9b74b427'
+             OR market_sha256(replacement.payload->'requests')<>
+                '04835164d5c2abe633efd1a8ddc58edcc7c9d5e8347c01425df5049d9b74b427'
+             OR market_sha256(replacement.canonical_request_manifest)<>
+                '04835164d5c2abe633efd1a8ddc58edcc7c9d5e8347c01425df5049d9b74b427'
              OR superseded.payload->>'discovery_contract' IS DISTINCT FROM
                 replacement.payload->>'discovery_contract'
              OR superseded.source_id<>replacement.source_id
@@ -119,8 +144,14 @@ def install_supersession_governance(apps, schema_editor):
              OR superseded.phase1_manifest_hash<>replacement.phase1_manifest_hash
              OR superseded.superseded_data_identity<>replacement.superseded_data_identity
              OR lineage.plan_id<>superseded.id OR lineage.status<>'failed'
-             OR lineage.failure_reason NOT IN
-                ('DISCOVERY_PROVIDER_HTTP_ERROR','DISCOVERY_PROVIDER_LIMIT_SUSPECTED')
+             OR lineage.logical_key<>
+                'c8e22e7d02432f7022094152182d39eec6571cdf98700f9272735e52fdf8b827'
+             OR lineage.canonical_request_sha256<>
+                'beb847b0404bb9facf37ec5354b7bbdfa22335a17d7f9abdcb4178bdf0e8494d'
+             OR lineage.attempt_number<>1
+             OR lineage.idempotency_key<>'historical-discovery-attempt:'
+                ||'c8e22e7d02432f7022094152182d39eec6571cdf98700f9272735e52fdf8b827:1'
+             OR lineage.failure_reason<>'DISCOVERY_PROVIDER_HTTP_ERROR'
              OR audit_count<>1 OR audit_hash<>lineage.terminal_event_sha256
              OR EXISTS(SELECT 1 FROM market_historicaldiscoveryattempt a
                 JOIN market_historicaldiscoverychunk c ON c.id=a.chunk_id
