@@ -75,6 +75,7 @@ class HistoricalFailureCode:
     PROVIDER_RESPONSE_MALFORMED = "PROVIDER_RESPONSE_MALFORMED"
     PROVIDER_EVIDENCE_MISSING = "PROVIDER_EVIDENCE_MISSING"
     TIMESTAMP_SET_MISMATCH = "TIMESTAMP_SET_MISMATCH"
+    STRUCTURAL_INVENTORY_DRIFT = "STRUCTURAL_INVENTORY_DRIFT"
     CANDLE_VALIDATION_FAILED = "CANDLE_VALIDATION_FAILED"
     PERSISTENCE_FAILED = "PERSISTENCE_FAILED"
     UNKNOWN_FAILURE = "UNKNOWN_FAILURE"
@@ -373,15 +374,25 @@ def run_historical_chunk(logical_key, client):
     if not created:
         return attempt
     chunk, run = attempt.chunk, attempt.ingestion_run
+    provider_observed = getattr(chunk, "discovery_inventory_id", None) is not None
     manifest = None
     failure_stage = "provider_request"
     try:
-        candles, manifest = client.fetch_historical_chunk(
-            chunk.instrument.code,
-            chunk.granularity,
-            chunk.requested_from,
-            chunk.requested_to,
-        )
+        if provider_observed:
+            candles, manifest = client.fetch_historical_chunk(
+                chunk.instrument.code,
+                chunk.granularity,
+                chunk.requested_from,
+                chunk.requested_to,
+                canonical_request_sha256=chunk.canonical_request_sha256,
+            )
+        else:
+            candles, manifest = client.fetch_historical_chunk(
+                chunk.instrument.code,
+                chunk.granularity,
+                chunk.requested_from,
+                chunk.requested_to,
+            )
         failure_stage = "response_validation"
         _validate_chunk_response(chunk, candles, manifest)
         manifest = {
@@ -403,9 +414,12 @@ def run_historical_chunk(logical_key, client):
                 manifest,
                 dataset_version=chunk.dataset_version,
                 ingestion_run=run,
+                provider_observed=provider_observed,
             )
             if stored.status != IngestionRun.Status.SUCCEEDED:
                 raise DatasetQualityError(f"historical ingestion ended as {stored.status}")
+            if provider_observed:
+                _record_replacement_canary_success(attempt, manifest)
     except Exception as error:
         failure = _classify_historical_failure(error, chunk, manifest, failure_stage)
         _record_historical_failure(attempt.pk, failure)
@@ -503,8 +517,24 @@ def _validate_chunk_response(chunk, candles, manifest):
             _timestamp_mismatch_evidence(expected, actual),
             provider_evidence,
         )
+    if provider_observed:
+        # Structural equality with the sealed observations: volume,
+        # completeness and component presence must match per timestamp;
+        # any difference is drift and never mutates the sealed inventory.
+        drift = _structural_inventory_drift(chunk, candles)
+        if drift:
+            raise HistoricalResponseError(
+                "provider response structurally drifted from the sealed inventory",
+                HistoricalFailureCode.STRUCTURAL_INVENTORY_DRIFT,
+                "response_validation",
+                drift,
+                provider_evidence,
+            )
     issues = validate_candles(
-        candles, chunk.granularity, require_registered_alignment=not provider_observed
+        candles,
+        chunk.granularity,
+        require_registered_alignment=not provider_observed,
+        enforce_succession=not provider_observed,
     )
     if issues:
         raise HistoricalResponseError(
@@ -654,6 +684,132 @@ def _timestamp_mismatch_evidence(expected, actual):
         "duplicate_timestamps_truncated": len(duplicates) > 128,
         "ordering_mismatch": actual_values != sorted(actual_values),
     }
+
+
+def _structural_inventory_drift(chunk, candles):
+    """Bounded structural comparison of a response against the sealed
+    observations; returns falsy when every candle matches exactly."""
+    observations = {
+        row["timestamp"].astimezone(UTC): row
+        for row in chunk.discovery_inventory.observations.values(
+            "timestamp", "complete", "volume", "bid_present", "ask_present"
+        )
+    }
+    drifted = []
+    for candle in candles:
+        observation = observations.get(candle.timestamp.astimezone(UTC))
+        if observation is None:
+            fields = ["timestamp"]
+        else:
+            fields = [
+                field
+                for field, value in (
+                    ("complete", candle.complete),
+                    ("volume", candle.volume),
+                    ("bid_present", True),
+                    ("ask_present", True),
+                )
+                if observation[field] != value
+            ]
+        if fields:
+            drifted.append(
+                {
+                    "timestamp": candle.timestamp.astimezone(UTC).isoformat(),
+                    "fields": fields,
+                }
+            )
+    if not drifted:
+        return None
+    timestamps = [item["timestamp"] for item in drifted]
+    return {
+        "drifted_count": len(drifted),
+        "drifted_fields": sorted({field for item in drifted for field in item["fields"]}),
+        "drifted_timestamp_samples": _bounded_first_last(timestamps),
+        "diagnostic_truncated": len(drifted) > 128,
+    }
+
+
+def _replacement_candle_hashes(chunk):
+    """The registration candle key/payload hash formulas scoped to one chunk."""
+    candle_keys = hashlib.sha256()
+    candle_payloads = hashlib.sha256()
+    rows = (
+        Candle.objects.filter(
+            dataset_version=chunk.dataset_version,
+            instrument=chunk.instrument,
+            granularity=chunk.granularity,
+            timestamp__gte=chunk.requested_from,
+            timestamp__lt=chunk.requested_to,
+        )
+        .select_related("instrument")
+        .order_by("timestamp")
+    )
+    count = 0
+    for row in rows.iterator():
+        count += 1
+        key = [row.instrument.code, row.granularity, row.timestamp.isoformat()]
+        payload = key + [
+            row.complete,
+            row.volume,
+            *[
+                format(getattr(row, field), ".6f")
+                for field in (
+                    "bid_open",
+                    "bid_high",
+                    "bid_low",
+                    "bid_close",
+                    "ask_open",
+                    "ask_high",
+                    "ask_low",
+                    "ask_close",
+                )
+            ],
+        ]
+        candle_keys.update(json.dumps(key, separators=(",", ":")).encode())
+        candle_payloads.update(json.dumps(payload, separators=(",", ":")).encode())
+    return candle_keys.hexdigest(), candle_payloads.hexdigest(), count
+
+
+def _record_replacement_canary_success(attempt, manifest):
+    """Persist the governed success evidence chain for the single
+    provider-observed acquisition canary, atomically with its candles."""
+    chunk = attempt.chunk
+    ingestion_manifest = attempt.ingestion_run.ingestion_manifest
+    candle_key_hash, candle_payload_hash, stored_count = _replacement_candle_hashes(chunk)
+    provider_evidence = _sanitized_provider_evidence(chunk, manifest)
+    terminal_event = {
+        "event": "market.replacement_canary_succeeded",
+        "logical_key": chunk.logical_key,
+        "canonical_request_sha256": chunk.canonical_request_sha256,
+        "semantic_inventory_sha256": chunk.semantic_inventory_sha256,
+        "data_contract_sha256": chunk.data_contract_sha256,
+        "plan_sha256": chunk.plan.sha256,
+        "dataset_manifest_sha256": chunk.dataset_version.manifest_sha256,
+        "ingestion_manifest_sha256": ingestion_manifest.sha256,
+        "attempt_number": attempt.attempt_number,
+        "idempotency_key": attempt.idempotency_key,
+        "expected_candle_count": chunk.expected_observation_count,
+        "stored_candle_count": stored_count,
+        "candle_key_hash": candle_key_hash,
+        "candle_payload_hash": candle_payload_hash,
+    }
+    terminal_event_sha256 = stable_hash(terminal_event)
+    operational_evidence_sha256 = stable_hash(
+        [terminal_event_sha256, provider_evidence, attempt.idempotency_key]
+    )
+    AuditEvent.objects.create(
+        event_type="market.replacement_canary_succeeded",
+        actor="market.historical_acquisition.run_historical_chunk",
+        subject_type="HistoricalIngestionAttempt",
+        subject_id=str(attempt.pk),
+        payload={
+            "schema_version": 1,
+            **terminal_event,
+            "provider_evidence": provider_evidence,
+            "terminal_event_sha256": terminal_event_sha256,
+            "operational_evidence_sha256": operational_evidence_sha256,
+        },
+    )
 
 
 def _candle_validation_evidence(candles, issues):

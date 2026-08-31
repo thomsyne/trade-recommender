@@ -161,7 +161,9 @@ class OandaClient:
         }
         return candles, manifest
 
-    def fetch_historical_chunk(self, instrument, granularity, start, end):
+    def fetch_historical_chunk(
+        self, instrument, granularity, start, end, canonical_request_sha256=None
+    ):
         """Fetch one pre-registered logical chunk without prospective pagination semantics."""
         if start.tzinfo is None or end.tzinfo is None or start >= end:
             raise ValueError("historical chunk requires an aware increasing range")
@@ -191,7 +193,8 @@ class OandaClient:
             "includeFirst": True,
             "complete_only": True,
         }
-        canonical_request_sha256 = manifest_hash(canonical_request)
+        if canonical_request_sha256 is None:
+            canonical_request_sha256 = manifest_hash(canonical_request)
         provider_evidence = {
             "endpoint_identity": (
                 f"oanda-v20-{self.environment}:GET:/v3/instruments/{instrument}/candles"

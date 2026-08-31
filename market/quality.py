@@ -108,7 +108,9 @@ def _market_is_open(local):
     )
 
 
-def validate_candles(candles, granularity, *, require_registered_alignment=False):
+def validate_candles(
+    candles, granularity, *, require_registered_alignment=False, enforce_succession=True
+):
     issues = []
     seen = set()
     previous = None
@@ -123,12 +125,16 @@ def validate_candles(candles, granularity, *, require_registered_alignment=False
         seen.add(timestamp)
         if previous and timestamp <= previous.timestamp:
             issues.append(ValidationIssue("non_monotonic_timestamp", index, str(timestamp)))
-        if previous and not _is_expected_successor(
-            previous.timestamp,
-            timestamp,
-            granularity,
-            expected_step,
-            require_registered_alignment=require_registered_alignment,
+        if (
+            enforce_succession
+            and previous
+            and not _is_expected_successor(
+                previous.timestamp,
+                timestamp,
+                granularity,
+                expected_step,
+                require_registered_alignment=require_registered_alignment,
+            )
         ):
             issues.append(
                 ValidationIssue("unexpected_gap", index, f"{previous.timestamp} to {timestamp}")

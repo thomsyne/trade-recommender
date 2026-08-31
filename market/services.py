@@ -261,6 +261,7 @@ def store_ingestion(
     manifest,
     dataset_version=None,
     ingestion_run=None,
+    provider_observed=False,
 ):
     digest = manifest_hash(manifest)
     if ingestion_run is None:
@@ -299,7 +300,10 @@ def store_ingestion(
             sha256=digest,
         )
     issues = validate_candles(
-        candle_data, granularity, require_registered_alignment=dataset_version is not None
+        candle_data,
+        granularity,
+        require_registered_alignment=dataset_version is not None and not provider_observed,
+        enforce_succession=not provider_observed,
     )
     if issues:
         run.status = IngestionRun.Status.FAILED

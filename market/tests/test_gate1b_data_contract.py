@@ -24,7 +24,6 @@ from market.models import (
     HistoricalIngestionChunk,
     HistoricalTimestampInventory,
     HistoricalTimestampObservation,
-    IngestionRun,
 )
 from market.provider_observed_acquisition import (
     REPLACEMENT_ACQUISITION_CONTRACT,
@@ -50,11 +49,11 @@ SEAL_TABLES = (
 )
 
 
-def governed_strategy_version(suffix=""):
-    definition = StrategyDefinition.objects.create(key=f"failed-break{suffix}", name="Failed Break")
+def governed_strategy_version(suffix="", *, key="failed-break", version="v1"):
+    definition = StrategyDefinition.objects.create(key=f"{key}{suffix}", name="Failed Break")
     strategy = StrategyVersion.objects.create(
         definition=definition,
-        version="v1",
+        version=version,
         detector_version="failed-break-detector-v1",
         data_identity=SUPERSEDED_DATA_IDENTITY,
         event_identity="event-policy-none-v1",
@@ -458,7 +457,10 @@ class Gate1BGeneratorTests(Gate1BFixtureTestCase):
                 sha256="",
             )
 
-    def test_provider_drift_fails_without_inventory_mutation(self):
+    def test_non_canary_v2_acquisition_fails_closed_without_inventory_mutation(self):
+        """Since migration 0020, only the exact governed canary chunk may
+        open a replacement acquisition; fixture chunks fail closed before
+        any provider contact and never mutate the sealed inventory."""
         plan, dataset, payloads = self.create_replacement_plan_and_dataset()
         materialize_replacement_chunks(plan, dataset, payloads)
         chunk = HistoricalIngestionChunk.objects.filter(plan=plan, granularity="H1").select_related(
@@ -467,42 +469,19 @@ class Gate1BGeneratorTests(Gate1BFixtureTestCase):
         inventory = chunk.discovery_inventory
         before_count = inventory.observations.count()
         before_semantic = inventory.semantic_inventory_sha256
-        sealed = sealed_inventory_timestamps(chunk)
+        self.assertTrue(sealed_inventory_timestamps(chunk))
 
-        class DriftingClient:
-            def fetch_historical_chunk(self, instrument, granularity, start, end):
-                from datetime import timedelta
-
-                from market.historical_acquisition import stable_hash
-                from market.tests.factories import candle
-
-                drifted = [candle(timestamp=sealed[0].astimezone(UTC) + timedelta(hours=1))]
-                manifest = {
-                    "instrument": instrument,
-                    "granularity": granularity,
-                    "from": start.isoformat(),
-                    "to": end.isoformat(),
-                    "price": "BA",
-                    "smooth": False,
-                    "alignmentTimezone": "America/New_York",
-                    "dailyAlignment": 17,
-                    "weeklyAlignment": "Friday",
-                    "includeFirst": True,
-                    "endpoint_identity": "oanda-v20-practice:GET:/v3/candles",
-                    "http_method": "GET",
-                    "oanda_environment": "practice",
-                    "http_status": 200,
-                    "provider_request_id": "drift-test",
-                    "canonical_request_sha256": stable_hash({"attempt": "drift"}),
-                }
-                return drifted, manifest
+        class ForbiddenClient:
+            def fetch_historical_chunk(self, *args, **kwargs):
+                raise AssertionError("rejected canary must never contact the provider")
 
         from market.historical_acquisition import run_historical_chunk
 
-        with self.assertRaises(Exception):
-            run_historical_chunk(chunk.logical_key, DriftingClient())
-        attempt = HistoricalIngestionAttempt.objects.get(chunk=chunk)
-        self.assertEqual(attempt.ingestion_run.status, IngestionRun.Status.FAILED)
+        with self.assertRaisesMessage(
+            DatabaseError, "acquisition canary activation rejects this ingestion run"
+        ):
+            run_historical_chunk(chunk.logical_key, ForbiddenClient())
+        self.assertFalse(HistoricalIngestionAttempt.objects.filter(chunk=chunk).exists())
         inventory.refresh_from_db()
         self.assertEqual(inventory.observations.count(), before_count)
         self.assertEqual(inventory.semantic_inventory_sha256, before_semantic)
