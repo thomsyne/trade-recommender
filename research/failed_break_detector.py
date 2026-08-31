@@ -15,7 +15,11 @@ from market.quality import (
     registered_candle_completion,
     registered_successor,
 )
-from market.services import assert_dataset_window_usable
+from market.services import (
+    assert_dataset_window_usable,
+    candle_completion,
+    sealed_inventory_membership,
+)
 from research.failed_break_services import (
     books_for_setup,
     derive_expected_entry_timestamp,
@@ -37,6 +41,7 @@ from research.models import (
     SetupTransition,
     StrategyVersion,
 )
+from research.provider_observed import contract_for_dataset
 from research.signal_count import (
     DEVELOPMENT_END,
     DEVELOPMENT_START,
@@ -103,10 +108,10 @@ DETECTION_CANDLE_FIELDS = (
 )
 
 
-def _strategy_candle(row) -> Candle:
+def _strategy_candle(row, contract=None) -> Candle:
     return Candle(
         opened_at=row["timestamp"],
-        completed_at=registered_candle_completion(row["timestamp"], row["granularity"]),
+        completed_at=candle_completion(row["timestamp"], row["granularity"], contract),
         bid_open=row["bid_open"],
         bid_high=row["bid_high"],
         bid_low=row["bid_low"],
@@ -119,12 +124,12 @@ def _strategy_candle(row) -> Candle:
     )
 
 
-def _read_candles(dataset, instrument, granularity, timestamps):
+def _read_candles(dataset, instrument, granularity, timestamps, contract=None):
     timestamps = tuple(timestamps)
     if not timestamps:
         return ()
     return tuple(
-        _strategy_candle(row)
+        _strategy_candle(row, contract)
         for row in MarketCandle.objects.filter(
             dataset_version=dataset,
             instrument=instrument,
@@ -136,25 +141,37 @@ def _read_candles(dataset, instrument, granularity, timestamps):
     )
 
 
-def _range_timestamps(ranges, granularity):
+def _range_timestamps(ranges, granularity, *, contract=None, instrument=None):
     required = next(required for required in ranges if required.granularity == granularity)
+    if contract is not None:
+        # Provider-observed v2: schedule membership comes only from the
+        # sealed timestamp inventory, never the theoretical calendar.
+        return sealed_inventory_membership(
+            contract,
+            getattr(instrument, "pk", instrument),
+            granularity,
+            required.start,
+            required.end,
+        )
     return expected_candle_timestamps(required.start, required.end, granularity)
 
 
-def _admitted_before(dataset, instrument, ranges, granularity, boundary):
+def _admitted_before(dataset, instrument, ranges, granularity, boundary, *, contract=None):
     timestamps = tuple(
         timestamp
-        for timestamp in _range_timestamps(ranges, granularity)
-        if registered_candle_completion(timestamp, granularity) < boundary
+        for timestamp in _range_timestamps(
+            ranges, granularity, contract=contract, instrument=instrument
+        )
+        if candle_completion(timestamp, granularity, contract) < boundary
     )
-    return list(_read_candles(dataset, instrument, granularity, timestamps))
+    return list(_read_candles(dataset, instrument, granularity, timestamps, contract))
 
 
-def _candle_completing_at(dataset, instrument, schedules, granularity, boundary):
+def _candle_completing_at(dataset, instrument, schedules, granularity, boundary, contract=None):
     timestamp = schedules[granularity].get(boundary)
     if timestamp is None:
         return None
-    rows = _read_candles(dataset, instrument, granularity, (timestamp,))
+    rows = _read_candles(dataset, instrument, granularity, (timestamp,), contract)
     if len(rows) != 1:
         raise ValueError(f"registered {granularity} candle is missing at {boundary.isoformat()}")
     return rows[0]
@@ -207,7 +224,7 @@ def _persist_lifecycle(node, state):
     node.state = state
 
 
-def _latest_pre_entry_close(dataset, instrument_code, entry_timestamp):
+def _latest_pre_entry_close(dataset, instrument_code, entry_timestamp, contract=None):
     row = (
         MarketCandle.objects.filter(
             dataset_version=dataset,
@@ -218,23 +235,23 @@ def _latest_pre_entry_close(dataset, instrument_code, entry_timestamp):
         .order_by("-timestamp")
         .first()
     )
-    if not row or registered_candle_completion(row.timestamp, "H1") > entry_timestamp:
+    if not row or candle_completion(row.timestamp, "H1", contract) > entry_timestamp:
         return None
-    return row.midpoint_close, registered_candle_completion(row.timestamp, "H1")
+    return row.midpoint_close, candle_completion(row.timestamp, "H1", contract)
 
 
-def _cad_conversion(dataset, instrument, entry_timestamp):
+def _cad_conversion(dataset, instrument, entry_timestamp, contract=None):
     quote = instrument.quote_currency
     if quote == "CAD":
         return Decimal(1), entry_timestamp, "CAD@identity"
-    usd_cad = _latest_pre_entry_close(dataset, "USD_CAD", entry_timestamp)
+    usd_cad = _latest_pre_entry_close(dataset, "USD_CAD", entry_timestamp, contract)
     if not usd_cad:
         return None, None, ""
     usd_cad_rate, usd_cad_at = usd_cad
     if quote == "USD":
         return usd_cad_rate, usd_cad_at, f"USD_CAD@{usd_cad_at.isoformat()}"
     if quote == "GBP":
-        quote_usd = _latest_pre_entry_close(dataset, "GBP_USD", entry_timestamp)
+        quote_usd = _latest_pre_entry_close(dataset, "GBP_USD", entry_timestamp, contract)
         if not quote_usd:
             return None, None, ""
         quote_usd_rate, quote_usd_at = quote_usd
@@ -245,7 +262,7 @@ def _cad_conversion(dataset, instrument, entry_timestamp):
             f"GBP_USD@{quote_usd_at.isoformat()}|USD_CAD@{usd_cad_at.isoformat()}",
         )
     if quote == "JPY":
-        usd_jpy = _latest_pre_entry_close(dataset, "USD_JPY", entry_timestamp)
+        usd_jpy = _latest_pre_entry_close(dataset, "USD_JPY", entry_timestamp, contract)
         if not usd_jpy or usd_jpy[0] <= 0:
             return None, None, ""
         usd_jpy_rate, usd_jpy_at = usd_jpy
@@ -347,7 +364,18 @@ def _entry_event(pending):
 
 
 def _evaluate_entry(
-    *, pending, opening, h1_atr, nodes, instrument, dataset, strategy, ceiling, ranges, as_of
+    *,
+    pending,
+    opening,
+    h1_atr,
+    nodes,
+    instrument,
+    dataset,
+    strategy,
+    ceiling,
+    ranges,
+    as_of,
+    contract=None,
 ):
     entry_at = derive_expected_entry_timestamp(pending.setup)
     active_specs = []
@@ -361,7 +389,7 @@ def _evaluate_entry(
         states[stored_spec.key] = node.state
         records_by_key[stored_spec.key] = node.record
     conversion_rate, conversion_at, conversion_identity = _cad_conversion(
-        dataset, instrument, entry_at
+        dataset, instrument, entry_at, contract
     )
     result = entry_eligibility(
         _entry_event(pending),
@@ -422,18 +450,25 @@ def _seed_h1_atr(candles, context):
     return (points[-1].value, []) if points else (None, ranges)
 
 
-def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceiling, as_of):
+def _instrument_detector(
+    *, instrument, dataset, strategy, ranges, spread_ceiling, as_of, contract=None
+):
     for required in ranges:
         assert_dataset_window_usable(
-            dataset, instrument, (development_candle_range(required),), as_of
+            dataset,
+            instrument,
+            (development_candle_range(required, contract=contract, instrument=instrument.code),),
+            as_of,
         )
     development_start = DEVELOPMENT_START.astimezone(UTC)
     development_end = DEVELOPMENT_END.astimezone(UTC)
     schedules = {
         granularity: {
-            registered_candle_completion(timestamp, granularity): timestamp
-            for timestamp in _range_timestamps(ranges, granularity)
-            if registered_candle_completion(timestamp, granularity) < development_end
+            candle_completion(timestamp, granularity, contract): timestamp
+            for timestamp in _range_timestamps(
+                ranges, granularity, contract=contract, instrument=instrument
+            )
+            if candle_completion(timestamp, granularity, contract) < development_end
         }
         for granularity in ("W", "D", "H1")
     }
@@ -442,9 +477,11 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
         for completion, timestamp in schedules["H1"].items()
         if development_start <= completion < development_end
     )
-    weekly = _admitted_before(dataset, instrument, ranges, "W", development_start)
-    daily = _admitted_before(dataset, instrument, ranges, "D", development_start)
-    h1 = _admitted_before(dataset, instrument, ranges, "H1", development_start)
+    weekly = _admitted_before(
+        dataset, instrument, ranges, "W", development_start, contract=contract
+    )
+    daily = _admitted_before(dataset, instrument, ranges, "D", development_start, contract=contract)
+    h1 = _admitted_before(dataset, instrument, ranges, "H1", development_start, contract=contract)
     nodes = []
     known_spec_keys = set()
     specs, _, pivots = _material_level_specs(
@@ -499,10 +536,11 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
                     ceiling=spread_ceiling,
                     ranges=ranges,
                     as_of=completion,
+                    contract=contract,
                 )
                 pending.remove(candidate)
 
-        candle = _candle_completing_at(dataset, instrument, schedules, "H1", completion)
+        candle = _candle_completing_at(dataset, instrument, schedules, "H1", completion, contract)
         if candle is None or candle.opened_at != opened_at:
             raise ValueError(f"registered H1 candle is missing at {completion.isoformat()}")
         previous_close = h1[-1].close if h1 else candle.close
@@ -523,7 +561,7 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
         structure_changed = False
         for granularity, admitted in (("W", weekly), ("D", daily)):
             completed_candle = _candle_completing_at(
-                dataset, instrument, schedules, granularity, completion
+                dataset, instrument, schedules, granularity, completion, contract
             )
             if completed_candle is not None:
                 admitted.append(completed_candle)
@@ -716,6 +754,7 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
     }
     if set(instruments) != FROZEN_INSTRUMENTS:
         raise ValueError("S1 detector requires all six registered instruments")
+    contract = contract_for_dataset(dataset)
     for code in sorted(FROZEN_INSTRUMENTS):
         _instrument_detector(
             instrument=instruments[code],
@@ -724,9 +763,10 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
             ranges=ranges_by_instrument[code],
             spread_ceiling=Decimal(s0_output.coverage["spread_ceilings"][code]),
             as_of=as_of,
+            contract=contract,
         )
 
-    expected = expected_analysis_keys(ranges_by_instrument)
+    expected = expected_analysis_keys(ranges_by_instrument, contract=contract)
     observed_rows = list(
         AnalysisRun.objects.filter(
             dataset_version=dataset,

@@ -467,9 +467,20 @@ def _validate_chunk_response(chunk, candles, manifest):
             {"invalid_manifest_fields": ["from", "to"]},
             provider_evidence,
         )
-    expected = expected_candle_timestamps(
-        chunk.requested_from, chunk.requested_to, chunk.granularity
-    )
+    provider_observed = getattr(chunk, "discovery_inventory_id", None) is not None
+    if provider_observed:
+        from market.provider_observed_acquisition import sealed_inventory_timestamps
+
+        # Exact membership comes only from the sealed provider-observed
+        # inventory; a differing response is provider drift and fails as
+        # immutable evidence without ever mutating the sealed inventory.
+        expected = tuple(
+            timestamp.astimezone(UTC) for timestamp in sealed_inventory_timestamps(chunk)
+        )
+    else:
+        expected = expected_candle_timestamps(
+            chunk.requested_from, chunk.requested_to, chunk.granularity
+        )
     try:
         actual = tuple(item.timestamp.astimezone(UTC) for item in candles)
     except (AttributeError, TypeError, ValueError) as error:
@@ -482,13 +493,19 @@ def _validate_chunk_response(chunk, candles, manifest):
         ) from error
     if actual != expected:
         raise HistoricalResponseError(
-            "provider response does not exactly cover the logical chunk",
+            (
+                "provider response drifted from the sealed timestamp inventory"
+                if provider_observed
+                else "provider response does not exactly cover the logical chunk"
+            ),
             HistoricalFailureCode.TIMESTAMP_SET_MISMATCH,
             "response_validation",
             _timestamp_mismatch_evidence(expected, actual),
             provider_evidence,
         )
-    issues = validate_candles(candles, chunk.granularity, require_registered_alignment=True)
+    issues = validate_candles(
+        candles, chunk.granularity, require_registered_alignment=not provider_observed
+    )
     if issues:
         raise HistoricalResponseError(
             "provider response contains invalid candles",

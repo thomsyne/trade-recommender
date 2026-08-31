@@ -16,7 +16,14 @@ from market.quality import (
     registered_candle_completion,
     registered_successor,
 )
-from market.services import DatasetQualityError, RequiredCandleRange, assert_dataset_window_usable
+from market.services import (
+    DatasetQualityError,
+    RequiredCandleRange,
+    assert_dataset_window_usable,
+    candle_completion,
+    provider_observed_contract,
+    sealed_inventory_membership,
+)
 from research.models import (
     AnalysisRun,
     EntryEligibilityEvaluation,
@@ -54,11 +61,14 @@ def _derive_history(
     exact_completion=None,
     required_timestamps=None,
     decision_boundaries=None,
+    dataset_version=None,
+    instrument=None,
 ):
     required_ranges = tuple(required_ranges)
     exact_completion = exact_completion or {}
     required_timestamps = required_timestamps or {}
     decision_boundaries = decision_boundaries or {}
+    contract = provider_observed_contract(dataset_version) if dataset_version is not None else None
     supplied = {required.granularity for required in required_ranges}
     missing = set(minimum_candles) - supplied
     if missing:
@@ -69,26 +79,45 @@ def _derive_history(
     insufficient = []
     for granularity, minimum in minimum_candles.items():
         boundary = decision_boundaries.get(granularity, decision_at)
-        timestamps = sorted(
-            {
-                timestamp
-                for required in required_ranges
-                if required.granularity == granularity
-                for timestamp in expected_candle_timestamps(
-                    required.start, required.end, granularity
-                )
-            }
-        )
+        if contract is not None:
+            # Provider-observed v2: eligible history is the chronological
+            # sealed inventory; whether history reaches the decision boundary
+            # is an inventory-membership question, never a calendar one.
+            timestamps = sorted(
+                {
+                    timestamp
+                    for required in required_ranges
+                    if required.granularity == granularity
+                    for timestamp in sealed_inventory_membership(
+                        contract,
+                        getattr(instrument, "pk", instrument),
+                        granularity,
+                        required.start,
+                        required.end,
+                    )
+                }
+            )
+        else:
+            timestamps = sorted(
+                {
+                    timestamp
+                    for required in required_ranges
+                    if required.granularity == granularity
+                    for timestamp in expected_candle_timestamps(
+                        required.start, required.end, granularity
+                    )
+                }
+            )
         eligible = [
             timestamp
             for timestamp in timestamps
-            if registered_candle_completion(timestamp, granularity) <= boundary
+            if candle_completion(timestamp, granularity, contract) <= boundary
         ]
         if len(eligible) < minimum:
             insufficient.append(granularity)
             continue
         latest = eligible[-1]
-        if (
+        if contract is None and (
             registered_candle_completion(registered_successor(latest, granularity), granularity)
             <= boundary
         ):
@@ -97,7 +126,7 @@ def _derive_history(
             )
         if (
             granularity in exact_completion
-            and registered_candle_completion(latest, granularity) != exact_completion[granularity]
+            and candle_completion(latest, granularity, contract) != exact_completion[granularity]
         ):
             raise DatasetQualityError(
                 f"{granularity} history does not terminate at the evidence timestamp"
@@ -114,7 +143,7 @@ def _derive_history(
             RequiredCandleRange(
                 granularity,
                 selected[0],
-                registered_candle_completion(selected[-1], granularity),
+                candle_completion(selected[-1], granularity, contract),
             )
         )
     if insufficient:
@@ -143,6 +172,8 @@ def persist_level(
         spec.activated_at,
         exact_completion={activation_granularity: spec.activated_at},
         required_timestamps={source_granularity: spec.source_at},
+        dataset_version=dataset_version,
+        instrument=instrument,
     )
     assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     values = {
@@ -195,6 +226,8 @@ def persist_analysis(
             {"W": 1, "D": 220, "H1": 14},
             completed_h1_timestamp,
             exact_completion={"H1": completed_h1_timestamp},
+            dataset_version=dataset_version,
+            instrument=instrument,
         )
         assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     except DatasetQualityError:
@@ -233,6 +266,8 @@ def persist_setup(
         {"W": 1, "D": 220, "H1": 14},
         event.at,
         exact_completion={"H1": event.at},
+        dataset_version=dataset_version,
+        instrument=instrument,
     )
     assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of)
     if set(event.level_keys) != set(level_attributions):
@@ -382,6 +417,8 @@ def persist_confirmation(
             {"D": 1, "H1": 1},
             confirmation.at,
             exact_completion={"H1": confirmation.at},
+            dataset_version=setup.dataset_version,
+            instrument=setup.instrument,
         )
         assert_dataset_window_usable(
             setup.dataset_version, setup.instrument, required_ranges, as_of
@@ -428,13 +465,17 @@ def persist_entry_evaluation(
         )
     entry_timestamp = derived_entry_timestamp
     try:
-        entry_completion = registered_candle_completion(entry_timestamp, "H1")
+        entry_completion = candle_completion(
+            entry_timestamp, "H1", provider_observed_contract(setup.dataset_version)
+        )
         required_ranges = _derive_history(
             required_ranges,
             {"W": 1, "D": 1, "H1": 15},
             entry_completion,
             required_timestamps={"H1": entry_timestamp},
             decision_boundaries={"W": entry_timestamp, "D": entry_timestamp},
+            dataset_version=setup.dataset_version,
+            instrument=setup.instrument,
         )
         assert_dataset_window_usable(
             setup.dataset_version, setup.instrument, required_ranges, as_of

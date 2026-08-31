@@ -457,9 +457,9 @@ class BoundedS1DetectorTests(TestCase):
         actual_projection = detector_module.read_entry_projection
         actual_daily_bias = detector_module.daily_bias
 
-        def traced_read(dataset, instrument, granularity, timestamps):
+        def traced_read(dataset, instrument, granularity, timestamps, contract=None):
             query_path.append(("detection", granularity, tuple(timestamps)))
-            return actual_read(dataset, instrument, granularity, timestamps)
+            return actual_read(dataset, instrument, granularity, timestamps, contract)
 
         def traced_projection(**kwargs):
             query_path.append(("entry_projection", "H1", kwargs["theoretical_entry_timestamp"]))

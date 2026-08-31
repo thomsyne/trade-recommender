@@ -33,7 +33,11 @@ from market.quality import (
     final_registered_completion_before,
     registered_candle_completion,
 )
-from market.services import RequiredCandleRange, assert_dataset_window_usable
+from market.services import (
+    RequiredCandleRange,
+    assert_dataset_window_usable,
+    candle_completion,
+)
 from research.models import (
     AnalysisRun,
     EntryEligibilityEvaluation,
@@ -45,6 +49,12 @@ from research.models import (
     SetupLevelAttribution,
     SetupTransition,
     StrategyVersion,
+)
+from research.provider_observed import (
+    contract_for_dataset,
+    contract_range_bounds,
+    entry_timestamp_is_sealed,
+    inventory_window,
 )
 
 SIGNAL_COUNT_IDENTITY = "failed-break-signal-count-v1"
@@ -88,6 +98,14 @@ FORBIDDEN_FIELD_PARTS = frozenset(
         "payoff",
         "drawdown",
         "excursion",
+    }
+)
+V2_AUDIT_FIELDS = frozenset(
+    {
+        "historical_data_contract_id",
+        "historical_data_contract_sha256",
+        "effective_data_identity",
+        "global_semantic_inventory_sha256",
     }
 )
 S0_COUNT_FIELDS = frozenset({"observations"})
@@ -198,6 +216,16 @@ def read_entry_projection(
         raise ReturnBlindViolation("entry H1 candle has not completed as of the requested time")
 
     dataset = DatasetVersion.objects.get(pk=dataset_id)
+    contract = contract_for_dataset(dataset)
+    if contract is not None:
+        instrument_code = (
+            Instrument.objects.filter(pk=instrument_id).values_list("code", flat=True).first()
+        )
+        if not entry_timestamp_is_sealed(contract, instrument_code, theoretical_entry_timestamp):
+            # The strategy-derived entry must exist in the sealed inventory;
+            # an absent candle is a data-quality failure, never an implicit
+            # shift to the next available candle.
+            raise ReturnBlindViolation("entry timestamp is not a sealed provider-observed candle")
     assert_dataset_window_usable(
         dataset,
         instrument_id,
@@ -262,7 +290,11 @@ class SignalCountOutput:
             raise ValueError("unregistered signal-count identity or stage")
         expected_counts = S0_COUNT_FIELDS if self.stage == "S0" else S1_COUNT_FIELDS
         expected_coverage = S0_COVERAGE_FIELDS if self.stage == "S0" else S1_COVERAGE_FIELDS
-        if set(self.counts) != expected_counts or set(self.coverage) != expected_coverage:
+        observed_coverage = set(self.coverage)
+        if set(self.counts) != expected_counts or observed_coverage not in (
+            expected_coverage,
+            expected_coverage | V2_AUDIT_FIELDS,
+        ):
             raise ReturnBlindViolation("signal-count output does not match the registered schema")
         if any(type(value) is not int or value < 0 for value in self.counts.values()):
             raise ReturnBlindViolation("signal-count values must be non-negative integers")
@@ -366,6 +398,7 @@ def _validate_dataset_contract(dataset, strategy, as_of):
     grouped = _declared_required_ranges(dataset)
     if set(grouped) != FROZEN_INSTRUMENTS:
         raise ReturnBlindViolation("S1 required_ranges must contain all six instruments")
+    contract = contract_for_dataset(dataset)
     development_start = DEVELOPMENT_START.astimezone(DEVELOPMENT_START.tzinfo)
     for instrument, ranges in grouped.items():
         if (
@@ -376,6 +409,35 @@ def _validate_dataset_contract(dataset, strategy, as_of):
                 f"{instrument} must declare exactly one W, D and H1 S1 range"
             )
         for required in ranges:
+            if contract is not None:
+                # Provider-observed v2: membership and warm-up depth come
+                # only from the sealed inventory, never the theoretical
+                # calendar; the declared range must equal the sealed
+                # discovery request bounds exactly.
+                sealed_start, sealed_end = contract_range_bounds(contract, required.granularity)
+                membership = inventory_window(
+                    contract, instrument, required.granularity, required.start, required.end
+                )
+                warmup = sum(
+                    candle_completion(timestamp, required.granularity, contract)
+                    <= development_start
+                    for timestamp in membership
+                )
+                if (
+                    not membership
+                    or required.start != sealed_start
+                    or required.end != sealed_end
+                    or warmup < WARMUP_CANDLES[required.granularity]
+                ):
+                    raise ReturnBlindViolation(
+                        f"{instrument} {required.granularity} range lacks sealed"
+                        " inventory development or warm-up coverage"
+                    )
+                if required.end > as_of:
+                    raise ReturnBlindViolation(
+                        "signal-count as_of precedes required development coverage"
+                    )
+                continue
             try:
                 expected = expected_candle_timestamps(
                     required.start, required.end, required.granularity
@@ -403,13 +465,24 @@ def _validate_dataset_contract(dataset, strategy, as_of):
     registration = registrations.get()
     plan = registration.plan
     parameter = plan.strategy_version.strategyparametermanifest
-    configuration = {
-        "identity": "failed-break-historical-dataset-registration-v1",
-        "plan_sha256": plan.sha256,
-        "dataset_manifest_sha256": dataset.manifest_sha256,
-        "price_component": "COMBINED_BID_ASK",
-        "logical_chunk_set_hash": registration.logical_chunk_set_hash,
-    }
+    if contract is not None:
+        configuration = {
+            "identity": "failed-break-provider-observed-dataset-registration-v1",
+            "plan_sha256": plan.sha256,
+            "dataset_manifest_sha256": dataset.manifest_sha256,
+            "price_component": "COMBINED_BID_ASK",
+            "logical_chunk_set_hash": registration.logical_chunk_set_hash,
+            "data_contract_sha256": contract.sha256,
+            "global_semantic_inventory_sha256": (registration.global_semantic_inventory_sha256),
+        }
+    else:
+        configuration = {
+            "identity": "failed-break-historical-dataset-registration-v1",
+            "plan_sha256": plan.sha256,
+            "dataset_manifest_sha256": dataset.manifest_sha256,
+            "price_component": "COMBINED_BID_ASK",
+            "logical_chunk_set_hash": registration.logical_chunk_set_hash,
+        }
     report = {
         "configuration_sha256": registration.configuration_sha256,
         "series_manifest": registration.series_manifest,
@@ -424,10 +497,41 @@ def _validate_dataset_contract(dataset, strategy, as_of):
         "candle_key_hash": registration.candle_key_hash,
         "candle_payload_hash": registration.candle_payload_hash,
     }
+    effective_identity = contract.identity if contract is not None else strategy.data_identity
+    if contract is not None:
+        discovery_registration = contract.discovery_registration
+        if (
+            plan.data_contract_id != contract.pk
+            or plan.data_contract_sha256 != contract.sha256
+            or dataset.data_contract_sha256 != contract.sha256
+            or registration.data_contract_id != contract.pk
+            or registration.global_semantic_inventory_sha256
+            != contract.global_semantic_inventory_sha256
+            or contract.strategy_version_id != strategy.pk
+            or contract.sha256 != dataset_manifest_sha256(contract.payload)
+            or contract.superseded_data_identity != strategy.data_identity
+            or manifest.get("data_identity") != contract.identity
+            or manifest.get("historical_data_contract_sha256") != contract.sha256
+            or manifest.get("global_semantic_inventory_sha256")
+            != contract.global_semantic_inventory_sha256
+            or discovery_registration.plan.sealed_at is None
+            or discovery_registration.global_semantic_inventory_sha256
+            != contract.global_semantic_inventory_sha256
+        ):
+            raise ReturnBlindViolation("provider-observed data-contract lineage does not verify")
+    elif (
+        getattr(plan, "data_contract_id", None) is not None
+        or getattr(plan, "data_contract_sha256", None) is not None
+        or getattr(dataset, "data_contract_sha256", None) is not None
+        or getattr(registration, "data_contract_id", None) is not None
+        or getattr(registration, "global_semantic_inventory_sha256", None) is not None
+        or manifest.get("historical_data_contract_sha256") is not None
+    ):
+        raise ReturnBlindViolation("v2 data identity may never be inferred implicitly")
     if (
         registration.dataset_version_id != dataset.pk
         or plan.strategy_version_id != strategy.pk
-        or plan.identity != strategy.data_identity
+        or plan.identity != effective_identity
         or plan.source_id != dataset.source_id
         or plan.sha256 != dataset_manifest_sha256(plan.payload)
         or plan.phase1_spec_hash != PHASE1_SPEC_SHA256
@@ -500,6 +604,7 @@ def run_s0(
     dataset = DatasetVersion.objects.get(pk=dataset_id)
     strategy = StrategyVersion.objects.get(pk=strategy_version_id)
     ranges_by_instrument = _validate_dataset_contract(dataset, strategy, as_of)
+    contract = contract_for_dataset(dataset)
     instruments = {
         instrument.code: instrument
         for instrument in Instrument.objects.filter(code__in=ranges_by_instrument)
@@ -512,15 +617,25 @@ def run_s0(
     development_ranges_by_instrument = {}
     for code, ranges in ranges_by_instrument.items():
         instrument = instruments[code]
-        development_ranges = tuple(development_candle_range(required) for required in ranges)
+        development_ranges = tuple(
+            development_candle_range(required, contract=contract, instrument=code)
+            for required in ranges
+        )
         development_ranges_by_instrument[code] = development_ranges
         assert_dataset_window_usable(dataset, instrument, development_ranges, as_of)
         row_counts[code] = {}
         missingness[code] = {}
         for required in development_ranges:
-            expected = len(
-                expected_candle_timestamps(required.start, required.end, required.granularity)
-            )
+            if contract is not None:
+                expected = len(
+                    inventory_window(
+                        contract, code, required.granularity, required.start, required.end
+                    )
+                )
+            else:
+                expected = len(
+                    expected_candle_timestamps(required.start, required.end, required.granularity)
+                )
             observed = Candle.objects.filter(
                 dataset_version=dataset,
                 instrument=instrument,
@@ -541,12 +656,16 @@ def run_s0(
     opening_queries = []
     for code, ranges in development_ranges_by_instrument.items():
         h1_range = next(required for required in ranges if required.granularity == "H1")
-        timestamps = tuple(
-            timestamp
-            for timestamp in expected_candle_timestamps(
+        if contract is not None:
+            h1_membership = inventory_window(contract, code, "H1", h1_range.start, h1_range.end)
+        else:
+            h1_membership = expected_candle_timestamps(
                 h1_range.start, h1_range.end, h1_range.granularity
             )
-            if development_start <= registered_candle_completion(timestamp, "H1") < development_end
+        timestamps = tuple(
+            timestamp
+            for timestamp in h1_membership
+            if development_start <= candle_completion(timestamp, "H1", contract) < development_end
         )
         opening_queries.append(
             Candle.objects.filter(
@@ -587,6 +706,16 @@ def run_s0(
         for group, values in sorted(distributions.items())
     }
     observations = sum(len(values) for values in pair_spreads.values())
+    v2_audit = (
+        {
+            "historical_data_contract_id": contract.pk,
+            "historical_data_contract_sha256": contract.sha256,
+            "effective_data_identity": contract.identity,
+            "global_semantic_inventory_sha256": contract.global_semantic_inventory_sha256,
+        }
+        if contract is not None
+        else {}
+    )
     configuration = {
         "identity": SIGNAL_COUNT_IDENTITY,
         "stage": "S0",
@@ -597,6 +726,7 @@ def run_s0(
         "registered_identities": _registered_identities(strategy),
         "as_of": as_of.isoformat(),
         "maximum_observations": maximum_observations,
+        **v2_audit,
     }
     output = SignalCountOutput(
         SIGNAL_COUNT_IDENTITY,
@@ -609,6 +739,7 @@ def run_s0(
             "strategy_content_hash": strategy.content_hash,
             "registered_identities": _registered_identities(strategy),
             "as_of": as_of.isoformat(),
+            **v2_audit,
             "row_counts": row_counts,
             "missingness": missingness,
             "spread_ceilings": {key: str(value) for key, value in ceilings.items()},
@@ -650,6 +781,7 @@ def _validated_s0_job(*, s0_job_id, dataset, strategy):
     except (KeyError, TypeError, ValueError) as error:
         raise ReturnBlindViolation("stored S0 report is not canonical") from error
     coverage = reconstructed.coverage
+    contract = contract_for_dataset(dataset)
     expected_configuration_fields = {
         "identity",
         "stage",
@@ -661,6 +793,8 @@ def _validated_s0_job(*, s0_job_id, dataset, strategy):
         "as_of",
         "maximum_observations",
     }
+    if contract is not None:
+        expected_configuration_fields |= V2_AUDIT_FIELDS
     row_counts = coverage.get("row_counts", {})
     missingness = coverage.get("missingness", {})
     spread_ceilings = coverage.get("spread_ceilings", {})
@@ -702,6 +836,22 @@ def _validated_s0_job(*, s0_job_id, dataset, strategy):
         or coverage.get("strategy_content_hash") != strategy.content_hash
         or coverage.get("registered_identities") != _registered_identities(strategy)
         or coverage.get("as_of") != job.as_of.isoformat()
+        or (
+            contract is not None
+            and (
+                configuration.get("historical_data_contract_id") != contract.pk
+                or configuration.get("historical_data_contract_sha256") != contract.sha256
+                or configuration.get("effective_data_identity") != contract.identity
+                or configuration.get("global_semantic_inventory_sha256")
+                != contract.global_semantic_inventory_sha256
+                or coverage.get("historical_data_contract_id") != contract.pk
+                or coverage.get("historical_data_contract_sha256") != contract.sha256
+                or coverage.get("effective_data_identity") != contract.identity
+                or coverage.get("global_semantic_inventory_sha256")
+                != contract.global_semantic_inventory_sha256
+            )
+        )
+        or (contract is None and V2_AUDIT_FIELDS & set(coverage))
         or not range_maps_valid
         or any(
             type(value) is not int or value < 0
@@ -729,38 +879,55 @@ def _validate_s1_contract(dataset, strategy, as_of, s0_job_id):
     return grouped, s0_output
 
 
-def expected_analysis_keys(ranges_by_instrument):
+def expected_analysis_keys(ranges_by_instrument, *, contract=None):
     keys = []
     development_start = DEVELOPMENT_START.astimezone(UTC)
     development_end = DEVELOPMENT_END.astimezone(UTC)
     for code, ranges in sorted(ranges_by_instrument.items()):
         h1_range = next(required for required in ranges if required.granularity == "H1")
-        keys.extend(
-            (code, registered_candle_completion(timestamp, "H1").isoformat())
-            for timestamp in expected_candle_timestamps(
+        if contract is not None:
+            membership = inventory_window(contract, code, "H1", h1_range.start, h1_range.end)
+        else:
+            membership = expected_candle_timestamps(
                 h1_range.start, h1_range.end, h1_range.granularity
             )
-            if development_start <= registered_candle_completion(timestamp, "H1") < development_end
+        keys.extend(
+            (code, candle_completion(timestamp, "H1", contract).isoformat())
+            for timestamp in membership
+            if development_start <= candle_completion(timestamp, "H1", contract) < development_end
         )
     return tuple(keys)
 
 
-def development_candle_range(required):
-    """Restrict a declared range to candles completed strictly inside development."""
-    timestamps = tuple(
-        timestamp
-        for timestamp in expected_candle_timestamps(
-            required.start, required.end, required.granularity
+def development_candle_range(required, *, contract=None, instrument=None):
+    """Restrict a declared range to candles completed strictly inside development.
+
+    Under a data contract the membership is the chronological sealed
+    inventory; the theoretical calendar is never consulted for membership."""
+    if contract is not None:
+        timestamps = tuple(
+            timestamp
+            for timestamp in inventory_window(
+                contract, instrument, required.granularity, required.start, required.end
+            )
+            if candle_completion(timestamp, required.granularity, contract)
+            < DEVELOPMENT_END.astimezone(UTC)
         )
-        if registered_candle_completion(timestamp, required.granularity)
-        < DEVELOPMENT_END.astimezone(UTC)
-    )
+    else:
+        timestamps = tuple(
+            timestamp
+            for timestamp in expected_candle_timestamps(
+                required.start, required.end, required.granularity
+            )
+            if registered_candle_completion(timestamp, required.granularity)
+            < DEVELOPMENT_END.astimezone(UTC)
+        )
     if not timestamps:
         raise ReturnBlindViolation("declared range has no pre-boundary candles")
     return RequiredCandleRange(
         required.granularity,
         timestamps[0],
-        registered_candle_completion(timestamps[-1], required.granularity),
+        candle_completion(timestamps[-1], required.granularity, contract),
     )
 
 
@@ -774,7 +941,7 @@ def _validate_detector_coverage(
     s0_report_sha256,
     as_of,
 ):
-    expected = expected_analysis_keys(ranges_by_instrument)
+    expected = expected_analysis_keys(ranges_by_instrument, contract=contract_for_dataset(dataset))
     expected_hash = stable_hash(expected)
     job = JobRun.objects.filter(
         pk=detector_job_id,
@@ -1001,11 +1168,15 @@ def run_s1(
     }
     if set(instruments_by_code) != set(ranges_by_instrument):
         raise ReturnBlindViolation("dataset required_ranges references an unknown instrument")
+    s1_contract = contract_for_dataset(dataset)
     for code, ranges in ranges_by_instrument.items():
         assert_dataset_window_usable(
             dataset,
             instruments_by_code[code],
-            tuple(development_candle_range(required) for required in ranges),
+            tuple(
+                development_candle_range(required, contract=s1_contract, instrument=code)
+                for required in ranges
+            ),
             as_of,
         )
     detector_job, detector_report_sha256 = _validate_detector_coverage(
@@ -1305,6 +1476,16 @@ def run_s1(
         - counts["missed_fill"]
     )
     unique_m1_windows = len(projected_entries)
+    s1_v2_audit = (
+        {
+            "historical_data_contract_id": s1_contract.pk,
+            "historical_data_contract_sha256": s1_contract.sha256,
+            "effective_data_identity": s1_contract.identity,
+            "global_semantic_inventory_sha256": (s1_contract.global_semantic_inventory_sha256),
+        }
+        if s1_contract is not None
+        else {}
+    )
     configuration = {
         "dataset_id": dataset.pk,
         "dataset_manifest_sha256": dataset.manifest_sha256,
@@ -1317,6 +1498,7 @@ def run_s1(
         "partition_boundary_censor_rule": PARTITION_BOUNDARY_CENSOR_RULE,
         "maximum_setups": maximum_setups,
         "as_of": as_of.isoformat(),
+        **s1_v2_audit,
     }
     output = SignalCountOutput(
         SIGNAL_COUNT_IDENTITY,
@@ -1325,6 +1507,7 @@ def run_s1(
         {
             "dataset_id": dataset.pk,
             "strategy_version_id": strategy.pk,
+            **s1_v2_audit,
             "s0_report_sha256": s0_report_sha256,
             "detector_job_id": detector_job.pk,
             "detector_report_sha256": detector_report_sha256,

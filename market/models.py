@@ -145,6 +145,7 @@ class DatasetVersion(ImmutableModel):
     description = models.TextField(blank=True)
     manifest = models.JSONField(default=dict)
     manifest_sha256 = models.CharField(max_length=64, unique=True)
+    data_contract_sha256 = models.CharField(max_length=64, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -177,10 +178,25 @@ class HistoricalDatasetPlan(ImmutableModel):
     phase1_manifest_hash = models.CharField(max_length=64)
     payload = models.JSONField()
     sha256 = models.CharField(max_length=64, unique=True)
+    data_contract = models.ForeignKey(
+        "market.HistoricalDataContract",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="acquisition_plans",
+    )
+    data_contract_sha256 = models.CharField(max_length=64, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(data_contract__isnull=True, data_contract_sha256__isnull=True)
+                    | models.Q(data_contract__isnull=False, data_contract_sha256__isnull=False)
+                ),
+                name="historical_plan_contract_fields_together",
+            ),
             models.CheckConstraint(
                 condition=models.Q(price_component="COMBINED_BID_ASK"),
                 name="historical_plan_combined_bid_ask",
@@ -214,6 +230,16 @@ class HistoricalIngestionChunk(ImmutableModel):
     canonical_request = models.JSONField()
     canonical_request_sha256 = models.CharField(max_length=64)
     logical_key = models.CharField(max_length=64, unique=True)
+    discovery_inventory = models.ForeignKey(
+        "market.HistoricalTimestampInventory",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="acquisition_chunks",
+    )
+    semantic_inventory_sha256 = models.CharField(max_length=64, null=True, blank=True)
+    expected_observation_count = models.PositiveIntegerField(null=True, blank=True)
+    data_contract_sha256 = models.CharField(max_length=64, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -227,6 +253,23 @@ class HistoricalIngestionChunk(ImmutableModel):
                     "requested_to",
                 ),
                 name="unique_historical_logical_chunk",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        discovery_inventory__isnull=True,
+                        semantic_inventory_sha256__isnull=True,
+                        expected_observation_count__isnull=True,
+                        data_contract_sha256__isnull=True,
+                    )
+                    | models.Q(
+                        discovery_inventory__isnull=False,
+                        semantic_inventory_sha256__isnull=False,
+                        expected_observation_count__isnull=False,
+                        data_contract_sha256__isnull=False,
+                    )
+                ),
+                name="historical_chunk_contract_fields_together",
             ),
             models.CheckConstraint(
                 condition=models.Q(requested_from__lt=models.F("requested_to")),
@@ -576,6 +619,43 @@ class HistoricalDiscoverySupersession(ImmutableModel):
         ]
 
 
+class HistoricalDataContract(ImmutableModel):
+    """Gate 1B: the governed provider-observed historical-data identity.
+
+    Binds the unchanged approved StrategyVersion and Phase 1 identities to
+    the sealed Gate 5 discovery registration. The portable semantic sha256
+    covers only canonical content (never database keys, usernames,
+    timestamps or provider request ids); approval and registration lineage
+    is bound relationally and by recorded hash columns.
+    """
+
+    identity = models.CharField(max_length=160, unique=True)
+    strategy_version = models.ForeignKey(
+        "research.StrategyVersion",
+        on_delete=models.PROTECT,
+        related_name="historical_data_contracts",
+    )
+    discovery_registration = models.OneToOneField(
+        HistoricalDiscoveryRegistration, on_delete=models.PROTECT, related_name="data_contract"
+    )
+    superseded_data_identity = models.CharField(max_length=160)
+    phase1_spec_hash = models.CharField(max_length=64)
+    phase1_manifest_hash = models.CharField(max_length=64)
+    global_semantic_inventory_sha256 = models.CharField(max_length=64)
+    approval_sha256 = models.CharField(max_length=64)
+    registration_report_sha256 = models.CharField(max_length=64)
+    payload = models.JSONField()
+    sha256 = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        expected_hash = dataset_manifest_sha256(self.payload)
+        if self.sha256 and self.sha256 != expected_hash:
+            raise ValidationError("data contract SHA-256 does not match canonical payload")
+        self.sha256 = expected_hash
+        return super().save(*args, **kwargs)
+
+
 class Candle(models.Model):
     instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
     ingestion_run = models.ForeignKey(
@@ -768,16 +848,35 @@ class DatasetRegistration(ImmutableModel):
     candle_payload_hash = models.CharField(max_length=64)
     configuration_sha256 = models.CharField(max_length=64)
     report_sha256 = models.CharField(max_length=64, unique=True)
+    data_contract = models.ForeignKey(
+        "market.HistoricalDataContract",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="dataset_registrations",
+    )
+    global_semantic_inventory_sha256 = models.CharField(max_length=64, null=True, blank=True)
     registered_at = models.DateTimeField(auto_now_add=True)
 
     def save(self, *args, **kwargs):
-        configuration = {
-            "identity": "failed-break-historical-dataset-registration-v1",
-            "plan_sha256": self.plan.sha256,
-            "dataset_manifest_sha256": self.dataset_version.manifest_sha256,
-            "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
-            "logical_chunk_set_hash": self.logical_chunk_set_hash,
-        }
+        if self.data_contract_id is not None:
+            configuration = {
+                "identity": "failed-break-provider-observed-dataset-registration-v1",
+                "plan_sha256": self.plan.sha256,
+                "dataset_manifest_sha256": self.dataset_version.manifest_sha256,
+                "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
+                "logical_chunk_set_hash": self.logical_chunk_set_hash,
+                "data_contract_sha256": self.data_contract.sha256,
+                "global_semantic_inventory_sha256": self.global_semantic_inventory_sha256,
+            }
+        else:
+            configuration = {
+                "identity": "failed-break-historical-dataset-registration-v1",
+                "plan_sha256": self.plan.sha256,
+                "dataset_manifest_sha256": self.dataset_version.manifest_sha256,
+                "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
+                "logical_chunk_set_hash": self.logical_chunk_set_hash,
+            }
         expected_configuration = dataset_manifest_sha256(configuration)
         if self.configuration_sha256 and self.configuration_sha256 != expected_configuration:
             raise ValidationError("dataset registration configuration SHA-256 does not match")

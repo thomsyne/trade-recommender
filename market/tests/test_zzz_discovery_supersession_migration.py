@@ -39,7 +39,7 @@ class FailedClient:
 class HistoricalDiscoverySupersessionMigrationTests(TransactionTestCase):
     current = [("market", "0014_historical_discovery_supersession")]
     previous = [("market", "0013_provider_observed_inventory")]
-    latest = [("market", "0018_provider_observed_discovery_registration_activation")]
+    latest = [("market", "0019_provider_observed_data_contract")]
 
     def setUp(self):
         super().setUp()
