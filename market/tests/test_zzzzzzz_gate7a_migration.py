@@ -1,7 +1,7 @@
 import hashlib
 from importlib import import_module
 
-from django.db import connection
+from django.db import DatabaseError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
@@ -22,6 +22,10 @@ REPLACED_FUNCTIONS = (
     "market_governed_candle_reject_mutation",
 )
 ACTIVATION_FUNCTION = "market_validate_acquisition_canary"
+NEW_FUNCTIONS = (
+    "market_validate_acquisition_canary",
+    "market_acquisition_reject_truncate",
+)
 
 
 class Gate7AMigrationTests(TransactionTestCase):
@@ -50,6 +54,17 @@ class Gate7AMigrationTests(TransactionTestCase):
                 [list(names)],
             )
             return dict(cursor.fetchall())
+
+    def truncate_trigger_tables(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT c.relname FROM pg_trigger t
+                   JOIN pg_class c ON c.oid=t.tgrelid
+                   JOIN pg_proc p ON p.oid=t.tgfoid
+                   WHERE NOT t.tgisinternal
+                     AND p.proname='market_acquisition_reject_truncate'"""
+            )
+            return {row[0] for row in cursor.fetchall()}
 
     def build_gate7a_state(self):
         migrate_to(MIGRATION_0015)
@@ -101,15 +116,19 @@ class Gate7AMigrationTests(TransactionTestCase):
                 migration.GOVERNED_CANDLE_GATE7A_PROSRC.encode()
             ).hexdigest(),
         }
+        migration = self.migration_module()
         self.assertEqual(self.prosrc_md5s(REPLACED_FUNCTIONS), expected_gate7a)
-        self.assertEqual(set(self.prosrc_md5s([ACTIVATION_FUNCTION])), {ACTIVATION_FUNCTION})
+        self.assertEqual(set(self.prosrc_md5s(NEW_FUNCTIONS)), set(NEW_FUNCTIONS))
+        self.assertEqual(self.truncate_trigger_tables(), set(migration.TRUNCATE_PROTECTED_TABLES))
 
         MigrationExecutor(connection).migrate(self.previous)
         self.assertEqual(self.prosrc_md5s(REPLACED_FUNCTIONS), expected_0019)
-        self.assertEqual(self.prosrc_md5s([ACTIVATION_FUNCTION]), {})
+        self.assertEqual(self.prosrc_md5s(NEW_FUNCTIONS), {})
+        self.assertEqual(self.truncate_trigger_tables(), set())
 
         MigrationExecutor(connection).migrate(self.current)
         self.assertEqual(self.prosrc_md5s(REPLACED_FUNCTIONS), expected_gate7a)
+        self.assertEqual(self.truncate_trigger_tables(), set(migration.TRUNCATE_PROTECTED_TABLES))
 
     def test_preflight_rejects_altered_0019_governance_and_partial_installation(self):
         MigrationExecutor(connection).migrate(self.previous)
@@ -209,3 +228,99 @@ class Gate7AMigrationTests(TransactionTestCase):
                     for table in ("market_datasetversion", "market_ingestionrun"):
                         cursor.execute(f"ALTER TABLE {table} ENABLE TRIGGER USER")
         MigrationExecutor(connection).migrate(self.current)
+
+
+class Gate7ATruncateGuardTests(TransactionTestCase):
+    def setUp(self):
+        super().setUp()
+        MigrationExecutor(connection).migrate(
+            [("market", "0020_provider_observed_acquisition_canary_activation")]
+        )
+
+    def migration_module(self):
+        return import_module(
+            "market.migrations.0020_provider_observed_acquisition_canary_activation"
+        )
+
+    def seeded_state(self):
+        migrate_to(MIGRATION_0015)
+        source = seed_governed_market("gate7a truncate fixture")
+        superseded, replacement, _, _ = build_retry_ready_state(source)
+        migrate_to(MIGRATION_0016)
+        record_attempt_two_success(source, replacement)
+        MigrationExecutor(connection).migrate(
+            [("market", "0020_provider_observed_acquisition_canary_activation")]
+        )
+        return source, superseded, replacement
+
+    def governed_counts(self):
+        counts = {}
+        with connection.cursor() as cursor:
+            for table in self.migration_module().TRUNCATE_PROTECTED_TABLES:
+                cursor.execute(f"SELECT count(*) FROM {table}")
+                counts[table] = cursor.fetchone()[0]
+        return counts
+
+    def test_direct_multi_table_and_cascade_truncates_fail_without_data_loss(self):
+        source, superseded, replacement = self.seeded_state()
+        before = self.governed_counts()
+        self.assertGreater(before["market_ingestionrun"], 0)
+        expected_state = state_hashes(superseded, replacement)
+        for table in self.migration_module().TRUNCATE_PROTECTED_TABLES:
+            # CASCADE resolves foreign-key ordering so the rejection is
+            # provably the governed guard, not a coincidental FK error;
+            # without CASCADE the statement still fails (FK or guard).
+            with (
+                self.assertRaisesMessage(
+                    Exception, "governed acquisition evidence cannot be truncated"
+                ),
+                transaction.atomic(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(f"TRUNCATE {table} CASCADE")
+        with (
+            self.assertRaisesMessage(
+                Exception, "governed acquisition evidence cannot be truncated"
+            ),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("TRUNCATE market_candleconflict, market_dataqualityincident")
+        with (
+            self.assertRaisesMessage(
+                Exception, "governed acquisition evidence cannot be truncated"
+            ),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("TRUNCATE market_candle, market_ingestionrun CASCADE")
+        with (
+            self.assertRaisesMessage(
+                Exception, "governed acquisition evidence cannot be truncated"
+            ),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("TRUNCATE market_instrument CASCADE")
+        self.assertEqual(self.governed_counts(), before)
+        self.assertEqual(state_hashes(superseded, replacement), expected_state)
+
+    def test_governed_row_deletes_remain_rejected(self):
+        self.seeded_state()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT r.id FROM market_ingestionrun r
+                   JOIN market_historicaldiscoveryattempt a ON a.ingestion_run_id=r.id
+                   WHERE r.status<>'running' LIMIT 1"""
+            )
+            run_id = cursor.fetchone()[0]
+        with (
+            self.assertRaises(DatabaseError),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("DELETE FROM market_ingestionrun WHERE id=%s", [run_id])
+        from market.models import IngestionRun
+
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            IngestionRun.objects.filter(pk=run_id).delete()

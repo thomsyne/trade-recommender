@@ -4,6 +4,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -76,6 +77,7 @@ class HistoricalFailureCode:
     PROVIDER_EVIDENCE_MISSING = "PROVIDER_EVIDENCE_MISSING"
     TIMESTAMP_SET_MISMATCH = "TIMESTAMP_SET_MISMATCH"
     STRUCTURAL_INVENTORY_DRIFT = "STRUCTURAL_INVENTORY_DRIFT"
+    INVALID_PRICE_STRUCTURE = "INVALID_PRICE_STRUCTURE"
     CANDLE_VALIDATION_FAILED = "CANDLE_VALIDATION_FAILED"
     PERSISTENCE_FAILED = "PERSISTENCE_FAILED"
     UNKNOWN_FAILURE = "UNKNOWN_FAILURE"
@@ -530,6 +532,15 @@ def _validate_chunk_response(chunk, candles, manifest):
                 drift,
                 provider_evidence,
             )
+        invalid_prices = _invalid_price_structure(candles)
+        if invalid_prices:
+            raise HistoricalResponseError(
+                "provider response contains invalid price structures",
+                HistoricalFailureCode.INVALID_PRICE_STRUCTURE,
+                "response_validation",
+                invalid_prices,
+                provider_evidence,
+            )
     issues = validate_candles(
         candles,
         chunk.granularity,
@@ -683,6 +694,84 @@ def _timestamp_mismatch_evidence(expected, actual):
         "duplicate_timestamps": _bounded_first_last(duplicates),
         "duplicate_timestamps_truncated": len(duplicates) > 128,
         "ordering_mismatch": actual_values != sorted(actual_values),
+    }
+
+
+PRICE_FIELDS = (
+    "bid_open",
+    "bid_high",
+    "bid_low",
+    "bid_close",
+    "ask_open",
+    "ask_high",
+    "ask_low",
+    "ask_close",
+)
+# The governed candle columns are numeric(12,6): six decimal places and an
+# integer part strictly below one million. Every provider-observed price
+# must be an exact, finite, strictly positive Decimal representable at that
+# precision without any rounding, and structurally consistent.
+PRICE_QUANTUM = Decimal("0.000001")
+PRICE_UPPER_BOUND = Decimal("1000000")
+
+
+def _invalid_price_categories(candle):
+    categories = set()
+    values = {}
+    for field in PRICE_FIELDS:
+        value = getattr(candle, field, None)
+        if not isinstance(value, Decimal):
+            categories.add("missing_or_non_decimal")
+            continue
+        if not value.is_finite():
+            categories.add("non_finite")
+            continue
+        if value <= 0:
+            categories.add("non_positive")
+            continue
+        try:
+            exact = value.quantize(PRICE_QUANTUM) == value
+        except InvalidOperation:
+            exact = False
+        if not exact:
+            categories.add("excessive_precision")
+            continue
+        if value >= PRICE_UPPER_BOUND:
+            categories.add("out_of_range")
+            continue
+        values[field] = value
+    if len(values) == len(PRICE_FIELDS):
+        for side in ("bid", "ask"):
+            open_, high, low, close = (
+                values[f"{side}_{part}"] for part in ("open", "high", "low", "close")
+            )
+            if low > min(open_, close) or high < max(open_, close) or low > high:
+                categories.add("inconsistent_ohlc")
+        for part in ("open", "high", "low", "close"):
+            if values[f"bid_{part}"] > values[f"ask_{part}"]:
+                categories.add("crossed_bid_ask")
+    return sorted(categories)
+
+
+def _invalid_price_structure(candles):
+    """Bounded strict price validation for provider-observed responses;
+    returns falsy when every bid/ask OHLC value is a finite, strictly
+    positive, exactly-representable and structurally consistent Decimal.
+    Diagnostics never carry price values."""
+    affected = []
+    categories = set()
+    for index, candle in enumerate(candles):
+        found = _invalid_price_categories(candle)
+        if found:
+            affected.append(index)
+            categories.update(found)
+    if not affected:
+        return None
+    return {
+        "categories": sorted(categories),
+        "affected_count": len(affected),
+        "affected_indexes": _bounded_first_last(affected),
+        "diagnostic_truncated": len(affected) > 128,
     }
 
 

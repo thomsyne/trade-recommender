@@ -1,6 +1,7 @@
 import json
 import threading
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from market.historical_acquisition import (
     HistoricalFailureCode,
     HistoricalResponseError,
     _classify_historical_failure,
+    _invalid_price_categories,
     _validate_chunk_response,
     begin_historical_attempt,
     run_historical_chunk,
@@ -526,6 +528,23 @@ class Gate7AActivationTests(Gate7AFixtureTestCase):
             Candle.objects.filter(dataset_version=self.dataset).update(volume=1)
         with self.assertRaises(DatabaseError), transaction.atomic():
             IngestionManifest.objects.filter(pk=manifest.pk).update(sha256="1" * 64)
+        with (
+            self.assertRaisesMessage(DatabaseError, "governed dataset candles are append-only"),
+            transaction.atomic(),
+        ):
+            Candle.objects.filter(dataset_version=self.dataset).delete()
+        for statement in (
+            "TRUNCATE market_candle CASCADE",
+            "TRUNCATE market_ingestionmanifest, market_historicalingestionattempt CASCADE",
+        ):
+            with (
+                self.assertRaisesMessage(
+                    DatabaseError, "governed acquisition evidence cannot be truncated"
+                ),
+                transaction.atomic(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(statement)
         self.assertEqual(HistoricalIngestionAttempt.objects.count(), 1)
         self.assertEqual(Candle.objects.filter(dataset_version=self.dataset).count(), 2932)
 
@@ -565,6 +584,63 @@ class Gate7AActivationTests(Gate7AFixtureTestCase):
             transaction.atomic(),
         ):
             begin_historical_attempt(ACQUISITION_CANARY_LOGICAL_KEY)
+        with self.assertRaisesMessage(
+            CommandError, "acquisition canary attempt already exists; retry is prohibited"
+        ):
+            self.run_command(execute=True)
+        self.assertEqual(HistoricalIngestionAttempt.objects.count(), 1)
+
+    def test_invalid_price_failure_is_terminal_and_sanitized(self):
+        inventory = self.canary_chunk.discovery_inventory
+        before_observations = inventory.observations.count()
+
+        def poison(candles):
+            poisoned = list(candles)
+            poisoned[3] = candle(
+                timestamp=poisoned[3].timestamp,
+                volume=poisoned[3].volume,
+                bid_open=Decimal("0"),
+            )
+            return poisoned
+
+        client = self.canary_client(mutate=poison)
+        stdout = StringIO()
+        with (
+            patch(
+                "market.management.commands.acquire_replacement_canary.OandaClient",
+                return_value=client,
+            ),
+            override_settings(
+                OANDA_ENVIRONMENT="practice", OANDA_DISCOVERY_TOKEN="safe-test-token"
+            ),
+            self.assertRaisesMessage(
+                CommandError, "acquisition canary failed: INVALID_PRICE_STRUCTURE"
+            ),
+        ):
+            call_command(
+                "acquire_replacement_canary",
+                "--logical-key",
+                ACQUISITION_CANARY_LOGICAL_KEY,
+                "--execute",
+                stdout=stdout,
+            )
+        self.assertEqual(client.calls, 1)
+        attempt = HistoricalIngestionAttempt.objects.get()
+        self.assertEqual(attempt.ingestion_run.status, IngestionRun.Status.FAILED)
+        self.assertEqual(
+            attempt.ingestion_run.failure_reason,
+            HistoricalFailureCode.INVALID_PRICE_STRUCTURE,
+        )
+        self.assertEqual(Candle.objects.filter(dataset_version=self.dataset).count(), 0)
+        self.assertFalse(IngestionManifest.objects.exists())
+        inventory.refresh_from_db()
+        self.assertEqual(inventory.observations.count(), before_observations)
+        failure = AuditEvent.objects.get(event_type="market.historical_ingestion_failed")
+        self.assertEqual(failure.payload["error_code"], "INVALID_PRICE_STRUCTURE")
+        self.assertEqual(failure.payload["diagnostics"]["categories"], ["non_positive"])
+        rendered = json.dumps(failure.payload)
+        for marker in (*FORBIDDEN_OUTPUT_MARKERS, "0.89", "1.10"):
+            self.assertNotIn(marker, rendered)
         with self.assertRaisesMessage(
             CommandError, "acquisition canary attempt already exists; retry is prohibited"
         ):
@@ -622,7 +698,9 @@ class Gate7AActivationTests(Gate7AFixtureTestCase):
             volume=malformed[5].volume,
             bid_low=malformed[5].bid_high + 1,
         )
-        expect(HistoricalFailureCode.CANDLE_VALIDATION_FAILED, malformed)
+        # since the strict price contract, inconsistent OHLC is caught by
+        # the provider-observed price validation ahead of validate_candles
+        expect(HistoricalFailureCode.INVALID_PRICE_STRUCTURE, malformed)
         with self.assertRaises(KeyError):  # missing ask component is malformed
             _parse_candle(
                 {
@@ -632,6 +710,52 @@ class Gate7AActivationTests(Gate7AFixtureTestCase):
                     "bid": {"o": "1", "h": "1", "l": "1", "c": "1"},
                 }
             )
+        for label, changes in (
+            ("nan", {"bid_low": Decimal("NaN")}),
+            ("signaling_nan", {"ask_close": Decimal("sNaN")}),
+            ("infinity", {"ask_high": Decimal("Infinity")}),
+            ("negative_infinity", {"bid_open": Decimal("-Infinity")}),
+            ("zero", {"bid_open": Decimal("0")}),
+            (
+                "negative_consistent",
+                {
+                    field: -value
+                    for field, value in (
+                        ("bid_open", Decimal("1.1000")),
+                        ("bid_high", Decimal("1.0990")),
+                        ("bid_low", Decimal("1.1020")),
+                        ("bid_close", Decimal("1.1010")),
+                        ("ask_open", Decimal("1.1002")),
+                        ("ask_high", Decimal("1.0992")),
+                        ("ask_low", Decimal("1.1022")),
+                        ("ask_close", Decimal("1.1012")),
+                    )
+                },
+            ),
+            ("excessive_precision", {"bid_close": Decimal("1.1234567")}),
+            ("out_of_range", {"ask_open": Decimal("1000000")}),
+        ):
+            invalid = list(base_candles)
+            invalid[7] = candle(timestamp=invalid[7].timestamp, volume=invalid[7].volume, **changes)
+            with self.assertRaises(HistoricalResponseError) as caught:
+                _validate_chunk_response(chunk, invalid, base_manifest)
+            self.assertEqual(
+                caught.exception.error_code,
+                HistoricalFailureCode.INVALID_PRICE_STRUCTURE,
+                label,
+            )
+            diagnostics = json.dumps(caught.exception.diagnostics)
+            for leaked in ("NaN", "Infinity", "1.1234567", "1000000", "1.1000"):
+                self.assertNotIn(leaked, diagnostics, label)
+        self.assertEqual(
+            _invalid_price_categories(candle(bid_open=Decimal("1.1000E+0"))),
+            [],
+            "exact scientific notation must convert exactly and be accepted",
+        )
+        self.assertEqual(
+            _invalid_price_categories(candle(bid_low=Decimal("2"), bid_high=Decimal("0.5"))),
+            ["crossed_bid_ask", "inconsistent_ohlc"],
+        )
         for kind, expected_code in (
             ("auth", HistoricalFailureCode.PROVIDER_AUTH_ERROR),
             ("http", HistoricalFailureCode.PROVIDER_HTTP_ERROR),
@@ -753,7 +877,7 @@ class Gate7AActivationTests(Gate7AFixtureTestCase):
             requested_from=chunk.requested_from,
             requested_to=chunk.requested_to,
             parameters=chunk.canonical_request,
-            request_manifest_hash=stable_hash({"attempt": ACQUISITION_CANARY_IDEMPOTENCY_KEY}),
+            request_manifest_hash=stable_hash({"attempt": "gate7a-bypass-probe"}),
         )
         with self.assertRaises(DatabaseError), transaction.atomic():
             Candle.objects.bulk_create(
@@ -769,6 +893,58 @@ class Gate7AActivationTests(Gate7AFixtureTestCase):
             )
         self.assertEqual(Candle.objects.filter(dataset_version=self.dataset).count(), 0)
         self.assertFalse(HistoricalIngestionAttempt.objects.exists())
+
+        # with a legitimate attempt open, raw-SQL candles carrying invalid
+        # prices are rejected inside PostgreSQL even at sealed timestamps
+        attempt, created = begin_historical_attempt(ACQUISITION_CANARY_LOGICAL_KEY)
+        self.assertTrue(created)
+        observation = chunk.discovery_inventory.observations.order_by("timestamp").first()
+        columns = (
+            "(instrument_id,ingestion_run_id,dataset_version_id,granularity,"
+            '"timestamp",complete,volume,bid_open,bid_high,bid_low,bid_close,'
+            "ask_open,ask_high,ask_low,ask_close)"
+        )
+        for label, prices in (
+            (
+                "negative_consistent",
+                [
+                    "-1.1000",
+                    "-1.0990",
+                    "-1.1020",
+                    "-1.1010",
+                    "-1.1002",
+                    "-1.0992",
+                    "-1.1022",
+                    "-1.1012",
+                ],
+            ),
+            ("zero", ["0", "0", "0", "0", "0", "0", "0", "0"]),
+            (
+                "inconsistent_ohlc",
+                ["1.1000", "1.0000", "1.0990", "1.1010", "1.1002", "1.1022", "1.0992", "1.1012"],
+            ),
+            ("nan_special", ["NaN"] * 8),
+            ("infinity_special", ["Infinity"] * 8),
+        ):
+            with (
+                self.assertRaises(DatabaseError),
+                transaction.atomic(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(
+                    f"INSERT INTO market_candle {columns} VALUES "
+                    "(%s,%s,%s,'H1',%s,true,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    [
+                        chunk.instrument_id,
+                        attempt.ingestion_run_id,
+                        self.dataset.pk,
+                        observation.timestamp,
+                        observation.volume,
+                        *prices,
+                    ],
+                )
+        self.assertEqual(Candle.objects.filter(dataset_version=self.dataset).count(), 0)
+        self.assertEqual(HistoricalIngestionAttempt.objects.count(), 1)
 
 
 class Gate7AConcurrencyTests(Gate7AFixtureTestCase):

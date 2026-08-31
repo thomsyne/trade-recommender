@@ -510,6 +510,22 @@ GOVERNED_CANDLE_GATE7A_PROSRC = r"""
                       WHERE o.inventory_id=chunk.discovery_inventory_id
                         AND o.timestamp=NEW.timestamp AND o.volume=NEW.volume
                         AND o.complete AND o.bid_present AND o.ask_present)
+                 OR NOT (NEW.bid_open > 0 AND NEW.bid_open < 1000000)
+                 OR NOT (NEW.bid_high > 0 AND NEW.bid_high < 1000000)
+                 OR NOT (NEW.bid_low > 0 AND NEW.bid_low < 1000000)
+                 OR NOT (NEW.bid_close > 0 AND NEW.bid_close < 1000000)
+                 OR NOT (NEW.ask_open > 0 AND NEW.ask_open < 1000000)
+                 OR NOT (NEW.ask_high > 0 AND NEW.ask_high < 1000000)
+                 OR NOT (NEW.ask_low > 0 AND NEW.ask_low < 1000000)
+                 OR NOT (NEW.ask_close > 0 AND NEW.ask_close < 1000000)
+                 OR NEW.bid_low > least(NEW.bid_open, NEW.bid_close)
+                 OR NEW.bid_high < greatest(NEW.bid_open, NEW.bid_close)
+                 OR NEW.bid_low > NEW.bid_high
+                 OR NEW.ask_low > least(NEW.ask_open, NEW.ask_close)
+                 OR NEW.ask_high < greatest(NEW.ask_open, NEW.ask_close)
+                 OR NEW.ask_low > NEW.ask_high
+                 OR NEW.bid_open > NEW.ask_open OR NEW.bid_high > NEW.ask_high
+                 OR NEW.bid_low > NEW.ask_low OR NEW.bid_close > NEW.ask_close
               THEN RAISE EXCEPTION
                 'replacement candle conflicts with the sealed inventory'; END IF;
             ELSE
@@ -525,6 +541,34 @@ GOVERNED_CANDLE_GATE7A_PROSRC = r"""
             END IF;
           END IF; RETURN NEW;
         END """
+# Established no-truncate design (migration 0013): a statement-level guard
+# whose only pass-through is Django's own test-database flush, detectable
+# exclusively inside a database named test_* while the flush holds its
+# AccessExclusiveLock; no production database name can ever satisfy it.
+TRUNCATE_GUARD_PROSRC = r"""
+        BEGIN
+          IF current_database() LIKE 'test\_%' ESCAPE '\'
+             AND EXISTS(
+               SELECT 1 FROM pg_locks locks
+               WHERE locks.pid=pg_backend_pid() AND locks.granted
+                 AND locks.mode='AccessExclusiveLock'
+                 AND locks.relation='auth_permission'::regclass
+             ) THEN RETURN NULL; END IF;
+          RAISE EXCEPTION 'governed acquisition evidence cannot be truncated';
+        END """
+TRUNCATE_GUARD_FUNCTION = "market_acquisition_reject_truncate"
+TRUNCATE_PROTECTED_TABLES = (
+    "market_historicalingestionattempt",
+    "market_ingestionrun",
+    "market_ingestionmanifest",
+    "market_candle",
+    "market_historicaldatasetplan",
+    "market_historicalingestionchunk",
+    "market_datasetversion",
+    "market_datasetregistration",
+    "market_candleconflict",
+    "market_dataqualityincident",
+)
 ACQUISITION_CANARY_PROSRC = r"""
         DECLARE chunk record; plan record; contract record; dataset record;
                 registration record; approval record; inventory record;
@@ -727,6 +771,18 @@ def install_acquisition_canary(apps, schema_editor):
         "RETURNS trigger AS $governed$" + GOVERNED_CANDLE_GATE7A_PROSRC + "$governed$ "
         "LANGUAGE plpgsql;",
     )
+    _execute(
+        schema_editor,
+        f"CREATE FUNCTION {TRUNCATE_GUARD_FUNCTION}() RETURNS trigger AS $governed$"
+        + TRUNCATE_GUARD_PROSRC
+        + "$governed$ LANGUAGE plpgsql;",
+    )
+    for table in TRUNCATE_PROTECTED_TABLES:
+        _execute(
+            schema_editor,
+            f"CREATE TRIGGER {table}_reject_truncate BEFORE TRUNCATE ON {table} "
+            f"FOR EACH STATEMENT EXECUTE FUNCTION {TRUNCATE_GUARD_FUNCTION}();",
+        )
 
 
 def remove_acquisition_canary(apps, schema_editor):
@@ -772,6 +828,12 @@ def remove_acquisition_canary(apps, schema_editor):
         schema_editor,
         "DROP FUNCTION market_validate_acquisition_canary(bigint, integer, text, bigint);",
     )
+    for table in TRUNCATE_PROTECTED_TABLES:
+        _execute(
+            schema_editor,
+            f"DROP TRIGGER {table}_reject_truncate ON {table};",
+        )
+    _execute(schema_editor, f"DROP FUNCTION {TRUNCATE_GUARD_FUNCTION}();")
 
 
 class Migration(migrations.Migration):
