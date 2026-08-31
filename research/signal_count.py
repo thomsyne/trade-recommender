@@ -33,7 +33,11 @@ from market.quality import (
     final_registered_completion_before,
     registered_candle_completion,
 )
-from market.services import RequiredCandleRange, assert_dataset_window_usable
+from market.services import (
+    RequiredCandleRange,
+    assert_dataset_window_usable,
+    candle_completion,
+)
 from research.models import (
     AnalysisRun,
     EntryEligibilityEvaluation,
@@ -415,7 +419,7 @@ def _validate_dataset_contract(dataset, strategy, as_of):
                     contract, instrument, required.granularity, required.start, required.end
                 )
                 warmup = sum(
-                    registered_candle_completion(timestamp, required.granularity)
+                    candle_completion(timestamp, required.granularity, contract)
                     <= development_start
                     for timestamp in membership
                 )
@@ -661,7 +665,7 @@ def run_s0(
         timestamps = tuple(
             timestamp
             for timestamp in h1_membership
-            if development_start <= registered_candle_completion(timestamp, "H1") < development_end
+            if development_start <= candle_completion(timestamp, "H1", contract) < development_end
         )
         opening_queries.append(
             Candle.objects.filter(
@@ -888,9 +892,9 @@ def expected_analysis_keys(ranges_by_instrument, *, contract=None):
                 h1_range.start, h1_range.end, h1_range.granularity
             )
         keys.extend(
-            (code, registered_candle_completion(timestamp, "H1").isoformat())
+            (code, candle_completion(timestamp, "H1", contract).isoformat())
             for timestamp in membership
-            if development_start <= registered_candle_completion(timestamp, "H1") < development_end
+            if development_start <= candle_completion(timestamp, "H1", contract) < development_end
         )
     return tuple(keys)
 
@@ -906,7 +910,7 @@ def development_candle_range(required, *, contract=None, instrument=None):
             for timestamp in inventory_window(
                 contract, instrument, required.granularity, required.start, required.end
             )
-            if registered_candle_completion(timestamp, required.granularity)
+            if candle_completion(timestamp, required.granularity, contract)
             < DEVELOPMENT_END.astimezone(UTC)
         )
     else:
@@ -923,7 +927,7 @@ def development_candle_range(required, *, contract=None, instrument=None):
     return RequiredCandleRange(
         required.granularity,
         timestamps[0],
-        registered_candle_completion(timestamps[-1], required.granularity),
+        candle_completion(timestamps[-1], required.granularity, contract),
     )
 
 

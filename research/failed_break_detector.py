@@ -15,7 +15,11 @@ from market.quality import (
     registered_candle_completion,
     registered_successor,
 )
-from market.services import assert_dataset_window_usable, sealed_inventory_membership
+from market.services import (
+    assert_dataset_window_usable,
+    candle_completion,
+    sealed_inventory_membership,
+)
 from research.failed_break_services import (
     books_for_setup,
     derive_expected_entry_timestamp,
@@ -104,10 +108,10 @@ DETECTION_CANDLE_FIELDS = (
 )
 
 
-def _strategy_candle(row) -> Candle:
+def _strategy_candle(row, contract=None) -> Candle:
     return Candle(
         opened_at=row["timestamp"],
-        completed_at=registered_candle_completion(row["timestamp"], row["granularity"]),
+        completed_at=candle_completion(row["timestamp"], row["granularity"], contract),
         bid_open=row["bid_open"],
         bid_high=row["bid_high"],
         bid_low=row["bid_low"],
@@ -120,12 +124,12 @@ def _strategy_candle(row) -> Candle:
     )
 
 
-def _read_candles(dataset, instrument, granularity, timestamps):
+def _read_candles(dataset, instrument, granularity, timestamps, contract=None):
     timestamps = tuple(timestamps)
     if not timestamps:
         return ()
     return tuple(
-        _strategy_candle(row)
+        _strategy_candle(row, contract)
         for row in MarketCandle.objects.filter(
             dataset_version=dataset,
             instrument=instrument,
@@ -158,16 +162,16 @@ def _admitted_before(dataset, instrument, ranges, granularity, boundary, *, cont
         for timestamp in _range_timestamps(
             ranges, granularity, contract=contract, instrument=instrument
         )
-        if registered_candle_completion(timestamp, granularity) < boundary
+        if candle_completion(timestamp, granularity, contract) < boundary
     )
-    return list(_read_candles(dataset, instrument, granularity, timestamps))
+    return list(_read_candles(dataset, instrument, granularity, timestamps, contract))
 
 
-def _candle_completing_at(dataset, instrument, schedules, granularity, boundary):
+def _candle_completing_at(dataset, instrument, schedules, granularity, boundary, contract=None):
     timestamp = schedules[granularity].get(boundary)
     if timestamp is None:
         return None
-    rows = _read_candles(dataset, instrument, granularity, (timestamp,))
+    rows = _read_candles(dataset, instrument, granularity, (timestamp,), contract)
     if len(rows) != 1:
         raise ValueError(f"registered {granularity} candle is missing at {boundary.isoformat()}")
     return rows[0]
@@ -449,11 +453,11 @@ def _instrument_detector(
     development_end = DEVELOPMENT_END.astimezone(UTC)
     schedules = {
         granularity: {
-            registered_candle_completion(timestamp, granularity): timestamp
+            candle_completion(timestamp, granularity, contract): timestamp
             for timestamp in _range_timestamps(
                 ranges, granularity, contract=contract, instrument=instrument
             )
-            if registered_candle_completion(timestamp, granularity) < development_end
+            if candle_completion(timestamp, granularity, contract) < development_end
         }
         for granularity in ("W", "D", "H1")
     }
@@ -524,7 +528,7 @@ def _instrument_detector(
                 )
                 pending.remove(candidate)
 
-        candle = _candle_completing_at(dataset, instrument, schedules, "H1", completion)
+        candle = _candle_completing_at(dataset, instrument, schedules, "H1", completion, contract)
         if candle is None or candle.opened_at != opened_at:
             raise ValueError(f"registered H1 candle is missing at {completion.isoformat()}")
         previous_close = h1[-1].close if h1 else candle.close
@@ -545,7 +549,7 @@ def _instrument_detector(
         structure_changed = False
         for granularity, admitted in (("W", weekly), ("D", daily)):
             completed_candle = _candle_completing_at(
-                dataset, instrument, schedules, granularity, completion
+                dataset, instrument, schedules, granularity, completion, contract
             )
             if completed_candle is not None:
                 admitted.append(completed_candle)

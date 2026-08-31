@@ -8,23 +8,19 @@ point-in-time and entry semantics; membership questions are answered here.
 
 from __future__ import annotations
 
-from market.models import HistoricalDataContract, HistoricalTimestampObservation
+from market.models import HistoricalTimestampObservation
 
 
 def contract_for_dataset(dataset):
     """Resolve the effective data contract for a registered dataset.
 
-    Returns None for legacy v1 datasets. A v2 identity is never inferred
-    implicitly: only an explicit plan-level binding to a real
-    HistoricalDataContract row qualifies.
+    Delegates to the single application-level resolver, which validates the
+    complete plan/dataset/registration/contract relationship and fails
+    closed on incomplete or conflicting v2 lineage.
     """
-    registration = getattr(dataset, "registration", None)
-    if registration is None:
-        return None
-    contract = registration.plan.data_contract
-    if not isinstance(contract, HistoricalDataContract):
-        return None
-    return contract
+    from market.services import provider_observed_contract
+
+    return provider_observed_contract(dataset)
 
 
 def inventory_timestamps(contract, instrument_code, granularity):

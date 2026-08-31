@@ -1,7 +1,7 @@
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.db import transaction
 from django.utils import timezone
@@ -67,23 +67,57 @@ def assert_dataset_usable(dataset_version) -> None:
         raise DatasetQualityError("dataset contains no governed candles")
 
 
+def provider_observed_h1_completion(timestamp):
+    """Provider-observed H1 completion: absolute one-hour arithmetic.
+
+    The legacy New-York wall-clock rule maps two distinct provider candles
+    onto one completion during the autumn DST fall-back (05:00Z and 06:00Z
+    both completing 07:00Z); sealed inventories legitimately contain both
+    hours, so v2 H1 completions must stay one-to-one."""
+    return timestamp + timedelta(hours=1)
+
+
+def candle_completion(timestamp, granularity, contract=None):
+    """Candle completion under the effective data identity: absolute +1h for
+    provider-observed H1; the frozen calendar rule for legacy data and for
+    D/W semantics, which are unchanged."""
+    if contract is not None and granularity == "H1":
+        return provider_observed_h1_completion(timestamp)
+    return registered_candle_completion(timestamp, granularity)
+
+
 def provider_observed_contract(dataset_version):
     """Resolve the explicit provider-observed data contract for a registered
     dataset, or None for legacy datasets. Resolution is strictly relational
     through the registered plan; identity strings and hashes are never used
-    to infer v2 on their own, and inconsistent contract lineage fails closed."""
-    from market.models import HistoricalDataContract
+    to infer v2 on their own. The complete plan/dataset/registration/contract
+    relationship must agree; v2 markers with an incomplete or conflicting
+    relationship fail closed instead of degrading to legacy behaviour."""
+    from market.models import DatasetRegistration, HistoricalDataContract
 
     registration = getattr(dataset_version, "registration", None)
-    if registration is None:
+    if not isinstance(registration, DatasetRegistration):
         return None
     plan = registration.plan
     contract = plan.data_contract
-    if not isinstance(contract, HistoricalDataContract):
+    if contract is None:
+        markers = (
+            plan.data_contract_sha256,
+            dataset_version.data_contract_sha256,
+            registration.data_contract_id,
+            registration.global_semantic_inventory_sha256,
+        )
+        if any(marker is not None for marker in markers):
+            raise DatasetQualityError("provider-observed data-contract lineage does not verify")
         return None
     if (
-        plan.data_contract_sha256 != contract.sha256
+        not isinstance(contract, HistoricalDataContract)
+        or plan.data_contract_sha256 != contract.sha256
         or plan.identity != contract.identity
+        or dataset_version.data_contract_sha256 != contract.sha256
+        or registration.data_contract_id != plan.data_contract_id
+        or registration.global_semantic_inventory_sha256
+        != contract.global_semantic_inventory_sha256
         or contract.discovery_registration.plan.sealed_at is None
     ):
         raise DatasetQualityError("provider-observed data-contract lineage does not verify")

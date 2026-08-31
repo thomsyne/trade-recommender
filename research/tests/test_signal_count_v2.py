@@ -101,7 +101,7 @@ class SignalCountV2MembershipTests(Gate1BFixtureTestCase):
         self.assertEqual(contract.pk, self.contract.pk)
 
     def test_v2_analysis_membership_comes_from_inventory_not_calendar(self):
-        from market.quality import registered_candle_completion
+        from market.services import candle_completion
         from research.signal_count import DEVELOPMENT_END, DEVELOPMENT_START
 
         ranges = self.declared_ranges()
@@ -114,12 +114,12 @@ class SignalCountV2MembershipTests(Gate1BFixtureTestCase):
         for code, declared in sorted(ranges.items()):
             h1_range = next(required for required in declared if required.granularity == "H1")
             expected.extend(
-                (code, registered_candle_completion(timestamp, "H1").isoformat())
+                (code, candle_completion(timestamp, "H1", self.contract).isoformat())
                 for timestamp in inventory_window(
                     self.contract, code, "H1", h1_range.start, h1_range.end
                 )
                 if development_start
-                <= registered_candle_completion(timestamp, "H1")
+                <= candle_completion(timestamp, "H1", self.contract)
                 < development_end
             )
         self.assertEqual(inventory_keys, tuple(expected))
@@ -207,6 +207,51 @@ class SignalCountV2MembershipTests(Gate1BFixtureTestCase):
             manifest_sha256="",
         )
         self.assertIsNone(contract_for_dataset(legacy))
+
+    def test_resolver_rejects_incomplete_or_conflicting_v2_lineage(self):
+        from django.db import connection as db_connection
+
+        dataset = self.registered()
+        with db_connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_datasetversion DISABLE TRIGGER USER")
+            try:
+                cursor.execute(
+                    "UPDATE market_datasetversion SET data_contract_sha256=%s WHERE id=%s",
+                    ["f" * 64, dataset.pk],
+                )
+            finally:
+                cursor.execute("ALTER TABLE market_datasetversion ENABLE TRIGGER USER")
+        from market.models import DatasetVersion as Dataset
+
+        conflicted = Dataset.objects.get(pk=dataset.pk)
+        with self.assertRaisesMessage(
+            DatasetQualityError, "provider-observed data-contract lineage does not verify"
+        ):
+            contract_for_dataset(conflicted)
+        with db_connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_datasetversion DISABLE TRIGGER USER")
+            try:
+                cursor.execute(
+                    "UPDATE market_datasetversion SET data_contract_sha256=%s WHERE id=%s",
+                    [self.contract.sha256, dataset.pk],
+                )
+            finally:
+                cursor.execute("ALTER TABLE market_datasetversion ENABLE TRIGGER USER")
+        with db_connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_datasetregistration DISABLE TRIGGER USER")
+            try:
+                cursor.execute(
+                    "UPDATE market_datasetregistration SET data_contract_id=NULL"
+                    " WHERE dataset_version_id=%s",
+                    [dataset.pk],
+                )
+            finally:
+                cursor.execute("ALTER TABLE market_datasetregistration ENABLE TRIGGER USER")
+        broken = Dataset.objects.get(pk=dataset.pk)
+        with self.assertRaisesMessage(
+            DatasetQualityError, "provider-observed data-contract lineage does not verify"
+        ):
+            contract_for_dataset(broken)
 
     def test_signal_count_output_accepts_v2_coverage_and_v1_unchanged(self):
         base_coverage = {

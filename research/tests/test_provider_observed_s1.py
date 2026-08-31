@@ -29,6 +29,7 @@ from market.provider_observed_acquisition import (
 from market.quality import expected_candle_timestamps, registered_candle_completion
 from market.services import (
     DatasetQualityError,
+    candle_completion,
     provider_observed_contract,
     sealed_inventory_membership,
 )
@@ -59,10 +60,21 @@ FORGE_TABLES = (
 )
 
 
+FALL_BACK_HOURS = (
+    datetime(2010, 11, 7, 5, tzinfo=UTC),
+    datetime(2010, 11, 7, 6, tzinfo=UTC),
+)
+SPRING_FORWARD_HOURS = (
+    datetime(2010, 3, 14, 6, tzinfo=UTC),
+    datetime(2010, 3, 14, 7, tzinfo=UTC),
+)
+
+
 def designed_inventory_timestamps(granularity, start, end):
-    """Sparse irregular provider membership: dense 16-hour head, then a
-    47-hour stride that lands on New York weekend hours the theoretical
-    calendar excludes, while most theoretical hours are absent."""
+    """Sparse irregular provider membership: dense 16-hour head, a 97-hour
+    stride that lands on New York weekend hours the theoretical calendar
+    excludes, and the adjacent DST fall-back and spring-forward hours whose
+    legacy wall-clock completions collide or jump."""
     if granularity in ("D", "W"):
         return list(expected_candle_timestamps(start, end, granularity))
     timestamps = [start + timedelta(hours=hour) for hour in range(16)]
@@ -70,6 +82,11 @@ def designed_inventory_timestamps(granularity, start, end):
     while cursor < end:
         timestamps.append(cursor)
         cursor += timedelta(hours=97)
+    timestamps.extend(
+        timestamp
+        for timestamp in FALL_BACK_HOURS + SPRING_FORWARD_HOURS
+        if start <= timestamp < end
+    )
     return sorted({timestamp for timestamp in timestamps if timestamp < end})
 
 
@@ -250,7 +267,9 @@ class ProviderObservedRunTests(Gate1BFixtureTestCase):
         return [
             timestamp
             for timestamp in inventory_timestamps(self.contract, code, "H1")
-            if development_start <= registered_candle_completion(timestamp, "H1") < development_end
+            if development_start
+            <= candle_completion(timestamp, "H1", self.contract)
+            < development_end
             and timestamp.astimezone(NEW_YORK).weekday() >= 5
         ]
 
@@ -299,7 +318,7 @@ class ProviderObservedRunTests(Gate1BFixtureTestCase):
 
         calendar_expected = expected_analysis_keys(self.declared_ranges())
         self.assertNotEqual(expected, calendar_expected)
-        weekend_completion = registered_candle_completion(weekend[0], "H1")
+        weekend_completion = candle_completion(weekend[0], "H1", self.contract)
         self.assertTrue(
             AnalysisRun.objects.filter(
                 dataset_version=self.dataset,
@@ -314,11 +333,61 @@ class ProviderObservedRunTests(Gate1BFixtureTestCase):
             ).exists()
         )
 
+        # DST fall-back: two distinct sealed hours whose legacy wall-clock
+        # completions collide must produce two distinct analysis rows.
+        fall_a, fall_b = FALL_BACK_HOURS
+        membership = inventory_timestamps(self.contract, "EUR_USD", "H1")
+        self.assertIn(fall_a, membership)
+        self.assertIn(fall_b, membership)
+        self.assertEqual(
+            registered_candle_completion(fall_a, "H1"),
+            registered_candle_completion(fall_b, "H1"),
+        )
+        completion_a = candle_completion(fall_a, "H1", self.contract)
+        completion_b = candle_completion(fall_b, "H1", self.contract)
+        self.assertNotEqual(completion_a, completion_b)
+        for code in ("AUD_USD", "EUR_USD"):
+            rows = AnalysisRun.objects.filter(
+                dataset_version=self.dataset,
+                instrument__code=code,
+                completed_h1_timestamp__in=(completion_a, completion_b),
+            )
+            self.assertEqual(rows.count(), 2, code)
+
+    def test_v2_completion_rule_is_one_to_one_across_dst(self):
+        spring_a, spring_b = SPRING_FORWARD_HOURS
+        membership = inventory_timestamps(self.contract, "USD_CAD", "H1")
+        for timestamp in (*FALL_BACK_HOURS, *SPRING_FORWARD_HOURS):
+            self.assertIn(timestamp, membership)
+        completions = [
+            candle_completion(timestamp, "H1", self.contract) for timestamp in membership
+        ]
+        self.assertEqual(len(completions), len(set(completions)))
+        self.assertEqual(completions, sorted(completions))
+        self.assertEqual(
+            candle_completion(spring_a, "H1", self.contract),
+            spring_a + timedelta(hours=1),
+        )
+        self.assertEqual(
+            candle_completion(spring_b, "H1", self.contract),
+            spring_b + timedelta(hours=1),
+        )
+        # The legacy dictionary keying would silently overwrite one of the
+        # colliding fall-back hours; the v2 schedule must keep both.
+        legacy_schedule = {
+            registered_candle_completion(timestamp, "H1"): timestamp for timestamp in membership
+        }
+        v2_schedule = {
+            candle_completion(timestamp, "H1", self.contract): timestamp for timestamp in membership
+        }
+        self.assertLess(len(legacy_schedule), len(membership))
+        self.assertEqual(len(v2_schedule), len(membership))
+
     def test_last_n_history_is_selected_from_observed_inventory(self):
         code = "GBP_USD"
         instrument = self.plan.chunks.filter(instrument__code=code).first().instrument
         membership = inventory_timestamps(self.contract, code, "H1")
-        boundary = registered_candle_completion(membership[40], "H1")
+        boundary = candle_completion(membership[40], "H1", self.contract)
         derived = _derive_history(
             self.declared_ranges()[code],
             {"H1": 14},
@@ -330,10 +399,10 @@ class ProviderObservedRunTests(Gate1BFixtureTestCase):
         eligible = [
             timestamp
             for timestamp in membership
-            if registered_candle_completion(timestamp, "H1") <= boundary
+            if candle_completion(timestamp, "H1", self.contract) <= boundary
         ]
         self.assertEqual(h1.start, eligible[-14])
-        self.assertEqual(h1.end, registered_candle_completion(eligible[-1], "H1"))
+        self.assertEqual(h1.end, candle_completion(eligible[-1], "H1", self.contract))
         self.assertIn(h1.start, membership)
         with self.assertRaisesMessage(
             DatasetQualityError, "history does not contain the required evidence candle"
@@ -391,7 +460,7 @@ class ProviderObservedRunTests(Gate1BFixtureTestCase):
         self.assertIsNotNone(contract)
         membership = inventory_timestamps(self.contract, code, "H1")
         window = RequiredCandleRange(
-            "H1", membership[0], registered_candle_completion(membership[30], "H1")
+            "H1", membership[0], candle_completion(membership[30], "H1", self.contract)
         )
         assert_dataset_window_usable(self.dataset, instrument, (window,), AS_OF)
         sealed = sealed_inventory_membership(

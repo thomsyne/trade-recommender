@@ -20,6 +20,7 @@ from market.services import (
     DatasetQualityError,
     RequiredCandleRange,
     assert_dataset_window_usable,
+    candle_completion,
     provider_observed_contract,
     sealed_inventory_membership,
 )
@@ -110,7 +111,7 @@ def _derive_history(
         eligible = [
             timestamp
             for timestamp in timestamps
-            if registered_candle_completion(timestamp, granularity) <= boundary
+            if candle_completion(timestamp, granularity, contract) <= boundary
         ]
         if len(eligible) < minimum:
             insufficient.append(granularity)
@@ -125,7 +126,7 @@ def _derive_history(
             )
         if (
             granularity in exact_completion
-            and registered_candle_completion(latest, granularity) != exact_completion[granularity]
+            and candle_completion(latest, granularity, contract) != exact_completion[granularity]
         ):
             raise DatasetQualityError(
                 f"{granularity} history does not terminate at the evidence timestamp"
@@ -142,7 +143,7 @@ def _derive_history(
             RequiredCandleRange(
                 granularity,
                 selected[0],
-                registered_candle_completion(selected[-1], granularity),
+                candle_completion(selected[-1], granularity, contract),
             )
         )
     if insufficient:
@@ -464,7 +465,9 @@ def persist_entry_evaluation(
         )
     entry_timestamp = derived_entry_timestamp
     try:
-        entry_completion = registered_candle_completion(entry_timestamp, "H1")
+        entry_completion = candle_completion(
+            entry_timestamp, "H1", provider_observed_contract(setup.dataset_version)
+        )
         required_ranges = _derive_history(
             required_ranges,
             {"W": 1, "D": 1, "H1": 15},
