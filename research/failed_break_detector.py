@@ -224,7 +224,7 @@ def _persist_lifecycle(node, state):
     node.state = state
 
 
-def _latest_pre_entry_close(dataset, instrument_code, entry_timestamp):
+def _latest_pre_entry_close(dataset, instrument_code, entry_timestamp, contract=None):
     row = (
         MarketCandle.objects.filter(
             dataset_version=dataset,
@@ -235,23 +235,23 @@ def _latest_pre_entry_close(dataset, instrument_code, entry_timestamp):
         .order_by("-timestamp")
         .first()
     )
-    if not row or registered_candle_completion(row.timestamp, "H1") > entry_timestamp:
+    if not row or candle_completion(row.timestamp, "H1", contract) > entry_timestamp:
         return None
-    return row.midpoint_close, registered_candle_completion(row.timestamp, "H1")
+    return row.midpoint_close, candle_completion(row.timestamp, "H1", contract)
 
 
-def _cad_conversion(dataset, instrument, entry_timestamp):
+def _cad_conversion(dataset, instrument, entry_timestamp, contract=None):
     quote = instrument.quote_currency
     if quote == "CAD":
         return Decimal(1), entry_timestamp, "CAD@identity"
-    usd_cad = _latest_pre_entry_close(dataset, "USD_CAD", entry_timestamp)
+    usd_cad = _latest_pre_entry_close(dataset, "USD_CAD", entry_timestamp, contract)
     if not usd_cad:
         return None, None, ""
     usd_cad_rate, usd_cad_at = usd_cad
     if quote == "USD":
         return usd_cad_rate, usd_cad_at, f"USD_CAD@{usd_cad_at.isoformat()}"
     if quote == "GBP":
-        quote_usd = _latest_pre_entry_close(dataset, "GBP_USD", entry_timestamp)
+        quote_usd = _latest_pre_entry_close(dataset, "GBP_USD", entry_timestamp, contract)
         if not quote_usd:
             return None, None, ""
         quote_usd_rate, quote_usd_at = quote_usd
@@ -262,7 +262,7 @@ def _cad_conversion(dataset, instrument, entry_timestamp):
             f"GBP_USD@{quote_usd_at.isoformat()}|USD_CAD@{usd_cad_at.isoformat()}",
         )
     if quote == "JPY":
-        usd_jpy = _latest_pre_entry_close(dataset, "USD_JPY", entry_timestamp)
+        usd_jpy = _latest_pre_entry_close(dataset, "USD_JPY", entry_timestamp, contract)
         if not usd_jpy or usd_jpy[0] <= 0:
             return None, None, ""
         usd_jpy_rate, usd_jpy_at = usd_jpy
@@ -364,7 +364,18 @@ def _entry_event(pending):
 
 
 def _evaluate_entry(
-    *, pending, opening, h1_atr, nodes, instrument, dataset, strategy, ceiling, ranges, as_of
+    *,
+    pending,
+    opening,
+    h1_atr,
+    nodes,
+    instrument,
+    dataset,
+    strategy,
+    ceiling,
+    ranges,
+    as_of,
+    contract=None,
 ):
     entry_at = derive_expected_entry_timestamp(pending.setup)
     active_specs = []
@@ -378,7 +389,7 @@ def _evaluate_entry(
         states[stored_spec.key] = node.state
         records_by_key[stored_spec.key] = node.record
     conversion_rate, conversion_at, conversion_identity = _cad_conversion(
-        dataset, instrument, entry_at
+        dataset, instrument, entry_at, contract
     )
     result = entry_eligibility(
         _entry_event(pending),
@@ -525,6 +536,7 @@ def _instrument_detector(
                     ceiling=spread_ceiling,
                     ranges=ranges,
                     as_of=completion,
+                    contract=contract,
                 )
                 pending.remove(candidate)
 

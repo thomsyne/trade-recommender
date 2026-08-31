@@ -94,7 +94,21 @@ class SignalCountV2MembershipTests(Gate1BFixtureTestCase):
         return ranges
 
     def test_contract_resolves_only_through_explicit_registration_lineage(self):
-        self.assertIsNone(contract_for_dataset(self.dataset))
+        # Unregistered datasets carrying explicit v2 markers fail closed;
+        # they are never downgraded to legacy behaviour.
+        with self.assertRaisesMessage(
+            DatasetQualityError, "provider-observed data-contract lineage does not verify"
+        ):
+            contract_for_dataset(self.dataset)
+        legacy = DatasetVersion.objects.create(
+            name="legacy-unmarked",
+            version="v1",
+            description="",
+            source=self.source,
+            manifest={"note": "no markers"},
+            manifest_sha256="",
+        )
+        self.assertIsNone(contract_for_dataset(legacy))
         dataset = self.registered()
         contract = contract_for_dataset(dataset)
         self.assertIsNotNone(contract)
@@ -188,7 +202,9 @@ class SignalCountV2MembershipTests(Gate1BFixtureTestCase):
             _validate_dataset_contract(dataset, strategy, datetime(2019, 6, 1, tzinfo=UTC))
 
     def test_unregistered_v2_dataset_fails_closed(self):
-        with self.assertRaises(ReturnBlindViolation):
+        with self.assertRaisesMessage(
+            DatasetQualityError, "provider-observed data-contract lineage does not verify"
+        ):
             _validate_dataset_contract(
                 self.dataset, self.strategy, datetime(2019, 6, 1, tzinfo=UTC)
             )

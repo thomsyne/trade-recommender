@@ -354,6 +354,26 @@ class ProviderObservedRunTests(Gate1BFixtureTestCase):
             )
             self.assertEqual(rows.count(), 2, code)
 
+    def test_fall_back_cad_conversion_accepts_the_adjacent_sealed_candle(self):
+        from research.failed_break_detector import _cad_conversion, _latest_pre_entry_close
+
+        fall_a, fall_b = FALL_BACK_HOURS
+        entry_timestamp = fall_b  # 2010-11-07T06:00Z
+        v2_close = _latest_pre_entry_close(self.dataset, "USD_CAD", entry_timestamp, self.contract)
+        self.assertIsNotNone(v2_close)
+        rate, effective_at = v2_close
+        self.assertEqual(effective_at, fall_b)  # 05:00Z candle completes 06:00Z
+        # The legacy rule wrongly rejects the same sealed candle as
+        # incomplete for this entry (its wall-clock completion is 07:00Z).
+        self.assertIsNone(_latest_pre_entry_close(self.dataset, "USD_CAD", entry_timestamp))
+        usd_quoted = self.plan.chunks.filter(instrument__code="EUR_USD").first().instrument
+        conversion_rate, conversion_at, conversion_identity = _cad_conversion(
+            self.dataset, usd_quoted, entry_timestamp, self.contract
+        )
+        self.assertIsNotNone(conversion_rate)
+        self.assertEqual(conversion_at, fall_b)
+        self.assertEqual(conversion_identity, f"USD_CAD@{fall_b.isoformat()}")
+
     def test_v2_completion_rule_is_one_to_one_across_dst(self):
         spring_a, spring_b = SPRING_FORWARD_HOURS
         membership = inventory_timestamps(self.contract, "USD_CAD", "H1")

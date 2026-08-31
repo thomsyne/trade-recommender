@@ -97,6 +97,22 @@ def provider_observed_contract(dataset_version):
 
     registration = getattr(dataset_version, "registration", None)
     if not isinstance(registration, DatasetRegistration):
+        # An unregistered dataset carrying explicit v2 markers must fail
+        # closed rather than degrade to legacy behaviour.
+        sha_marker = getattr(dataset_version, "data_contract_sha256", None)
+        manifest = getattr(dataset_version, "manifest", None)
+        manifest_markers = (
+            (
+                manifest.get("historical_data_contract_sha256"),
+                manifest.get("global_semantic_inventory_sha256"),
+            )
+            if isinstance(manifest, dict)
+            else (None, None)
+        )
+        if isinstance(sha_marker, str) or any(
+            isinstance(marker, str) for marker in manifest_markers
+        ):
+            raise DatasetQualityError("provider-observed data-contract lineage does not verify")
         return None
     plan = registration.plan
     contract = plan.data_contract
@@ -219,7 +235,7 @@ def assert_dataset_window_usable(dataset_version, instrument, required_ranges, a
                 f"dataset does not completely cover {required.granularity} range"
             )
         for row in rows:
-            completion = registered_candle_completion(row["timestamp"], required.granularity)
+            completion = candle_completion(row["timestamp"], required.granularity, contract)
             if (
                 not row["complete"]
                 or row["ingestion_run__instrument_id"] != instrument_id
