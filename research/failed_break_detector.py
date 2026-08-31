@@ -15,7 +15,7 @@ from market.quality import (
     registered_candle_completion,
     registered_successor,
 )
-from market.services import assert_dataset_window_usable
+from market.services import assert_dataset_window_usable, sealed_inventory_membership
 from research.failed_break_services import (
     books_for_setup,
     derive_expected_entry_timestamp,
@@ -37,6 +37,7 @@ from research.models import (
     SetupTransition,
     StrategyVersion,
 )
+from research.provider_observed import contract_for_dataset
 from research.signal_count import (
     DEVELOPMENT_END,
     DEVELOPMENT_START,
@@ -136,15 +137,27 @@ def _read_candles(dataset, instrument, granularity, timestamps):
     )
 
 
-def _range_timestamps(ranges, granularity):
+def _range_timestamps(ranges, granularity, *, contract=None, instrument=None):
     required = next(required for required in ranges if required.granularity == granularity)
+    if contract is not None:
+        # Provider-observed v2: schedule membership comes only from the
+        # sealed timestamp inventory, never the theoretical calendar.
+        return sealed_inventory_membership(
+            contract,
+            getattr(instrument, "pk", instrument),
+            granularity,
+            required.start,
+            required.end,
+        )
     return expected_candle_timestamps(required.start, required.end, granularity)
 
 
-def _admitted_before(dataset, instrument, ranges, granularity, boundary):
+def _admitted_before(dataset, instrument, ranges, granularity, boundary, *, contract=None):
     timestamps = tuple(
         timestamp
-        for timestamp in _range_timestamps(ranges, granularity)
+        for timestamp in _range_timestamps(
+            ranges, granularity, contract=contract, instrument=instrument
+        )
         if registered_candle_completion(timestamp, granularity) < boundary
     )
     return list(_read_candles(dataset, instrument, granularity, timestamps))
@@ -422,17 +435,24 @@ def _seed_h1_atr(candles, context):
     return (points[-1].value, []) if points else (None, ranges)
 
 
-def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceiling, as_of):
+def _instrument_detector(
+    *, instrument, dataset, strategy, ranges, spread_ceiling, as_of, contract=None
+):
     for required in ranges:
         assert_dataset_window_usable(
-            dataset, instrument, (development_candle_range(required),), as_of
+            dataset,
+            instrument,
+            (development_candle_range(required, contract=contract, instrument=instrument.code),),
+            as_of,
         )
     development_start = DEVELOPMENT_START.astimezone(UTC)
     development_end = DEVELOPMENT_END.astimezone(UTC)
     schedules = {
         granularity: {
             registered_candle_completion(timestamp, granularity): timestamp
-            for timestamp in _range_timestamps(ranges, granularity)
+            for timestamp in _range_timestamps(
+                ranges, granularity, contract=contract, instrument=instrument
+            )
             if registered_candle_completion(timestamp, granularity) < development_end
         }
         for granularity in ("W", "D", "H1")
@@ -442,9 +462,11 @@ def _instrument_detector(*, instrument, dataset, strategy, ranges, spread_ceilin
         for completion, timestamp in schedules["H1"].items()
         if development_start <= completion < development_end
     )
-    weekly = _admitted_before(dataset, instrument, ranges, "W", development_start)
-    daily = _admitted_before(dataset, instrument, ranges, "D", development_start)
-    h1 = _admitted_before(dataset, instrument, ranges, "H1", development_start)
+    weekly = _admitted_before(
+        dataset, instrument, ranges, "W", development_start, contract=contract
+    )
+    daily = _admitted_before(dataset, instrument, ranges, "D", development_start, contract=contract)
+    h1 = _admitted_before(dataset, instrument, ranges, "H1", development_start, contract=contract)
     nodes = []
     known_spec_keys = set()
     specs, _, pivots = _material_level_specs(
@@ -716,6 +738,7 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
     }
     if set(instruments) != FROZEN_INSTRUMENTS:
         raise ValueError("S1 detector requires all six registered instruments")
+    contract = contract_for_dataset(dataset)
     for code in sorted(FROZEN_INSTRUMENTS):
         _instrument_detector(
             instrument=instruments[code],
@@ -724,9 +747,10 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
             ranges=ranges_by_instrument[code],
             spread_ceiling=Decimal(s0_output.coverage["spread_ceilings"][code]),
             as_of=as_of,
+            contract=contract,
         )
 
-    expected = expected_analysis_keys(ranges_by_instrument)
+    expected = expected_analysis_keys(ranges_by_instrument, contract=contract)
     observed_rows = list(
         AnalysisRun.objects.filter(
             dataset_version=dataset,

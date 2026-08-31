@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from django.db import connection
 
 from market.models import DatasetVersion, HistoricalDatasetPlan
+from market.services import DatasetQualityError
 from market.tests.test_gate1b_data_contract import Gate1BFixtureTestCase
 from research.provider_observed import (
     contract_for_dataset,
@@ -165,17 +166,18 @@ class SignalCountV2MembershipTests(Gate1BFixtureTestCase):
                 as_of=unsealed_timestamp + timedelta(hours=2),
             )
         sealed_timestamp = sealed[0]
-        try:
+        with self.assertRaisesMessage(DatasetQualityError, "dataset contains no governed candles"):
+            # A sealed timestamp passes the inventory gate; on this
+            # candle-less fixture the next validation (exact dataset
+            # coverage) is what rejects — proving the sealed check did not.
+            # The full positive traversal, including a weekend entry,
+            # executes in test_provider_observed_s1.
             read_entry_projection(
                 dataset_id=dataset.pk,
                 instrument_id=instrument.pk,
                 theoretical_entry_timestamp=sealed_timestamp,
                 as_of=sealed_timestamp + timedelta(hours=2),
             )
-        except ReturnBlindViolation as error:
-            self.assertNotIn("sealed provider-observed candle", str(error))
-        except Exception:
-            pass
 
     def test_incomplete_v2_inventory_rejects_s0_validation(self):
         dataset = self.registered()

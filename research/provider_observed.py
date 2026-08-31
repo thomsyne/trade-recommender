@@ -29,15 +29,13 @@ def contract_for_dataset(dataset):
 
 def inventory_timestamps(contract, instrument_code, granularity):
     """Chronological sealed observations for one instrument/granularity."""
-    return tuple(
-        HistoricalTimestampObservation.objects.filter(
-            inventory__chunk__plan=contract.discovery_registration.plan,
-            inventory__chunk__instrument__code=instrument_code,
-            inventory__chunk__granularity=granularity,
-        )
-        .order_by("timestamp")
-        .values_list("timestamp", flat=True)
+    from market.models import Instrument
+    from market.services import _sealed_series_timestamps
+
+    instrument_id = (
+        Instrument.objects.filter(code=instrument_code).values_list("pk", flat=True).first()
     )
+    return _sealed_series_timestamps(contract, instrument_id, granularity)
 
 
 def inventory_window(contract, instrument_code, granularity, start, end):

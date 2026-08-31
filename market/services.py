@@ -67,6 +67,68 @@ def assert_dataset_usable(dataset_version) -> None:
         raise DatasetQualityError("dataset contains no governed candles")
 
 
+def provider_observed_contract(dataset_version):
+    """Resolve the explicit provider-observed data contract for a registered
+    dataset, or None for legacy datasets. Resolution is strictly relational
+    through the registered plan; identity strings and hashes are never used
+    to infer v2 on their own, and inconsistent contract lineage fails closed."""
+    from market.models import HistoricalDataContract
+
+    registration = getattr(dataset_version, "registration", None)
+    if registration is None:
+        return None
+    plan = registration.plan
+    contract = plan.data_contract
+    if not isinstance(contract, HistoricalDataContract):
+        return None
+    if (
+        plan.data_contract_sha256 != contract.sha256
+        or plan.identity != contract.identity
+        or contract.discovery_registration.plan.sealed_at is None
+    ):
+        raise DatasetQualityError("provider-observed data-contract lineage does not verify")
+    return contract
+
+
+# Sealed inventories are immutable, so full per-series membership is safely
+# memoized by content-addressed key (contract sha + instrument code): equal
+# keys imply byte-equal sealed membership even across test databases.
+_SEALED_MEMBERSHIP_CACHE = {}
+_SEALED_MEMBERSHIP_CACHE_LIMIT = 64
+
+
+def _sealed_series_timestamps(contract, instrument_id, granularity):
+    from market.models import HistoricalTimestampObservation, Instrument
+
+    code = Instrument.objects.filter(pk=instrument_id).values_list("code", flat=True).first()
+    key = (contract.sha256, code, granularity)
+    cached = _SEALED_MEMBERSHIP_CACHE.get(key)
+    if cached is None:
+        cached = tuple(
+            HistoricalTimestampObservation.objects.filter(
+                inventory__chunk__plan=contract.discovery_registration.plan,
+                inventory__chunk__instrument_id=instrument_id,
+                inventory__chunk__granularity=granularity,
+            )
+            .order_by("timestamp")
+            .values_list("timestamp", flat=True)
+        )
+        if len(_SEALED_MEMBERSHIP_CACHE) >= _SEALED_MEMBERSHIP_CACHE_LIMIT:
+            _SEALED_MEMBERSHIP_CACHE.clear()
+        _SEALED_MEMBERSHIP_CACHE[key] = cached
+    return cached
+
+
+def sealed_inventory_membership(contract, instrument_id, granularity, start, end):
+    """Exact ordered sealed timestamp membership for one closed-open range."""
+    import bisect
+
+    series = _sealed_series_timestamps(contract, instrument_id, granularity)
+    left = bisect.bisect_left(series, start)
+    right = bisect.bisect_left(series, end)
+    return series[left:right]
+
+
 def assert_dataset_window_usable(dataset_version, instrument, required_ranges, as_of) -> None:
     """Prove exact point-in-time coverage for one instrument across ingestion runs."""
     assert_dataset_usable(dataset_version)
@@ -76,13 +138,26 @@ def assert_dataset_window_usable(dataset_version, instrument, required_ranges, a
     if not ranges:
         raise DatasetQualityError("at least one required candle range must be declared")
     instrument_id = getattr(instrument, "pk", instrument)
+    contract = provider_observed_contract(dataset_version)
     for required in ranges:
-        try:
-            expected = expected_candle_timestamps(
-                required.start, required.end, required.granularity
+        if contract is not None:
+            # Provider-observed v2: exact membership comes only from the
+            # sealed timestamp inventory, never the theoretical calendar.
+            expected = sealed_inventory_membership(
+                contract, instrument_id, required.granularity, required.start, required.end
             )
-        except ValueError as error:
-            raise DatasetQualityError(str(error)) from error
+            if not expected:
+                raise DatasetQualityError(
+                    f"required {required.granularity} range has no sealed"
+                    " provider-observed membership"
+                )
+        else:
+            try:
+                expected = expected_candle_timestamps(
+                    required.start, required.end, required.granularity
+                )
+            except ValueError as error:
+                raise DatasetQualityError(str(error)) from error
         if as_of < required.end:
             raise DatasetQualityError("required candle range is incomplete at as_of")
         rows = list(

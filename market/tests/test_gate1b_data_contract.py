@@ -162,10 +162,11 @@ class Gate1BFixtureTestCase(Gate4FixtureTestCase):
     seal, the unchanged approved strategy version, and the data contract."""
 
     retention_policy = "gate1b fixture"
+    discovery_client_factory = WaveSuccessClient
 
     def setUp(self):
         super().setUp()
-        client = WaveSuccessClient(self.replacement)
+        client = self.discovery_client_factory(self.replacement)
         for chunk in self.remaining:
             run_discovery_chunk(chunk.logical_key, client)
         self.global_semantic = forge_discovery_seal(self.replacement)
