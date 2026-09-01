@@ -860,14 +860,23 @@ def _replacement_candle_hashes(chunk):
 
 
 def _record_replacement_canary_success(attempt, manifest):
-    """Persist the governed success evidence chain for the single
-    provider-observed acquisition canary, atomically with its candles."""
+    """Persist the governed success evidence chain for a provider-observed
+    replacement acquisition, atomically with its candles. The completed
+    Gate 7A canary keeps its historical event type; every other
+    replacement chunk records the Gate 7B acquisition evidence type."""
+    from market.provider_observed_canary import ACQUISITION_CANARY_LOGICAL_KEY
+
     chunk = attempt.chunk
+    event_type = (
+        "market.replacement_canary_succeeded"
+        if chunk.logical_key == ACQUISITION_CANARY_LOGICAL_KEY
+        else "market.replacement_acquisition_succeeded"
+    )
     ingestion_manifest = attempt.ingestion_run.ingestion_manifest
     candle_key_hash, candle_payload_hash, stored_count = _replacement_candle_hashes(chunk)
     provider_evidence = _sanitized_provider_evidence(chunk, manifest)
     terminal_event = {
-        "event": "market.replacement_canary_succeeded",
+        "event": event_type,
         "logical_key": chunk.logical_key,
         "canonical_request_sha256": chunk.canonical_request_sha256,
         "semantic_inventory_sha256": chunk.semantic_inventory_sha256,
@@ -887,7 +896,7 @@ def _record_replacement_canary_success(attempt, manifest):
         [terminal_event_sha256, provider_evidence, attempt.idempotency_key]
     )
     AuditEvent.objects.create(
-        event_type="market.replacement_canary_succeeded",
+        event_type=event_type,
         actor="market.historical_acquisition.run_historical_chunk",
         subject_type="HistoricalIngestionAttempt",
         subject_id=str(attempt.pk),
