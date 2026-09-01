@@ -7,7 +7,7 @@ from market.historical_acquisition import (
     register_historical_dataset,
     replacement_registration_contract,
 )
-from market.models import DatasetVersion, HistoricalDatasetPlan
+from market.models import DatasetRegistration, DatasetVersion, HistoricalDatasetPlan
 from market.provider_observed_registration import (
     load_committed_registration_authorization,
     verify_registration_readiness,
@@ -127,6 +127,17 @@ class Command(BaseCommand):
             return
         try:
             with transaction.atomic():
+                # Registration is deliberately idempotent, so whether this
+                # invocation created the row can only be decided under the same
+                # DatasetVersion lock the service itself takes: an unlocked
+                # pre-call check would let two concurrent processes both observe
+                # zero rows. Taking that lock here first means the existence
+                # check below sees exactly the state the service will act on,
+                # and a concurrent invocation blocks until this one commits.
+                DatasetVersion.objects.select_for_update().get(pk=dataset.pk)
+                already_registered = DatasetRegistration.objects.filter(
+                    dataset_version=dataset
+                ).exists()
                 registration = register_historical_dataset(dataset.pk, plan.sha256)
         except DatasetQualityError as error:
             raise CommandError(str(error)) from error
@@ -137,9 +148,9 @@ class Command(BaseCommand):
         self.emit(
             {
                 **summary,
-                "checkpoint": "registered",
+                "checkpoint": "already-registered" if already_registered else "registered",
                 "read_only": False,
-                "registrations_created": 1,
+                "registrations_created": 0 if already_registered else 1,
                 "report_sha256": registration.report_sha256,
                 "configuration_sha256": registration.configuration_sha256,
                 "row_counts": registration.row_counts,
