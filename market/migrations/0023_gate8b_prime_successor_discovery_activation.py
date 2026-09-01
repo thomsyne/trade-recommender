@@ -670,6 +670,12 @@ SUCCESSOR_DISCOVERY_ATTEMPT_PROSRC = r"""
                       JOIN market_ingestionrun r ON r.id=a.ingestion_run_id
                       WHERE c.plan_id=lineage.plan_id AND r.status='running') THEN RAISE EXCEPTION
               'a successor discovery attempt is already running'; END IF;
+            IF EXISTS(SELECT 1 FROM market_historicaldiscoveryattempt a
+                      JOIN market_historicaldiscoverychunk c ON c.id=a.chunk_id
+                      JOIN market_ingestionrun r ON r.id=a.ingestion_run_id
+                      WHERE c.plan_id=lineage.plan_id
+                        AND r.status IN ('failed','quarantined')) THEN RAISE EXCEPTION
+              'a failed successor discovery attempt permanently stops this plan'; END IF;
             SELECT count(*) INTO ready_first
               FROM market_historicaldiscoverychunk c
               JOIN market_historicaldiscoveryattempt a

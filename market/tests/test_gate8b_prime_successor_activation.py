@@ -13,7 +13,8 @@ staged transition.
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.db import IntegrityError, connection, transaction
+from django.contrib.auth import get_user_model
+from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
@@ -64,7 +65,7 @@ def successor_first_h1(plan):
     return sorted(chunks, key=lambda c: c.instrument.code != CANARY_INSTRUMENT)
 
 
-def record_attempt(chunk, *, status, earlier=MINIMUM_EARLIER_OBSERVATIONS, number=1):
+def record_attempt(chunk, *, status, earlier=MINIMUM_EARLIER_OBSERVATIONS, number=1, salt=0):
     """A terminal attempt with a sealed inventory, written with the governed
     triggers suspended: these fixtures exist to exercise the *next* transition,
     not to re-prove the ingestion path."""
@@ -81,7 +82,7 @@ def record_attempt(chunk, *, status, earlier=MINIMUM_EARLIER_OBSERVATIONS, numbe
             requested_from=chunk.requested_from,
             requested_to=chunk.requested_to,
             parameters={},
-            request_manifest_hash=f"{chunk.ordinal:062d}{number:02d}",
+            request_manifest_hash=f"{chunk.ordinal:060d}{number:02d}{salt:02d}",
             status=status,
         )
         attempt = HistoricalDiscoveryAttempt.objects.create(
@@ -444,10 +445,11 @@ class Gate8bPrimeStagedExecutionTests(TransactionTestCase):
         # 13, 14
         record_attempt(self.canary, status=IngestionRun.Status.SUCCEEDED)
         self.assertEqual(successor_readiness()["permitted_stage"], STAGE_CROSS_INSTRUMENT)
-        attempt = begin_discovery_attempt(self.cross[0].logical_key)
-        self.assertEqual(attempt.attempt_number, 1)
+        # checked before anything is running, so the stage rule is what refuses
         with self.assertRaisesMessage(DatasetQualityError, "gate 8D2 requires"):
             begin_discovery_attempt(self.remaining.first().logical_key)
+        attempt = begin_discovery_attempt(self.cross[0].logical_key)
+        self.assertEqual(attempt.attempt_number, 1)
 
     def test_one_short_cross_instrument_inventory_keeps_gate_8d2_closed(self):
         # 15
@@ -500,11 +502,47 @@ class Gate8bPrimeStagedExecutionTests(TransactionTestCase):
             )
 
     def test_a_second_attempt_one_is_impossible(self):
-        # 18, 19: the authorized winner is unique by construction
+        """18, 19: attempt 1 is unique per chunk at the database level.
+
+        The attempt validators are suspended for the duplicate so the refusal
+        can only come from the unique index itself — with them armed, the
+        governed lineage rule refuses first and the constraint is never
+        reached, which would prove something else.
+        """
         record_attempt(self.canary, status=IngestionRun.Status.FAILED)
-        with self.assertRaises((IntegrityError, DatasetQualityError, Exception)):
-            with transaction.atomic():
-                record_attempt(self.canary, status=IngestionRun.Status.FAILED)
+        run = IngestionRun.objects.create(
+            source=self.plan.source,
+            instrument=self.canary.instrument,
+            granularity=self.canary.granularity,
+            requested_from=self.canary.requested_from,
+            requested_to=self.canary.requested_to,
+            parameters={},
+            request_manifest_hash=f"{self.canary.ordinal:062d}99",
+            status=IngestionRun.Status.RUNNING,
+        )
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_historicaldiscoveryattempt DISABLE TRIGGER USER")
+        try:
+            with (
+                self.assertRaisesMessage(
+                    IntegrityError, "market_historicaldiscoveryattempt_idempotency_key_key"
+                ),
+                transaction.atomic(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(
+                    "INSERT INTO market_historicaldiscoveryattempt"
+                    " (chunk_id,ingestion_run_id,attempt_number,idempotency_key,created_at)"
+                    " VALUES (%s,%s,1,%s,now())",
+                    [
+                        self.canary.pk,
+                        run.pk,
+                        f"historical-discovery-attempt:{self.canary.logical_key}:1",
+                    ],
+                )
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute("ALTER TABLE market_historicaldiscoveryattempt ENABLE TRIGGER USER")
 
     def test_no_attempt_before_the_complete_plan_exists(self):
         # 8: proven inside the transaction, since an incomplete successor plan
@@ -561,11 +599,156 @@ class Gate8bPrimeStagedExecutionTests(TransactionTestCase):
 
         for chunk in self.first_h1:
             record_attempt(chunk, status=IngestionRun.Status.SUCCEEDED)
-        with self.assertRaises(Exception):
-            approve_and_register_discovery(self.plan.sha256, 1, "0" * 64)
+        approver = get_user_model().objects.create_user("gate8b-prime-approver")
+        with self.assertRaisesMessage(
+            DatasetQualityError, "only the approved replacement discovery plan may be approved"
+        ):
+            approve_and_register_discovery(self.plan.sha256, approver.pk, "0" * 64)
         self.assertIsNone(self.plan.__class__.objects.get(pk=self.plan.pk).sealed_at)
         with self.assertRaises(Exception), transaction.atomic(), connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE market_historicaldiscoveryplan SET sealed_at=now() WHERE id=%s",
                 [self.plan.pk],
             )
+
+
+class Gate8bPrimeFailedPlanTests(TransactionTestCase):
+    """A failed successor attempt ends the plan, not merely its own chunk.
+
+    Attempt 2 is prohibited, so once any chunk fails the 132-chunk plan can
+    never complete; every further request would be spent on a plan that can
+    never be sealed or registered.
+    """
+
+    FAILED_PLAN = "a failed successor discovery attempt permanently stops this plan"
+
+    def setUp(self):
+        super().setUp()
+        migrate_to(MIGRATION_0023)
+        self.source = seed_governed_market("gate8b-prime failed-plan fixture")
+        self.plan = create_discovery_plan(build_successor_discovery_plan())
+        self.first_h1 = successor_first_h1(self.plan)
+        self.canary, self.cross = self.first_h1[0], self.first_h1[1:]
+        self.remaining = list(
+            self.plan.chunks.exclude(pk__in=[c.pk for c in self.first_h1]).order_by("ordinal")[:3]
+        )
+
+    def tearDown(self):
+        MigrationExecutor(connection).migrate(MIGRATION_0023)
+        super().tearDown()
+
+    def open_cross_instrument(self):
+        record_attempt(self.canary, status=IngestionRun.Status.SUCCEEDED)
+
+    def open_remainder(self):
+        for chunk in self.first_h1:
+            record_attempt(chunk, status=IngestionRun.Status.SUCCEEDED)
+
+    def test_a_failed_canary_blocks_every_other_successor_chunk(self):
+        # 1
+        record_attempt(self.canary, status=IngestionRun.Status.FAILED)
+        for chunk in (self.cross[0], self.remaining[0]):
+            with self.assertRaisesMessage(DatasetQualityError, self.FAILED_PLAN):
+                begin_discovery_attempt(chunk.logical_key)
+
+    def test_a_failed_cross_instrument_attempt_blocks_the_rest(self):
+        # 2
+        self.open_cross_instrument()
+        record_attempt(self.cross[0], status=IngestionRun.Status.FAILED)
+        for chunk in (self.cross[1], self.remaining[0]):
+            with self.assertRaisesMessage(DatasetQualityError, self.FAILED_PLAN):
+                begin_discovery_attempt(chunk.logical_key)
+
+    def test_a_failed_remainder_attempt_blocks_a_different_remainder_chunk(self):
+        # 3: the finding this correction exists for
+        self.open_remainder()
+        record_attempt(self.remaining[0], status=IngestionRun.Status.FAILED)
+        with self.assertRaisesMessage(DatasetQualityError, self.FAILED_PLAN):
+            begin_discovery_attempt(self.remaining[1].logical_key)
+
+    def test_the_failed_chunk_still_cannot_take_attempt_two(self):
+        # 4: the older rule survives, with its own distinct message
+        self.open_remainder()
+        record_attempt(self.remaining[0], status=IngestionRun.Status.FAILED)
+        with self.assertRaisesMessage(DatasetQualityError, "only attempt 1"):
+            begin_discovery_attempt(self.remaining[0].logical_key)
+
+    def test_raw_sql_is_refused_by_postgresql_with_its_own_message(self):
+        # 6: PostgreSQL is authoritative, so bypassing the service changes nothing
+        self.open_remainder()
+        record_attempt(self.remaining[0], status=IngestionRun.Status.FAILED)
+        target = self.remaining[1]
+
+        def make_run():
+            return IngestionRun.objects.create(
+                source=self.plan.source,
+                instrument=target.instrument,
+                granularity=target.granularity,
+                requested_from=target.requested_from,
+                requested_to=target.requested_to,
+                parameters={
+                    "purpose": "provider_timestamp_inventory_discovery",
+                    "logical_discovery_key": target.logical_key,
+                    "canonical_request_sha256": target.canonical_request_sha256,
+                    **target.canonical_request,
+                },
+                request_manifest_hash=canonical_hash(
+                    {
+                        "purpose": "provider_timestamp_inventory_discovery",
+                        "attempt_idempotency_key": (
+                            f"historical-discovery-attempt:{target.logical_key}:1"
+                        ),
+                    }
+                ),
+                status=IngestionRun.Status.RUNNING,
+            )
+
+        with (
+            self.assertRaisesMessage(DatabaseError, self.FAILED_PLAN),
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            run = make_run()
+            cursor.execute(
+                "INSERT INTO market_historicaldiscoveryattempt"
+                " (chunk_id,ingestion_run_id,attempt_number,idempotency_key,created_at)"
+                " VALUES (%s,%s,1,%s,now())",
+                [target.pk, run.pk, f"historical-discovery-attempt:{target.logical_key}:1"],
+            )
+
+    def test_readiness_reports_the_plan_blocked_with_no_eligible_chunk(self):
+        # 7, 8
+        import market.oanda as oanda
+
+        self.open_remainder()
+        record_attempt(self.remaining[0], status=IngestionRun.Status.FAILED)
+        with patch.object(oanda, "OandaClient", side_effect=AssertionError("client built")):
+            readiness = successor_readiness()
+        self.assertTrue(readiness["blocked_by_failed_attempt"])
+        self.assertIsNone(readiness["permitted_stage"])
+        self.assertEqual(readiness["permitted_logical_keys"], [])
+
+    def test_a_succeeded_attempt_does_not_trigger_the_failed_plan_rule(self):
+        # 9
+        self.open_remainder()
+        readiness = successor_readiness()
+        self.assertFalse(readiness["blocked_by_failed_attempt"])
+        self.assertEqual(readiness["permitted_stage"], STAGE_REMAINDER)
+        attempt = begin_discovery_attempt(self.remaining[0].logical_key)
+        self.assertEqual(attempt.attempt_number, 1)
+
+    def test_a_failed_attempt_on_another_plan_does_not_block_the_successor(self):
+        # 10: scope is relational — successor plan, its chunks, their runs
+        legacy = create_discovery_plan(build_replacement_discovery_plan())
+        legacy_chunk = legacy.chunks.order_by("ordinal").first()
+        record_attempt(legacy_chunk, status=IngestionRun.Status.FAILED)
+        self.assertFalse(successor_readiness()["blocked_by_failed_attempt"])
+        attempt = begin_discovery_attempt(self.canary.logical_key)
+        self.assertEqual(attempt.attempt_number, 1)
+
+    def test_the_running_and_failed_rules_stay_diagnostically_distinct(self):
+        # the single-flight rule must not be absorbed into the failure rule
+        self.open_remainder()
+        begin_discovery_attempt(self.remaining[0].logical_key)
+        with self.assertRaisesMessage(DatasetQualityError, "already running"):
+            begin_discovery_attempt(self.remaining[1].logical_key)

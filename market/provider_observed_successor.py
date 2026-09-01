@@ -242,6 +242,21 @@ def successor_ranges(plan=None):
     return ranges
 
 
+# Operational note (Gate 8B' review finding, informational).
+#
+# The governed snapshot digest used by the operational gates hashes
+# ``to_jsonb(row)`` over governed tables, and ``to_jsonb(timestamptz)`` renders
+# in the *session* time zone. The same unchanged research data therefore hashes
+# to 358826f1... under a psql session in America/Toronto and to 2c45f3c3...
+# under a Django session in UTC.
+#
+# 358826f1... is meaningful only under the session settings its original
+# snapshot method used. Future operational gates must set the PostgreSQL
+# session time zone explicitly, and report it, on both sides of any snapshot
+# comparison. No repository helper computes this digest, so there is nothing
+# here to correct in production code; this is an operational rule.
+
+
 def gate8b_authorization_path():
     return (
         Path(__file__).resolve().parent.parent
@@ -358,6 +373,13 @@ def load_committed_gate8b_authorization():
 PREDECESSOR_H1_REQUESTED_FROM = "2009-12-31T15:00:00Z"
 MINIMUM_EARLIER_OBSERVATIONS = 6
 
+# Terminal run states that represent an unsuccessful discovery attempt. The
+# discovery services only ever record "failed"; "quarantined" is carried for
+# completeness because it is the acquisition path's terminal failure and must
+# never be mistaken for a success. "running" is not terminal and "succeeded" is
+# terminal but successful, so neither belongs here.
+TERMINAL_FAILURE_STATUSES = ("failed", "quarantined")
+
 
 def successor_stage(chunk):
     """Which staged gate a successor chunk belongs to, or None for any chunk
@@ -403,9 +425,21 @@ def _ready_first_h1(plan, *, canary_only):
     return ready
 
 
+def _successor_runs(plan, *statuses):
+    """Runs in the given states reached relationally: successor plan → its
+    chunks → their attempts → those attempts' own runs. Never inferred from an
+    event name, error string or artifact field."""
+    from market.models import IngestionRun
+
+    return IngestionRun.objects.filter(
+        historical_discovery_attempt__chunk__plan=plan, status__in=statuses
+    )
+
+
 def assert_successor_attempt_permitted(chunk):
     """Fail closed, before any provider client exists, unless this chunk is the
     stage the governed sequence has actually opened."""
+    from market.models import IngestionRun
     from market.services import DatasetQualityError
 
     stage = successor_stage(chunk)
@@ -416,6 +450,15 @@ def assert_successor_attempt_permitted(chunk):
         raise DatasetQualityError("successor discovery requires its complete authorized plan")
     if chunk.attempts.exists():
         raise DatasetQualityError("successor discovery permits only attempt 1 for each chunk")
+    if _successor_runs(plan, IngestionRun.Status.RUNNING).exists():
+        raise DatasetQualityError("a successor discovery attempt is already running")
+    # A failure ends the plan, not merely its own chunk: attempt 2 is prohibited,
+    # so the 132-chunk plan can never complete, and every further request would
+    # be spent on a plan that can never be sealed or registered.
+    if _successor_runs(plan, *TERMINAL_FAILURE_STATUSES).exists():
+        raise DatasetQualityError(
+            "a failed successor discovery attempt permanently stops this plan"
+        )
     if stage == STAGE_CANARY:
         return
     if stage == STAGE_CROSS_INSTRUMENT:
@@ -450,6 +493,7 @@ def successor_readiness(plan=None):
         }
     canary_ready = _ready_first_h1(row, canary_only=True) == 1
     all_ready = _ready_first_h1(row, canary_only=False) == len(INSTRUMENTS)
+    blocked = _successor_runs(row, *TERMINAL_FAILURE_STATUSES).exists()
     stage = (
         STAGE_REMAINDER if all_ready else (STAGE_CROSS_INSTRUMENT if canary_ready else STAGE_CANARY)
     )
@@ -457,8 +501,11 @@ def successor_readiness(plan=None):
         "successor_plan_sha256": payload["plan_sha256"],
         "materialized": True,
         "chunks": row.chunks.count(),
-        "permitted_stage": stage,
-        "permitted_logical_keys": [item["logical_discovery_key"] for item in membership[stage]],
+        "blocked_by_failed_attempt": blocked,
+        "permitted_stage": None if blocked else stage,
+        "permitted_logical_keys": (
+            [] if blocked else [item["logical_discovery_key"] for item in membership[stage]]
+        ),
         "canary_prerequisite_met": canary_ready,
         "cross_instrument_prerequisite_met": all_ready,
     }
