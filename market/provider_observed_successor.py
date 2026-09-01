@@ -475,10 +475,45 @@ def assert_successor_attempt_permitted(chunk):
         )
 
 
+def _attempted_logical_keys(plan):
+    """Logical keys of successor chunks that already carry an attempt.
+
+    Attempt 2 is prohibited, so any attempt closes its chunk permanently
+    whatever its run reached: succeeded, failed, quarantined or still running.
+    Scoped relationally to this plan's own chunks, so a predecessor v1 or v2
+    attempt can never remove a successor key.
+    """
+    from market.models import HistoricalDiscoveryAttempt
+
+    return set(
+        HistoricalDiscoveryAttempt.objects.filter(chunk__plan=plan).values_list(
+            "chunk__logical_key", flat=True
+        )
+    )
+
+
+# Execution states the read-only interface reports. Exactly one holds at a time.
+STATUS_NOT_MATERIALIZED = "not_materialized"
+STATUS_BLOCKED = "blocked_by_failed_attempt"
+STATUS_ATTEMPT_IN_PROGRESS = "attempt_in_progress"
+STATUS_COMPLETE = "complete"
+STATUS_OPEN = "open"
+STATUS_NO_ELIGIBLE_CHUNK = "no_eligible_chunk"
+
+
 def successor_readiness(plan=None):
-    """Read-only report of the stage the governed sequence has opened. Performs
-    no write and constructs no provider client."""
-    from market.models import HistoricalDiscoveryPlan
+    """Read-only report of which successor chunks may actually be executed now.
+
+    Permission is derived from both the governed stage the sequence has
+    unlocked and each chunk's own attempt lineage, because the database admits
+    an attempt only when both allow it. A chunk that already has an attempt is
+    never reported as executable, so a completed or failed key can never
+    reappear, and once all 132 chunks have been attempted the plan reports
+    successful completion rather than naming a stage it can no longer open.
+
+    Performs no write and constructs no provider client.
+    """
+    from market.models import HistoricalDiscoveryPlan, IngestionRun
 
     payload = plan or build_successor_discovery_plan()
     membership = staged_discovery_membership(payload)
@@ -487,6 +522,8 @@ def successor_readiness(plan=None):
         return {
             "successor_plan_sha256": payload["plan_sha256"],
             "materialized": False,
+            "execution_status": STATUS_NOT_MATERIALIZED,
+            "complete": False,
             "permitted_stage": None,
             "permitted_logical_keys": [],
             "note": "the successor discovery plan has not been materialized",
@@ -494,18 +531,52 @@ def successor_readiness(plan=None):
     canary_ready = _ready_first_h1(row, canary_only=True) == 1
     all_ready = _ready_first_h1(row, canary_only=False) == len(INSTRUMENTS)
     blocked = _successor_runs(row, *TERMINAL_FAILURE_STATUSES).exists()
+    running = _successor_runs(row, IngestionRun.Status.RUNNING).exists()
     stage = (
         STAGE_REMAINDER if all_ready else (STAGE_CROSS_INSTRUMENT if canary_ready else STAGE_CANARY)
     )
+    chunk_count = row.chunks.count()
+    attempted = _attempted_logical_keys(row)
+    # The single-flight rule refuses every chunk while an attempt is running, so
+    # nothing may be offered as available until that attempt reaches a terminal
+    # state.
+    permitted = (
+        []
+        if blocked or running
+        else [
+            item["logical_discovery_key"]
+            for item in membership[stage]
+            if item["logical_discovery_key"] not in attempted
+        ]
+    )
+    complete = (
+        not blocked
+        and not running
+        and chunk_count == EXPECTED_CHUNK_COUNT
+        and len(attempted) == EXPECTED_CHUNK_COUNT
+    )
+    if blocked:
+        status = STATUS_BLOCKED
+    elif running:
+        status = STATUS_ATTEMPT_IN_PROGRESS
+    elif complete:
+        status = STATUS_COMPLETE
+    elif permitted:
+        status = STATUS_OPEN
+    else:
+        status = STATUS_NO_ELIGIBLE_CHUNK
     return {
         "successor_plan_sha256": payload["plan_sha256"],
         "materialized": True,
-        "chunks": row.chunks.count(),
+        "chunks": chunk_count,
+        "attempted_chunks": len(attempted),
         "blocked_by_failed_attempt": blocked,
-        "permitted_stage": None if blocked else stage,
-        "permitted_logical_keys": (
-            [] if blocked else [item["logical_discovery_key"] for item in membership[stage]]
-        ),
+        "execution_status": status,
+        "complete": complete,
+        # Named only while it actually has an executable key, so the field can
+        # never imply that a completed or blocked stage may still be run.
+        "permitted_stage": stage if permitted else None,
+        "permitted_logical_keys": permitted,
         "canary_prerequisite_met": canary_ready,
         "cross_instrument_prerequisite_met": all_ready,
     }
