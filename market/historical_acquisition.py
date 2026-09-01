@@ -860,14 +860,23 @@ def _replacement_candle_hashes(chunk):
 
 
 def _record_replacement_canary_success(attempt, manifest):
-    """Persist the governed success evidence chain for the single
-    provider-observed acquisition canary, atomically with its candles."""
+    """Persist the governed success evidence chain for a provider-observed
+    replacement acquisition, atomically with its candles. The completed
+    Gate 7A canary keeps its historical event type; every other
+    replacement chunk records the Gate 7B acquisition evidence type."""
+    from market.provider_observed_canary import ACQUISITION_CANARY_LOGICAL_KEY
+
     chunk = attempt.chunk
+    event_type = (
+        "market.replacement_canary_succeeded"
+        if chunk.logical_key == ACQUISITION_CANARY_LOGICAL_KEY
+        else "market.replacement_acquisition_succeeded"
+    )
     ingestion_manifest = attempt.ingestion_run.ingestion_manifest
     candle_key_hash, candle_payload_hash, stored_count = _replacement_candle_hashes(chunk)
     provider_evidence = _sanitized_provider_evidence(chunk, manifest)
     terminal_event = {
-        "event": "market.replacement_canary_succeeded",
+        "event": event_type,
         "logical_key": chunk.logical_key,
         "canonical_request_sha256": chunk.canonical_request_sha256,
         "semantic_inventory_sha256": chunk.semantic_inventory_sha256,
@@ -887,7 +896,7 @@ def _record_replacement_canary_success(attempt, manifest):
         [terminal_event_sha256, provider_evidence, attempt.idempotency_key]
     )
     AuditEvent.objects.create(
-        event_type="market.replacement_canary_succeeded",
+        event_type=event_type,
         actor="market.historical_acquisition.run_historical_chunk",
         subject_type="HistoricalIngestionAttempt",
         subject_id=str(attempt.pk),
@@ -1011,6 +1020,22 @@ def _record_historical_failure(attempt_id, failure):
         subject_id=str(attempt.pk),
         payload=payload,
     )
+    if chunk.data_contract_sha256 is not None:
+        # Governed replacement failures are terminal with two-scope evidence;
+        # the deferred completeness trigger requires both events at commit.
+        AuditEvent.objects.create(
+            event_type="market.ingestion_rejected",
+            actor="market.historical_acquisition.run_historical_chunk",
+            subject_type="IngestionRun",
+            subject_id=str(run.pk),
+            payload={
+                "schema_version": 1,
+                "error_code": failure.error_code,
+                "failure_stage": failure.failure_stage,
+                "logical_chunk_key": chunk.logical_key,
+                "attempt_id": attempt.pk,
+            },
+        )
 
 
 @transaction.atomic
@@ -1053,6 +1078,38 @@ def resolve_stale_historical_attempt(attempt_id, stale_threshold, reason):
             "reason": reason.strip(),
         },
     )
+    if chunk.data_contract_sha256 is not None:
+        # A governed replacement run may only become terminal together with its
+        # two-scope evidence; stale resolution records the same required pair.
+        AuditEvent.objects.create(
+            event_type="market.historical_ingestion_failed",
+            actor="market.historical_acquisition.resolve_stale_historical_attempt",
+            subject_type="HistoricalIngestionAttempt",
+            subject_id=str(attempt.pk),
+            payload={
+                "schema_version": 1,
+                "error_code": "STALE_ATTEMPT_RESOLVED",
+                "logical_chunk_key": chunk.logical_key,
+                "attempt_id": attempt.pk,
+                "attempt_number": attempt.attempt_number,
+                "ingestion_run_id": run.pk,
+                "failure_stage": "stale_resolution",
+                "reason": reason.strip(),
+            },
+        )
+        AuditEvent.objects.create(
+            event_type="market.ingestion_rejected",
+            actor="market.historical_acquisition.resolve_stale_historical_attempt",
+            subject_type="IngestionRun",
+            subject_id=str(run.pk),
+            payload={
+                "schema_version": 1,
+                "error_code": "STALE_ATTEMPT_RESOLVED",
+                "failure_stage": "stale_resolution",
+                "logical_chunk_key": chunk.logical_key,
+                "attempt_id": attempt.pk,
+            },
+        )
     attempt.ingestion_run = run
     return attempt
 

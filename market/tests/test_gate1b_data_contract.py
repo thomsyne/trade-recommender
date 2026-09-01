@@ -477,8 +477,8 @@ class Gate1BGeneratorTests(Gate1BFixtureTestCase):
 
         from market.historical_acquisition import run_historical_chunk
 
-        with self.assertRaisesMessage(
-            DatabaseError, "acquisition canary activation rejects this ingestion run"
+        with self.assertRaisesRegex(
+            DatabaseError, "activation rejects this (attempt|ingestion run)"
         ):
             run_historical_chunk(chunk.logical_key, ForbiddenClient())
         self.assertFalse(HistoricalIngestionAttempt.objects.filter(chunk=chunk).exists())

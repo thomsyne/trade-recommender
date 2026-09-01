@@ -279,6 +279,15 @@ class Gate7AFixtureTestCase(Gate4FixtureTestCase):
 
     def setUp(self):
         super().setUp()
+        # The Gate 7A suite is the regression suite for the exact 0020
+        # activation it was reviewed against; migration 0021 reverses
+        # emptily here and Gate 4 teardown restores the latest catalog.
+        from market.tests.test_replacement_canary_activation import (
+            MIGRATION_0020,
+            migrate_to,
+        )
+
+        migrate_to(MIGRATION_0020)
         client = WaveSuccessClient(self.replacement)
         for chunk in self.remaining:
             run_discovery_chunk(chunk.logical_key, client)
