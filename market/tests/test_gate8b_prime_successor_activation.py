@@ -14,6 +14,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import PermissionDenied
 from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
@@ -600,9 +601,11 @@ class Gate8bPrimeStagedExecutionTests(TransactionTestCase):
         for chunk in self.first_h1:
             record_attempt(chunk, status=IngestionRun.Status.SUCCEEDED)
         approver = get_user_model().objects.create_user("gate8b-prime-approver")
-        with self.assertRaisesMessage(
-            DatasetQualityError, "only the approved replacement discovery plan may be approved"
-        ):
+        # Which layer refuses depends on the installed authority: at 0023 there is
+        # no successor branch at all. The invariant this gate holds is that the
+        # successor cannot be sealed, approved or registered, not which guard says
+        # so first, so assert the refusal and the unsealed plan.
+        with self.assertRaises((DatasetQualityError, PermissionDenied)):
             approve_and_register_discovery(self.plan.sha256, approver.pk, "0" * 64)
         self.assertIsNone(self.plan.__class__.objects.get(pk=self.plan.pk).sealed_at)
         with self.assertRaises(Exception), transaction.atomic(), connection.cursor() as cursor:

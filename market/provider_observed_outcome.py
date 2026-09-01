@@ -700,3 +700,39 @@ def verify_gate8d3_outcome_against_database():
     if canonical_outcome_bytes(regenerated) != gate8d3_outcome_path().read_bytes():
         raise ValueError(f"committed artifact {ARTIFACT_NAME} does not reconstruct")
     return document
+
+
+def accepted_successor_registration():
+    """The independently accepted successor outcome, as the registration path's
+    admission profile.
+
+    Every value is read from the committed Gate 8D3 artifact only after that
+    artifact has passed its governed loader: bytes against the code-pinned file
+    digest, then its embedded self-hash, then canonical form. This is Python
+    provenance, not database authority — migration 0024 pins the same values as
+    literals and recomputes them from raw rows, so nothing here can widen what
+    PostgreSQL admits.
+    """
+    document = load_committed_gate8d3_outcome()
+    completion = document["completion"]
+    observations = document["observations"]
+    if (
+        completion["chunks"] != EXPECTED_CHUNK_COUNT
+        or observations["total"] != EXPECTED_OBSERVATION_TOTAL
+        or observations["by_granularity"] != EXPECTED_GRANULARITY_OBSERVATIONS
+    ):
+        raise ValueError(f"committed artifact {ARTIFACT_NAME} is not the accepted outcome")
+    return {
+        "plan_sha256": document["successor_discovery_plan_sha256"],
+        "plan_identity": document["successor_discovery_plan_identity"],
+        "plan_version": document["successor_discovery_plan_version"],
+        "request_manifest_sha256": document["successor_request_manifest_sha256"],
+        "global_semantic_inventory_sha256": document["successor_global_semantic_inventory_sha256"],
+        "accepted_operational_evidence_set_sha256": document[
+            "successor_accepted_operational_evidence_set_sha256"
+        ],
+        "restricted_overlap_sha256": document["restricted_overlap"]["successor_restricted_sha256"],
+        "chunk_count": completion["chunks"],
+        "observation_count": observations["total"],
+        "outcome_artifact_sha256": OUTCOME_ARTIFACT_SHA256,
+    }
