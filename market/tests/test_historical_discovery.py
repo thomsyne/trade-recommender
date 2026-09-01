@@ -1344,9 +1344,14 @@ class HistoricalDiscoveryTests(TestCase):
 
         variants = (
             (
-                "v3-plan",
-                "phase-2b1r-discovery-v3",
-                "failed-break-phase-2b1r-discovery-plan-v3",
+                # v3 is the governed successor identity as of Gate 8B', and a
+                # partial successor marker is refused at insert. This variant
+                # only needs an ungoverned label to prove what it was written
+                # to prove: supersession rejects a plan that is not the
+                # approved replacement.
+                "v9-plan",
+                "phase-2b1r-discovery-v9",
+                "failed-break-phase-2b1r-discovery-plan-v9",
                 None,
             ),
             ("shifted-h1", "phase-2b1r-discovery-v2", pinned_identity, shift_first_h1),
