@@ -795,6 +795,11 @@ def begin_discovery_attempt(logical_key):
     if HistoricalDiscoverySupersession.objects.filter(superseded_plan=chunk.plan).exists():
         raise DatasetQualityError("superseded discovery plans reject new attempts")
     _validate_replacement_canary_activation(chunk)
+    # Gate 8B': the successor plan's staged execution order, refused here before
+    # any provider client is built. PostgreSQL remains authoritative.
+    from market.provider_observed_successor import assert_successor_attempt_permitted
+
+    assert_successor_attempt_permitted(chunk)
     attempts = chunk.attempts.select_related("ingestion_run")
     if attempts.filter(ingestion_run__status=IngestionRun.Status.SUCCEEDED).exists():
         raise DatasetQualityError("successful discovery chunks cannot be retried")

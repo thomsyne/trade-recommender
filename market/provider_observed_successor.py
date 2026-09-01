@@ -353,3 +353,112 @@ def load_committed_gate8b_authorization():
     digest recorded beside them is catalog provenance only.
     """
     return _verify_committed_authorization(expected_file_sha256=AUTHORIZATION_FILE_SHA256)
+
+
+PREDECESSOR_H1_REQUESTED_FROM = "2009-12-31T15:00:00Z"
+MINIMUM_EARLIER_OBSERVATIONS = 6
+
+
+def successor_stage(chunk):
+    """Which staged gate a successor chunk belongs to, or None for any chunk
+    outside the governed successor plan."""
+    plan = chunk.plan
+    if plan.sha256 != build_successor_discovery_plan()["plan_sha256"]:
+        return None
+    extended = (
+        chunk.granularity == "H1"
+        and chunk.canonical_request.get("from") == SUCCESSOR_H1_REQUESTED_FROM
+    )
+    if extended and chunk.instrument.code == CANARY_INSTRUMENT:
+        return STAGE_CANARY
+    return STAGE_CROSS_INSTRUMENT if extended else STAGE_REMAINDER
+
+
+def _ready_first_h1(plan, *, canary_only):
+    """Governed first-H1 chunks whose attempt 1 succeeded and whose sealed
+    inventory carries at least six observations earlier than the predecessor's
+    H1 start. Counted from sealed observations only: a closure contributes
+    nothing, and an observed timestamp is never discarded for a calendar label."""
+    from market.historical_discovery import parse_timestamp
+    from market.models import HistoricalTimestampObservation, IngestionRun
+
+    boundary = parse_timestamp(PREDECESSOR_H1_REQUESTED_FROM)
+    ready = 0
+    for chunk in plan.chunks.select_related("instrument").filter(granularity="H1"):
+        if chunk.canonical_request.get("from") != SUCCESSOR_H1_REQUESTED_FROM:
+            continue
+        if canary_only and chunk.instrument.code != CANARY_INSTRUMENT:
+            continue
+        attempt = chunk.attempts.filter(
+            attempt_number=1, ingestion_run__status=IngestionRun.Status.SUCCEEDED
+        ).first()
+        inventory = getattr(chunk, "inventory", None)
+        if attempt is None or inventory is None:
+            continue
+        earlier = HistoricalTimestampObservation.objects.filter(
+            inventory=inventory, timestamp__lt=boundary
+        ).count()
+        if earlier >= MINIMUM_EARLIER_OBSERVATIONS:
+            ready += 1
+    return ready
+
+
+def assert_successor_attempt_permitted(chunk):
+    """Fail closed, before any provider client exists, unless this chunk is the
+    stage the governed sequence has actually opened."""
+    from market.services import DatasetQualityError
+
+    stage = successor_stage(chunk)
+    if stage is None:
+        return
+    plan = chunk.plan
+    if plan.chunks.count() != EXPECTED_CHUNK_COUNT:
+        raise DatasetQualityError("successor discovery requires its complete authorized plan")
+    if chunk.attempts.exists():
+        raise DatasetQualityError("successor discovery permits only attempt 1 for each chunk")
+    if stage == STAGE_CANARY:
+        return
+    if stage == STAGE_CROSS_INSTRUMENT:
+        if _ready_first_h1(plan, canary_only=True) != 1:
+            raise DatasetQualityError(
+                "gate 8D1 requires the governed canary to have succeeded with at least"
+                " six additional eligible observations"
+            )
+        return
+    if _ready_first_h1(plan, canary_only=False) != len(INSTRUMENTS):
+        raise DatasetQualityError(
+            "gate 8D2 requires all six governed first-H1 inventories to have succeeded"
+            " with at least six additional eligible observations each"
+        )
+
+
+def successor_readiness(plan=None):
+    """Read-only report of the stage the governed sequence has opened. Performs
+    no write and constructs no provider client."""
+    from market.models import HistoricalDiscoveryPlan
+
+    payload = plan or build_successor_discovery_plan()
+    membership = staged_discovery_membership(payload)
+    row = HistoricalDiscoveryPlan.objects.filter(sha256=payload["plan_sha256"]).first()
+    if row is None:
+        return {
+            "successor_plan_sha256": payload["plan_sha256"],
+            "materialized": False,
+            "permitted_stage": None,
+            "permitted_logical_keys": [],
+            "note": "the successor discovery plan has not been materialized",
+        }
+    canary_ready = _ready_first_h1(row, canary_only=True) == 1
+    all_ready = _ready_first_h1(row, canary_only=False) == len(INSTRUMENTS)
+    stage = (
+        STAGE_REMAINDER if all_ready else (STAGE_CROSS_INSTRUMENT if canary_ready else STAGE_CANARY)
+    )
+    return {
+        "successor_plan_sha256": payload["plan_sha256"],
+        "materialized": True,
+        "chunks": row.chunks.count(),
+        "permitted_stage": stage,
+        "permitted_logical_keys": [item["logical_discovery_key"] for item in membership[stage]],
+        "canary_prerequisite_met": canary_ready,
+        "cross_instrument_prerequisite_met": all_ready,
+    }
