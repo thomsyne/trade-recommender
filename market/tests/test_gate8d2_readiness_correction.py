@@ -22,6 +22,7 @@ from django.test import TransactionTestCase
 from market.historical_discovery import (
     build_replacement_discovery_plan,
     create_discovery_plan,
+    parse_timestamp,
 )
 from market.models import (
     HistoricalDiscoveryAttempt,
@@ -31,12 +32,14 @@ from market.models import (
 )
 from market.provider_observed_successor import (
     EXPECTED_CHUNK_COUNT,
+    PREDECESSOR_H1_REQUESTED_FROM,
     STAGE_CANARY,
     STAGE_CROSS_INSTRUMENT,
     STAGE_REMAINDER,
     STATUS_ATTEMPT_IN_PROGRESS,
     STATUS_BLOCKED,
     STATUS_COMPLETE,
+    STATUS_INCOMPLETE_EVIDENCE,
     STATUS_NO_ELIGIBLE_CHUNK,
     STATUS_NOT_MATERIALIZED,
     STATUS_OPEN,
@@ -89,6 +92,37 @@ def record_bare_attempt(chunk, number):
         with connection.cursor() as cursor:
             cursor.execute("ALTER TABLE market_historicaldiscoveryattempt ENABLE TRIGGER USER")
             cursor.execute("ALTER TABLE market_ingestionrun ENABLE TRIGGER USER")
+
+
+def attach_inventory(chunk, attempt, *, salt=0):
+    """A sealed inventory bound to an explicit attempt, so a test can bind one
+    to the wrong attempt on purpose. Written with the governed triggers
+    suspended, like every other fixture here."""
+    with connection.cursor() as cursor:
+        cursor.execute("ALTER TABLE market_historicaltimestampinventory DISABLE TRIGGER USER")
+        cursor.execute("ALTER TABLE market_historicaltimestampobservation DISABLE TRIGGER USER")
+    try:
+        inventory = HistoricalTimestampInventory.objects.create(
+            chunk=chunk,
+            accepted_attempt=attempt,
+            observation_count=1,
+            timestamp_set_sha256=f"{chunk.ordinal:062d}{salt:02d}",
+            structural_observation_sha256=f"{chunk.ordinal:062d}{salt:02d}",
+            semantic_inventory_sha256=f"{chunk.ordinal:062x}{salt:02x}",
+        )
+        HistoricalTimestampObservation.objects.create(
+            inventory=inventory,
+            timestamp=parse_timestamp(PREDECESSOR_H1_REQUESTED_FROM),
+            complete=True,
+            volume=1,
+            bid_present=True,
+            ask_present=True,
+        )
+        return inventory
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_historicaltimestampinventory ENABLE TRIGGER USER")
+            cursor.execute("ALTER TABLE market_historicaltimestampobservation ENABLE TRIGGER USER")
 
 
 class Gate8d2ReadinessCorrectionTests(TransactionTestCase):
@@ -191,6 +225,8 @@ class Gate8d2ReadinessCorrectionTests(TransactionTestCase):
         self.assertEqual(readiness["permitted_logical_keys"], expected)
         self.assertEqual(len(readiness["permitted_logical_keys"]), 122)
         self.assertEqual(readiness["attempted_chunks"], 10)
+        self.assertEqual(readiness["accepted_inventories"], 10)
+        self.assertEqual(readiness["missing_inventories"], 0)
         self.assertEqual(readiness["execution_status"], STATUS_OPEN)
 
     def test_a_complete_plan_permits_nothing_and_reports_successful_completion(self):
@@ -208,6 +244,90 @@ class Gate8d2ReadinessCorrectionTests(TransactionTestCase):
         self.assertFalse(readiness["blocked_by_failed_attempt"])
         self.assertEqual(readiness["attempted_chunks"], EXPECTED_CHUNK_COUNT)
         self.assertEqual(readiness["chunks"], EXPECTED_CHUNK_COUNT)
+        self.assertEqual(readiness["accepted_inventories"], EXPECTED_CHUNK_COUNT)
+        self.assertEqual(readiness["missing_inventories"], 0)
+
+    def attempt_everything(self, *, bare=()):
+        """All 132 chunks attempted and succeeded; those in ``bare`` get a
+        succeeded run with no inventory of their own."""
+        skip = {chunk.pk for chunk in bare}
+        for chunk in self.first_h1:
+            if chunk.pk in skip:
+                record_bare_attempt(chunk, 1)
+            else:
+                record_attempt(chunk, status=IngestionRun.Status.SUCCEEDED)
+        for chunk in self.remainder:
+            if chunk.pk in skip:
+                record_bare_attempt(chunk, 1)
+            else:
+                record_attempt(chunk, status=IngestionRun.Status.SUCCEEDED, earlier=1)
+
+    def test_all_succeeded_but_one_inventory_missing_is_not_complete(self):
+        # 2: 132 succeeded runs cannot stand in for 132 stored results
+        self.materialize()
+        self.attempt_everything(bare=[self.remainder[7]])
+        readiness = successor_readiness()
+        self.assertEqual(readiness["attempted_chunks"], EXPECTED_CHUNK_COUNT)
+        self.assertEqual(readiness["accepted_inventories"], EXPECTED_CHUNK_COUNT - 1)
+        self.assertEqual(readiness["missing_inventories"], 1)
+        self.assertFalse(readiness["complete"])
+        self.assertEqual(readiness["execution_status"], STATUS_INCOMPLETE_EVIDENCE)
+        # attempt 2 is prohibited, so nothing becomes runnable again
+        self.assertEqual(readiness["permitted_logical_keys"], [])
+        self.assertIsNone(readiness["permitted_stage"])
+        self.assertFalse(readiness["blocked_by_failed_attempt"])
+
+    def test_several_missing_inventories_report_the_exact_bounded_count(self):
+        # 3
+        self.materialize()
+        bare = [self.first_h1[2], self.remainder[0], self.remainder[40], self.remainder[125]]
+        self.attempt_everything(bare=bare)
+        readiness = successor_readiness()
+        self.assertEqual(readiness["missing_inventories"], len(bare))
+        self.assertEqual(readiness["accepted_inventories"], EXPECTED_CHUNK_COUNT - len(bare))
+        self.assertFalse(readiness["complete"])
+        self.assertEqual(readiness["execution_status"], STATUS_INCOMPLETE_EVIDENCE)
+
+    def test_a_predecessor_inventory_does_not_satisfy_successor_completeness(self):
+        # 4
+        self.materialize()
+        target = self.remainder[3]
+        self.attempt_everything(bare=[target])
+        legacy = create_discovery_plan(build_replacement_discovery_plan())
+        legacy_chunk = legacy.chunks.order_by("ordinal").first()
+        attach_inventory(legacy_chunk, record_bare_attempt(legacy_chunk, 1), salt=9)
+        self.assertEqual(HistoricalTimestampInventory.objects.filter(chunk=legacy_chunk).count(), 1)
+        readiness = successor_readiness()
+        self.assertEqual(readiness["missing_inventories"], 1)
+        self.assertEqual(readiness["accepted_inventories"], EXPECTED_CHUNK_COUNT - 1)
+        self.assertFalse(readiness["complete"])
+        self.assertEqual(readiness["execution_status"], STATUS_INCOMPLETE_EVIDENCE)
+
+    def test_an_inventory_bound_to_another_attempt_does_not_satisfy_the_chunk(self):
+        # 5
+        self.materialize()
+        starved, donor = self.remainder[5], self.remainder[6]
+        self.attempt_everything(bare=[starved, donor])
+        attach_inventory(starved, donor.attempts.get(), salt=1)
+        self.assertEqual(HistoricalTimestampInventory.objects.filter(chunk=starved).count(), 1)
+        readiness = successor_readiness()
+        # the inventory exists on the right chunk but is bound to the wrong
+        # attempt, so neither chunk is satisfied
+        self.assertEqual(readiness["missing_inventories"], 2)
+        self.assertEqual(readiness["accepted_inventories"], EXPECTED_CHUNK_COUNT - 2)
+        self.assertFalse(readiness["complete"])
+        self.assertEqual(readiness["execution_status"], STATUS_INCOMPLETE_EVIDENCE)
+
+    def test_a_quarantined_attempt_is_blocked_and_not_complete(self):
+        # 7
+        self.materialize()
+        record_attempt(self.canary, status=IngestionRun.Status.QUARANTINED)
+        readiness = successor_readiness()
+        self.assertEqual(readiness["permitted_logical_keys"], [])
+        self.assertIsNone(readiness["permitted_stage"])
+        self.assertTrue(readiness["blocked_by_failed_attempt"])
+        self.assertEqual(readiness["execution_status"], STATUS_BLOCKED)
+        self.assertFalse(readiness["complete"])
 
     def test_a_failed_attempt_permits_nothing_and_reports_the_block(self):
         # 8

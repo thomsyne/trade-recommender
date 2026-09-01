@@ -492,10 +492,37 @@ def _attempted_logical_keys(plan):
     )
 
 
+def _accepted_inventory_keys(plan):
+    """Logical keys of this plan's chunks that hold a genuine accepted inventory.
+
+    An inventory counts only when it belongs to a chunk of this exact plan, is
+    bound to an attempt of *that same chunk*, and that attempt's run succeeded.
+    So an inventory materialized against a predecessor plan, or attached to
+    another chunk's attempt, can never satisfy a chunk that has none of its
+    own. ``chunk`` and ``accepted_attempt`` are both one-to-one, so a chunk
+    that appears here holds exactly one such inventory.
+
+    Existence is read from the inventory rows themselves, never inferred from a
+    whole-table count or from an audit event name.
+    """
+    from django.db.models import F
+
+    from market.models import HistoricalTimestampInventory, IngestionRun
+
+    return set(
+        HistoricalTimestampInventory.objects.filter(
+            chunk__plan=plan,
+            accepted_attempt__chunk_id=F("chunk_id"),
+            accepted_attempt__ingestion_run__status=IngestionRun.Status.SUCCEEDED,
+        ).values_list("chunk__logical_key", flat=True)
+    )
+
+
 # Execution states the read-only interface reports. Exactly one holds at a time.
 STATUS_NOT_MATERIALIZED = "not_materialized"
 STATUS_BLOCKED = "blocked_by_failed_attempt"
 STATUS_ATTEMPT_IN_PROGRESS = "attempt_in_progress"
+STATUS_INCOMPLETE_EVIDENCE = "incomplete_evidence"
 STATUS_COMPLETE = "complete"
 STATUS_OPEN = "open"
 STATUS_NO_ELIGIBLE_CHUNK = "no_eligible_chunk"
@@ -549,16 +576,21 @@ def successor_readiness(plan=None):
             if item["logical_discovery_key"] not in attempted
         ]
     )
-    complete = (
-        not blocked
-        and not running
-        and chunk_count == EXPECTED_CHUNK_COUNT
-        and len(attempted) == EXPECTED_CHUNK_COUNT
-    )
+    # Every attempt is marked succeeded only tells us how the runs are labelled.
+    # Completion additionally requires the discovery results themselves to be
+    # stored, read relationally from this plan's own inventories, because a raw
+    # terminal transition outside the service could otherwise leave a chunk
+    # succeeded with nothing to show for it.
+    accepted = _accepted_inventory_keys(row)
+    missing = attempted - accepted
+    fully_attempted = chunk_count == EXPECTED_CHUNK_COUNT and len(attempted) == EXPECTED_CHUNK_COUNT
+    complete = not blocked and not running and fully_attempted and not missing
     if blocked:
         status = STATUS_BLOCKED
     elif running:
         status = STATUS_ATTEMPT_IN_PROGRESS
+    elif fully_attempted and missing:
+        status = STATUS_INCOMPLETE_EVIDENCE
     elif complete:
         status = STATUS_COMPLETE
     elif permitted:
@@ -570,6 +602,8 @@ def successor_readiness(plan=None):
         "materialized": True,
         "chunks": chunk_count,
         "attempted_chunks": len(attempted),
+        "accepted_inventories": len(accepted),
+        "missing_inventories": len(missing),
         "blocked_by_failed_attempt": blocked,
         "execution_status": status,
         "complete": complete,
