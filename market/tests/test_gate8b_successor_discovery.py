@@ -7,6 +7,7 @@ needed and none is used — which is itself one of the properties under test.
 
 import ast
 import hashlib
+import inspect
 import json
 import sys
 from datetime import timedelta
@@ -15,6 +16,7 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
+import market.provider_observed_successor as successor_module
 from market.historical_acquisition import FROZEN_RANGES, INSTRUMENTS
 from market.historical_discovery import (
     DISCOVERY_V2_MANIFEST_SHA256,
@@ -26,6 +28,7 @@ from market.historical_discovery import (
 )
 from market.provider_observed_successor import (
     ARTIFACT_SCHEMA,
+    AUTHORIZATION_FILE_SHA256,
     CANARY_INSTRUMENT,
     EXPECTED_CHUNK_COUNT,
     EXPECTED_STAGE_COUNTS,
@@ -35,6 +38,7 @@ from market.provider_observed_successor import (
     STAGE_CROSS_INSTRUMENT,
     STAGE_REMAINDER,
     SUCCESSOR_H1_REQUESTED_FROM,
+    _verify_committed_authorization,
     build_gate8b_authorization,
     build_successor_discovery_plan,
     canonical_authorization_bytes,
@@ -246,12 +250,57 @@ class SuccessorPlanShapeTests(SimpleTestCase):
         )
         self.assertNotEqual(self.plan["plan_sha256"], DISCOVERY_V2_PLAN_SHA256)
 
-    def test_an_extension_past_its_own_close_is_refused(self):
-        # 16: boundary tampering fails closed
-        start = parse_timestamp(FROZEN_RANGES["H1"]["from"])
-        end = parse_timestamp(FROZEN_RANGES["H1"]["to"])
-        with self.assertRaisesMessage(ValueError, "must precede its own close"):
-            h1_request_boundaries(start, end, first_requested_from=end)
+
+class H1BoundaryOverrideTests(SimpleTestCase):
+    """The override may only extend. Anything that would move the opening bound
+    forward is refused, because it would silently truncate front coverage while
+    still returning a plausible twenty-window plan."""
+
+    start = parse_timestamp(FROZEN_RANGES["H1"]["from"])
+    end = parse_timestamp(FROZEN_RANGES["H1"]["to"])
+
+    def test_none_reproduces_the_accepted_v2_boundaries(self):
+        boundaries = h1_request_boundaries(self.start, self.end)
+        self.assertEqual(len(boundaries), 20)
+        self.assertEqual(boundaries[0][0], self.start)
+        self.assertEqual(boundaries[-1][1], self.end)
+        self.assertEqual(
+            build_replacement_discovery_plan()["plan_sha256"], DISCOVERY_V2_PLAN_SHA256
+        )
+
+    def test_a_genuinely_earlier_start_is_accepted(self):
+        earlier = parse_timestamp(SUCCESSOR_H1_REQUESTED_FROM)
+        boundaries = h1_request_boundaries(self.start, self.end, first_requested_from=earlier)
+        reference = h1_request_boundaries(self.start, self.end)
+        self.assertEqual(len(boundaries), 20)
+        self.assertEqual(boundaries[0], (earlier, reference[0][1]))
+        self.assertEqual(boundaries[1:], reference[1:])
+
+    def test_a_start_equal_to_the_frozen_range_start_is_refused(self):
+        with self.assertRaisesMessage(ValueError, "strictly before the frozen range start"):
+            h1_request_boundaries(self.start, self.end, first_requested_from=self.start)
+
+    def test_a_later_start_inside_the_first_window_is_refused(self):
+        later = parse_timestamp("2010-01-15T00:00:00Z")
+        self.assertGreater(later, self.start)
+        self.assertLess(later, h1_request_boundaries(self.start, self.end)[0][1])
+        with self.assertRaisesMessage(ValueError, "strictly before the frozen range start"):
+            h1_request_boundaries(self.start, self.end, first_requested_from=later)
+
+    def test_a_start_at_or_beyond_the_first_window_end_is_refused(self):
+        close = h1_request_boundaries(self.start, self.end)[0][1]
+        for candidate in (close, self.end):
+            with self.assertRaisesMessage(ValueError, "strictly before the frozen range start"):
+                h1_request_boundaries(self.start, self.end, first_requested_from=candidate)
+
+    def test_the_accepted_extension_has_no_gap_overlap_or_truncation(self):
+        earlier = parse_timestamp(SUCCESSOR_H1_REQUESTED_FROM)
+        boundaries = h1_request_boundaries(self.start, self.end, first_requested_from=earlier)
+        self.assertEqual(boundaries[0][0], earlier)
+        self.assertEqual(boundaries[-1][1], self.end)
+        for previous, following in zip(boundaries, boundaries[1:]):
+            self.assertEqual(previous[1], following[0])
+            self.assertLess(previous[0], previous[1])
 
 
 class SuccessorStagingTests(SimpleTestCase):
@@ -338,14 +387,68 @@ class Gate8bAuthorizationArtifactTests(SimpleTestCase):
         self.assertNotIn(b"\n", self.committed)
 
     def test_file_digest_and_embedded_self_hash_reconstruct(self):
-        # 14
-        body = {
-            key: value for key, value in self.authorization.items() if key != "authorization_sha256"
-        }
-        self.assertEqual(self.authorization["authorization_sha256"], canonical_hash(body))
-        digest = hashlib.sha256(self.committed).hexdigest()
-        loaded = load_committed_gate8b_authorization(expected_file_sha256=digest)
-        self.assertEqual(loaded["authorization_sha256"], self.authorization["authorization_sha256"])
+        # 14: the committed document's own claimed hash, recomputed from the
+        # committed body — not from anything this process just generated.
+        document = json.loads(self.committed)
+        body = {key: value for key, value in document.items() if key != "authorization_sha256"}
+        self.assertEqual(document["authorization_sha256"], canonical_hash(body))
+        self.assertEqual(hashlib.sha256(self.committed).hexdigest(), AUTHORIZATION_FILE_SHA256)
+        loaded = load_committed_gate8b_authorization()
+        self.assertEqual(loaded["authorization_sha256"], document["authorization_sha256"])
+
+    def test_the_production_loader_pins_the_file_digest_with_no_bypass(self):
+        """The public loader takes no argument, so no caller can weaken it, and
+        the pinned digest is the real one."""
+        self.assertEqual(
+            list(inspect.signature(load_committed_gate8b_authorization).parameters), []
+        )
+        self.assertEqual(AUTHORIZATION_FILE_SHA256, hashlib.sha256(self.committed).hexdigest())
+
+    def test_a_coordinated_artifact_and_constant_change_still_fails_the_digest(self):
+        """The correction's whole point. Move the governed boundary and rebuild
+        the artifact so file and regeneration agree with each other — the
+        production loader must still refuse, because neither agrees with the
+        digest pinned in code."""
+        with patch.object(successor_module, "SUCCESSOR_H1_REQUESTED_FROM", "2009-12-29T22:00:00Z"):
+            forged = canonical_authorization_bytes(build_gate8b_authorization())
+            self.assertNotEqual(forged, self.committed)
+            # the forgery is internally consistent: its own self-hash verifies
+            document = json.loads(forged)
+            body = {key: value for key, value in document.items() if key != "authorization_sha256"}
+            self.assertEqual(document["authorization_sha256"], canonical_hash(body))
+            with (
+                patch.object(Path, "read_bytes", return_value=forged),
+                self.assertRaisesMessage(ValueError, "does not match its governed pin"),
+            ):
+                load_committed_gate8b_authorization()
+
+    def test_a_corrupted_embedded_self_hash_is_rejected_by_the_self_hash_check(self):
+        """Reach the self-hash layer by naming the corrupted file's own digest,
+        and prove the rejection comes from that check rather than from the
+        regeneration comparison that follows it."""
+        document = json.loads(self.committed)
+        document["authorization_sha256"] = "0" * 64
+        corrupted = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        with (
+            patch.object(Path, "read_bytes", return_value=corrupted),
+            self.assertRaisesMessage(ValueError, "self-hash does not verify"),
+        ):
+            _verify_committed_authorization(
+                expected_file_sha256=hashlib.sha256(corrupted).hexdigest()
+            )
+
+    def test_digest_and_self_hash_failures_are_distinguishable(self):
+        """A caller must be able to tell which boundary refused."""
+        document = json.loads(self.committed)
+        document["authorization_sha256"] = "0" * 64
+        corrupted = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        with patch.object(Path, "read_bytes", return_value=corrupted):
+            with self.assertRaisesMessage(ValueError, "does not match its governed pin"):
+                load_committed_gate8b_authorization()
+            with self.assertRaisesMessage(ValueError, "self-hash does not verify"):
+                _verify_committed_authorization(
+                    expected_file_sha256=hashlib.sha256(corrupted).hexdigest()
+                )
 
     def test_regeneration_is_byte_identical_to_the_committed_content(self):
         # 15
@@ -397,20 +500,31 @@ class Gate8bAuthorizationArtifactTests(SimpleTestCase):
             self.assertNotIsInstance(value, float)
 
     def test_altered_committed_bytes_fail_closed(self):
-        # 16
+        # 16: an edited artifact never reaches regeneration — the pinned digest
+        # refuses it first, which is the outer boundary working as intended.
         tampered = json.loads(self.committed)
         tampered["successor_h1_requested_from"] = "2009-12-30T21:00:00Z"
         encoded = json.dumps(tampered, sort_keys=True, separators=(",", ":")).encode()
         with (
-            patch("market.provider_observed_successor.Path.read_bytes", return_value=encoded),
-            self.assertRaisesMessage(ValueError, "does not reconstruct"),
+            patch.object(Path, "read_bytes", return_value=encoded),
+            self.assertRaisesMessage(ValueError, "does not match its governed pin"),
         ):
             load_committed_gate8b_authorization()
 
-    def test_wrong_governed_file_pin_fails_closed(self):
-        # 16
-        with self.assertRaisesMessage(ValueError, "does not match its governed pin"):
-            load_committed_gate8b_authorization(expected_file_sha256="0" * 64)
+    def test_content_drift_is_caught_by_regeneration_when_the_digest_matches(self):
+        # 16: past the digest and the self-hash, regeneration is the last check.
+        drifted = json.loads(self.committed)
+        drifted["successor_chunk_count"] = 131
+        body = {k: v for k, v in drifted.items() if k != "authorization_sha256"}
+        drifted["authorization_sha256"] = canonical_hash(body)
+        encoded = json.dumps(drifted, sort_keys=True, separators=(",", ":")).encode()
+        with (
+            patch.object(Path, "read_bytes", return_value=encoded),
+            self.assertRaisesMessage(ValueError, "does not reconstruct"),
+        ):
+            _verify_committed_authorization(
+                expected_file_sha256=hashlib.sha256(encoded).hexdigest()
+            )
 
 
 class Gate8bIsolationTests(SimpleTestCase):

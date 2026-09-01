@@ -280,7 +280,15 @@ def h1_request_boundaries(range_start, range_end, *, first_requested_from=None):
     the first is identical whatever ``first_requested_from`` is. Only the first
     window's opening bound moves, which is what a governed warm-up extension
     needs: no window is added, removed or re-cut.
+
+    The override may only extend. A value equal to or later than the frozen
+    range start would silently truncate front coverage while still returning a
+    plausible twenty-window plan, so it is refused rather than accepted.
     """
+    if first_requested_from is not None and first_requested_from >= range_start:
+        raise ValueError(
+            "an extended first H1 window must begin strictly before the frozen range start"
+        )
     boundaries = []
     requested_from = range_start
     while requested_from < range_end:
@@ -291,8 +299,6 @@ def h1_request_boundaries(range_start, range_end, *, first_requested_from=None):
         boundaries.append((requested_from, requested_to))
         requested_from = requested_to
     if first_requested_from is not None:
-        if first_requested_from >= boundaries[0][1]:
-            raise ValueError("an extended first H1 window must precede its own close")
         boundaries[0] = (first_requested_from, boundaries[0][1])
     return boundaries
 

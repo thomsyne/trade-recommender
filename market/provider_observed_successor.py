@@ -45,6 +45,11 @@ from market.historical_discovery import (
 ARTIFACT_SCHEMA = "phase-2b1r-gate8b-successor-discovery-authorization-v1"
 ARTIFACT_NAME = "phase-2b1r-gate8b-successor-discovery-authorization.json"
 
+# The governed digest of the committed artifact file, pinned in code so that a
+# coordinated edit to both this module's constants and the artifact still fails:
+# regeneration would agree with the file, but neither would agree with this.
+AUTHORIZATION_FILE_SHA256 = "f128467b9c1e0bd77bac75bafd30e5fa4c8949d887b209a9930f1a93b91a4a02"
+
 SUCCESSOR_DISCOVERY_VERSION = "phase-2b1r-discovery-v3"
 SUCCESSOR_DISCOVERY_PLAN_IDENTITY = "failed-break-phase-2b1r-discovery-plan-v3"
 
@@ -303,8 +308,42 @@ def canonical_authorization_bytes(authorization=None):
     return json.dumps(authorization, sort_keys=True, separators=(",", ":")).encode()
 
 
-def load_committed_gate8b_authorization(*, expected_file_sha256=None):
-    """The committed artifact, accepted only when it is byte-for-byte the
+def _verify_committed_authorization(*, expected_file_sha256):
+    """The four checks, in the order that makes each one meaningful.
+
+    The digest is required, not optional: a caller cannot reach this without
+    naming the bytes it expects. Only tests pass anything but the governed
+    constant, and they do so to reach a layer the constant would shadow.
+    """
+    path = gate8b_authorization_path()
+    # 1-2: the committed bytes, against a digest pinned in code. A digest taken
+    # from the artifact under inspection would prove nothing, so this value
+    # never comes from the file.
+    committed = path.read_bytes()
+    digest = hashlib.sha256(committed).hexdigest()
+    if digest != expected_file_sha256:
+        raise ValueError(f"committed artifact {path.name} does not match its governed pin")
+    # 3-6: the committed document's own self-hash, recomputed from the committed
+    # body rather than from anything this process just generated.
+    try:
+        document = json.loads(committed)
+    except ValueError as error:
+        raise ValueError("committed successor discovery authorization is not valid JSON") from error
+    claimed = document.get("authorization_sha256")
+    body = {key: value for key, value in document.items() if key != "authorization_sha256"}
+    if claimed != canonical_hash(body):
+        raise ValueError("successor authorization self-hash does not verify")
+    # 7-8: and only then, that the committed content is what production code
+    # deterministically regenerates.
+    expected = build_gate8b_authorization()
+    if committed != canonical_authorization_bytes(expected):
+        raise ValueError("committed successor discovery authorization does not reconstruct")
+    return expected
+
+
+def load_committed_gate8b_authorization():
+    """The committed artifact, accepted only when its bytes hash to the governed
+    file digest, its own embedded self-hash verifies, and its content is the
     deterministic regeneration of the governed inputs.
 
     Enforcement here is Python byte comparison of the committed file. It is not
@@ -313,17 +352,4 @@ def load_committed_gate8b_authorization(*, expected_file_sha256=None):
     its own embedded plan SHA, range and state-transition constants; an artifact
     digest recorded beside them is catalog provenance only.
     """
-    expected = build_gate8b_authorization()
-    encoded = canonical_authorization_bytes(expected)
-    path = gate8b_authorization_path()
-    committed = path.read_bytes()
-    if committed != encoded:
-        raise ValueError("committed successor discovery authorization does not reconstruct")
-    digest = hashlib.sha256(committed).hexdigest()
-    if expected_file_sha256 is not None and digest != expected_file_sha256:
-        raise ValueError(f"committed artifact {path.name} does not match its governed pin")
-    if expected["authorization_sha256"] != canonical_hash(
-        {key: value for key, value in expected.items() if key != "authorization_sha256"}
-    ):
-        raise ValueError("successor authorization self-hash does not verify")
-    return expected
+    return _verify_committed_authorization(expected_file_sha256=AUTHORIZATION_FILE_SHA256)
