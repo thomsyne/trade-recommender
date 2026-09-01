@@ -56,6 +56,7 @@ MIGRATION_0018 = [("market", "0018_provider_observed_discovery_registration_acti
 MIGRATION_0019 = [("market", "0019_provider_observed_data_contract")]
 MIGRATION_0020 = [("market", "0020_provider_observed_acquisition_canary_activation")]
 MIGRATION_0021 = [("market", "0021_provider_observed_full_acquisition_activation")]
+MIGRATION_0022 = [("market", "0022_provider_observed_registration_validator_correction")]
 V1_LINEAGE_HASH_SQL = """
     SELECT market_sha256(jsonb_build_object(
              'plan',to_jsonb(p),'chunks',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.ordinal)

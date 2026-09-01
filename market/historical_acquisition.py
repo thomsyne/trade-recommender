@@ -1114,6 +1114,158 @@ def resolve_stale_historical_attempt(attempt_id, stale_threshold, reason):
     return attempt
 
 
+def replacement_registration_contract(plan, dataset, chunks):
+    """Resolve the provider-observed contract this registration must carry, or
+    None for a legacy dataset. Resolution is strictly relational through the
+    plan, contract, dataset manifest and every acquisition chunk; a partial or
+    disagreeing v2 marker fails closed instead of degrading to the legacy path."""
+    contract = plan.data_contract
+    markers = (
+        contract is not None,
+        plan.data_contract_sha256 is not None,
+        dataset.data_contract_sha256 is not None,
+        isinstance(dataset.manifest, dict)
+        and dataset.manifest.get("historical_data_contract_sha256") is not None,
+        isinstance(dataset.manifest, dict)
+        and dataset.manifest.get("global_semantic_inventory_sha256") is not None,
+        any(chunk.data_contract_sha256 is not None for chunk in chunks),
+        any(chunk.discovery_inventory_id is not None for chunk in chunks),
+    )
+    if not any(markers):
+        return None
+    if not all(markers):
+        raise DatasetQualityError("provider-observed registration lineage does not verify")
+    manifest = dataset.manifest
+    if (
+        contract.sha256 != stable_hash(contract.payload)
+        or contract.discovery_registration_id is None
+        or plan.data_contract_sha256 != contract.sha256
+        or dataset.data_contract_sha256 != contract.sha256
+        or manifest.get("historical_data_contract_sha256") != contract.sha256
+        or manifest.get("global_semantic_inventory_sha256")
+        != contract.global_semantic_inventory_sha256
+        or manifest.get("historical_plan_sha256") != plan.sha256
+        or dataset.manifest_sha256 != stable_hash(manifest)
+        or any(
+            chunk.data_contract_sha256 != contract.sha256
+            or chunk.plan_id != plan.pk
+            or chunk.dataset_version_id != dataset.pk
+            or chunk.discovery_inventory_id is None
+            or chunk.expected_observation_count is None
+            or chunk.semantic_inventory_sha256
+            != chunk.discovery_inventory.semantic_inventory_sha256
+            or chunk.expected_observation_count != chunk.discovery_inventory.observation_count
+            for chunk in chunks
+        )
+    ):
+        raise DatasetQualityError("provider-observed registration lineage does not verify")
+    return contract
+
+
+def replacement_series_coverage(plan, dataset, chunks):
+    """Coverage for a provider-observed dataset is the exact sealed discovery
+    membership of its acquisition chunks. The theoretical registered calendar
+    is never consulted: the provider's observed series legitimately differs
+    from it, and the sealed inventory is the governed reference."""
+    by_series = {}
+    for chunk in chunks:
+        by_series.setdefault((chunk.instrument.code, chunk.granularity), []).append(chunk)
+    series_manifest, row_counts, first_last = [], {}, {}
+    expected_total = 0
+    for code in plan.instruments:
+        for granularity in plan.granularities:
+            series_chunks = sorted(
+                by_series.get((code, granularity), ()), key=lambda item: item.requested_from
+            )
+            if not series_chunks:
+                raise DatasetQualityError(
+                    f"replacement dataset has no acquisition chunk for {code} {granularity}"
+                )
+            # the same sealed rows sealed_inventory_timestamps() exposes, with
+            # the observed volume and completeness each candle must reproduce
+            sealed, previous = [], None
+            for chunk in series_chunks:
+                observations = tuple(
+                    chunk.discovery_inventory.observations.order_by("timestamp").values_list(
+                        "timestamp", "volume", "complete"
+                    )
+                )
+                if len(observations) != chunk.expected_observation_count:
+                    raise DatasetQualityError(
+                        f"sealed inventory count disagrees for {code} {granularity}"
+                    )
+                for stamp, _volume, _complete in observations:
+                    if not chunk.requested_from <= stamp < chunk.requested_to:
+                        raise DatasetQualityError(
+                            f"sealed observation falls outside its chunk for {code} {granularity}"
+                        )
+                    if previous is not None and stamp <= previous:
+                        raise DatasetQualityError(
+                            f"sealed membership is not strictly increasing for {code} {granularity}"
+                        )
+                    previous = stamp
+                sealed.extend(observations)
+            rows = tuple(
+                dataset.candles.filter(instrument__code=code, granularity=granularity)
+                .order_by("timestamp")
+                .values_list("timestamp", "volume", "complete")
+            )
+            if rows != tuple(sealed):
+                raise DatasetQualityError(
+                    f"dataset does not equal the sealed inventory for {code} {granularity}"
+                )
+            key = f"{code}:{granularity}"
+            series_expected = sum(chunk.expected_observation_count for chunk in series_chunks)
+            expected_total += series_expected
+            row_counts[key] = len(rows)
+            first_last[key] = {
+                "first": rows[0][0].isoformat(),
+                "last": rows[-1][0].isoformat(),
+            }
+            series_manifest.append(
+                {
+                    "series": key,
+                    "range": plan.ranges[granularity],
+                    "row_count": series_expected,
+                }
+            )
+    stored_total = dataset.candles.count()
+    if (
+        expected_total != stored_total
+        or expected_total != sum(chunk.expected_observation_count for chunk in chunks)
+        or stored_total != sum(row_counts.values())
+    ):
+        raise DatasetQualityError(
+            "replacement dataset candle total does not equal the sealed inventory"
+        )
+    return series_manifest, row_counts, first_last
+
+
+def _legacy_series_coverage(plan, dataset):
+    """The legacy theoretical-calendar coverage rule, unchanged."""
+    series_manifest, row_counts, first_last = [], {}, {}
+    for code in INSTRUMENTS:
+        for granularity in GRANULARITIES:
+            range_payload = plan.ranges[granularity]
+            expected = expected_candle_timestamps(
+                parse_timestamp(range_payload["from"]),
+                parse_timestamp(range_payload["to"]),
+                granularity,
+            )
+            rows = tuple(
+                dataset.candles.filter(instrument__code=code, granularity=granularity)
+                .order_by("timestamp")
+                .values_list("timestamp", flat=True)
+            )
+            if rows != expected:
+                raise DatasetQualityError(f"dataset does not exactly cover {code} {granularity}")
+            key = f"{code}:{granularity}"
+            row_counts[key] = len(rows)
+            first_last[key] = {"first": rows[0].isoformat(), "last": rows[-1].isoformat()}
+            series_manifest.append({"series": key, "range": range_payload, "row_count": len(rows)})
+    return series_manifest, row_counts, first_last
+
+
 @transaction.atomic
 def register_historical_dataset(dataset_id, plan_sha256):
     dataset = DatasetVersion.objects.select_for_update().get(pk=dataset_id)
@@ -1125,7 +1277,7 @@ def register_historical_dataset(dataset_id, plan_sha256):
     plan = HistoricalDatasetPlan.objects.get(sha256=plan_sha256)
     chunks = list(
         plan.chunks.filter(dataset_version=dataset)
-        .select_related("instrument")
+        .select_related("instrument", "discovery_inventory")
         .prefetch_related("attempts__ingestion_run__ingestion_manifest")
         .order_by("instrument__code", "granularity", "requested_from")
     )
@@ -1163,26 +1315,11 @@ def register_historical_dataset(dataset_id, plan_sha256):
     if dataset.conflicts.exists() or dataset.incidents.exists():
         raise DatasetQualityError("dataset has a conflict or data-quality incident")
 
-    series_manifest, row_counts, first_last = [], {}, {}
-    for code in INSTRUMENTS:
-        for granularity in GRANULARITIES:
-            range_payload = plan.ranges[granularity]
-            expected = expected_candle_timestamps(
-                parse_timestamp(range_payload["from"]),
-                parse_timestamp(range_payload["to"]),
-                granularity,
-            )
-            rows = tuple(
-                dataset.candles.filter(instrument__code=code, granularity=granularity)
-                .order_by("timestamp")
-                .values_list("timestamp", flat=True)
-            )
-            if rows != expected:
-                raise DatasetQualityError(f"dataset does not exactly cover {code} {granularity}")
-            key = f"{code}:{granularity}"
-            row_counts[key] = len(rows)
-            first_last[key] = {"first": rows[0].isoformat(), "last": rows[-1].isoformat()}
-            series_manifest.append({"series": key, "range": range_payload, "row_count": len(rows)})
+    contract = replacement_registration_contract(plan, dataset, chunks)
+    if contract is not None:
+        series_manifest, row_counts, first_last = replacement_series_coverage(plan, dataset, chunks)
+    else:
+        series_manifest, row_counts, first_last = _legacy_series_coverage(plan, dataset)
 
     candle_keys = hashlib.sha256()
     candle_payloads = hashlib.sha256()
@@ -1219,13 +1356,26 @@ def register_historical_dataset(dataset_id, plan_sha256):
     ingestion_manifest_set_hash = stable_hash(
         sorted(item.ingestion_run.ingestion_manifest.sha256 for item in successful_attempts)
     )
-    configuration = {
-        "identity": "failed-break-historical-dataset-registration-v1",
-        "plan_sha256": plan.sha256,
-        "dataset_manifest_sha256": dataset.manifest_sha256,
-        "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
-        "logical_chunk_set_hash": logical_chunk_set_hash,
-    }
+    if contract is not None:
+        from market.provider_observed_acquisition import REPLACEMENT_REGISTRATION_IDENTITY
+
+        configuration = {
+            "identity": REPLACEMENT_REGISTRATION_IDENTITY,
+            "plan_sha256": plan.sha256,
+            "dataset_manifest_sha256": dataset.manifest_sha256,
+            "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
+            "logical_chunk_set_hash": logical_chunk_set_hash,
+            "data_contract_sha256": contract.sha256,
+            "global_semantic_inventory_sha256": contract.global_semantic_inventory_sha256,
+        }
+    else:
+        configuration = {
+            "identity": "failed-break-historical-dataset-registration-v1",
+            "plan_sha256": plan.sha256,
+            "dataset_manifest_sha256": dataset.manifest_sha256,
+            "price_component": HistoricalDatasetPlan.PRICE_COMPONENT,
+            "logical_chunk_set_hash": logical_chunk_set_hash,
+        }
     report = {
         "configuration_sha256": stable_hash(configuration),
         "series_manifest": series_manifest,
@@ -1256,6 +1406,10 @@ def register_historical_dataset(dataset_id, plan_sha256):
         candle_payload_hash=report["candle_payload_hash"],
         configuration_sha256=report["configuration_sha256"],
         report_sha256=stable_hash(report),
+        data_contract=contract,
+        global_semantic_inventory_sha256=(
+            contract.global_semantic_inventory_sha256 if contract is not None else None
+        ),
     )
 
 
