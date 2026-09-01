@@ -276,15 +276,42 @@ class Gate8d3ArtifactTests(SimpleTestCase):
         self.assertIn("not numerically comparable", snapshot["comparability_statement"])
         self.assertIn("logical discovery key", snapshot["pre_gate8d2_content_definition"])
 
-    def test_the_two_snapshot_implementations_are_declared_and_distinct(self):
-        # 19: the agreement itself is proven against live rows; here the artifact
-        # must state the two implementations and not overclaim independence
+    def test_the_second_snapshot_implementation_is_described_without_overclaim(self):
+        # 19: the artifact must say exactly what implementation B proves, and must
+        # not present it as validating the section table it shares with A
         snapshot = load_committed_gate8d3_outcome()["sectioned_snapshot"]
         statement = snapshot["independent_reconstruction"]
-        self.assertIn("23 separately issued single-section queries", statement)
+        # what B proves
+        self.assertIn("23 separately issued single-section statements", statement)
+        self.assertIn("agrees across languages", statement)
         self.assertIn("canonical_hash", statement)
-        self.assertIn("share", statement)
+        self.assertIn("SQL NULL section hash surfaces as Python None", statement)
+        # what B shares, stated plainly
+        self.assertIn("SNAPSHOT_SECTIONS", statement)
+        self.assertIn("section_hash_sql", statement)
+        for shared in (
+            "section enumeration",
+            "table and alias definitions",
+            "per-section SQL construction",
+            "ordering",
+        ):
+            self.assertIn(shared, statement)
+        self.assertIn("would appear identically in both", statement)
+        # and who did validate the section table
+        self.assertIn("separate transcription", statement)
+        self.assertIn("acceptance review", statement)
+        self.assertNotIn("B independently restates the section list", statement)
         self.assertIn("not a claim of indefinite scalability", snapshot["limit_statement"])
+
+    def test_the_module_docstring_matches_the_artifact_claim(self):
+        # the generated wording and the code that generates it must not drift
+        from market.provider_observed_outcome import sectioned_snapshot_independent
+
+        docstring = sectioned_snapshot_independent.__doc__
+        self.assertIn("What B does not prove", docstring)
+        self.assertIn("SNAPSHOT_SECTIONS", docstring)
+        self.assertIn("acceptance review", docstring)
+        self.assertNotIn("What B checks independently is everything above that", docstring)
 
     def test_the_report_command_is_read_only_and_builds_no_provider_client(self):
         # 20

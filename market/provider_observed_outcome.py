@@ -59,7 +59,7 @@ ARTIFACT_NAME = "phase-2b1r-gate8d3-successor-discovery-outcome.json"
 # The committed artifact's own file digest, pinned in code. A caller can neither
 # supply nor relax it: a digest read from the document under inspection would
 # prove nothing about that document.
-OUTCOME_ARTIFACT_SHA256 = "34483771497d17d25f7720fd046986a84c2c90bd369fe058c57e70abb61a9f03"
+OUTCOME_ARTIFACT_SHA256 = "b13fe357e5c2dec3450a6fc15cf755d6a940e6b83af8592cfdedaa9cc74156c5"
 
 MIGRATION_0023_SHA256 = "e13cf659beaa754fb2e491c95fc3842e65e1714800c4daadbfeabd219c1ca7d5"
 MIGRATION_0023_NAME = "0023_gate8b_prime_successor_discovery_activation.py"
@@ -203,15 +203,24 @@ def sectioned_snapshot(cursor):
 
 
 def sectioned_snapshot_independent(cursor):
-    """Implementation B: 23 separately issued section queries, combined in
+    """Implementation B: 23 separately issued section statements, combined in
     Python under ``canonical_hash``.
 
-    The two implementations share PostgreSQL's ``to_jsonb`` row rendering, which
-    is the convention's definition and cannot be independently restated without
-    changing it. What B checks independently is everything above that: the
-    section list, each section's own query, the fixed ordering, the empty-section
-    representation, and the combination step, which B computes in Python rather
-    than in ``jsonb_build_object``.
+    What B proves: each section hash is reproducible as its own statement rather
+    than only inside the combined one; the final section-name/hash combination
+    agrees across languages, Python ``canonical_hash`` against PostgreSQL
+    ``market_sha256(jsonb_build_object(...))``; and a SQL NULL section hash
+    surfaces as Python ``None``, confirming the JSON-null empty-section rule.
+
+    What B does not prove: it reads the same :data:`SNAPSHOT_SECTIONS` tuple and
+    the same :func:`section_hash_sql` construction as A, so it shares the section
+    enumeration, the table and alias definitions, the per-section SQL and the
+    ordering. An error in that shared table would appear identically in both, so
+    B is not evidence that the table itself is right. That was established
+    separately, by hand-transcribing all 23 sections during independent Gate 8D3
+    acceptance review and reproducing this convention's pinned digests from the
+    independent transcription. Both implementations also necessarily share
+    PostgreSQL's ``to_jsonb`` row rendering, which is the convention's definition.
     """
     mapping = {}
     for name, _table, _alias, _order in SNAPSHOT_SECTIONS:
@@ -574,11 +583,21 @@ def _snapshot_section():
         "empty_sections": ["schedules"],
         "independent_reconstruction": (
             "Two implementations must agree: (A) one statement combining all 23 section"
-            " hashes through jsonb_build_object, and (B) 23 separately issued single-section"
-            " queries combined in Python under canonical_hash. Both necessarily share"
-            " PostgreSQL's to_jsonb row rendering, which is the convention's definition;"
-            " B independently restates the section list, each section query, the ordering,"
-            " the empty-section representation and the combination step."
+            " hashes through market_sha256(jsonb_build_object(...)), and (B) 23 separately"
+            " issued single-section statements whose results are combined in Python under"
+            " canonical_hash. What B proves: that each section hash is reproducible as its"
+            " own statement rather than only inside the combined one; that the final"
+            " section-name/hash combination agrees across languages, Python canonical_hash"
+            " against PostgreSQL market_sha256(jsonb_build_object(...)); and that a SQL NULL"
+            " section hash surfaces as Python None, confirming the JSON-null empty-section"
+            " representation. What B does not prove: it reads the same SNAPSHOT_SECTIONS"
+            " tuple and the same section_hash_sql() construction as A, so it shares the"
+            " section enumeration, the table and alias definitions, the per-section SQL"
+            " construction and the ordering, and an error in that shared table would appear"
+            " identically in both. The section table was instead validated by separate"
+            " transcription during independent Gate 8D3 acceptance review, which rewrote all"
+            " 23 sections by hand and reproduced this convention's pinned digests from that"
+            " independent transcription."
         ),
         "pre_gate8d2_content_definition": (
             "Every row except the discovery attempts, runs, inventories, observations,"
