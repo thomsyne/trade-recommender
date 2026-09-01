@@ -24,8 +24,11 @@ from market.historical_discovery import run_discovery_chunk
 from market.models import (
     AuditEvent,
     Candle,
+    CandleConflict,
+    DataQualityIncident,
     HistoricalDatasetPlan,
     HistoricalIngestionAttempt,
+    HistoricalIngestionChunk,
     IngestionManifest,
     IngestionRun,
     Instrument,
@@ -47,6 +50,11 @@ COMPLETENESS_MESSAGE = "replacement acquisition terminal commit requires its aud
 INSERT_MESSAGE = "replacement acquisition audit evidence rejected"
 COMPLETENESS_FUNCTION = "market_enforce_acquisition_audit_completeness"
 COMPLETENESS_TRIGGER = "market_acquisition_audit_complete"
+QUARANTINE_MESSAGE = "replacement acquisition runs may not be quarantined"
+
+
+class ForcedRollback(Exception):
+    """Ends a probe transaction without persisting it."""
 
 
 class DroppingCanaryClient:
@@ -300,6 +308,104 @@ class DeferredAuditEvidenceTests(Gate7BAuditFixture):
         self.assertEqual(run.status, IngestionRun.Status.RUNNING)
         self.assertEqual(AuditEvent.objects.filter(actor="gate7b-completeness-probe").count(), 0)
 
+    def test_governed_quarantine_is_rejected_and_leaves_no_partial_state(self):
+        attempt, run = self.running_canary_run()
+        before_events = AuditEvent.objects.count()
+
+        # 1. raw SQL cannot park a governed run in the third terminal value.
+        for statement, params in (
+            (
+                "UPDATE market_ingestionrun SET status='quarantined',"
+                " failure_reason='probe', finished_at=now() WHERE id=%s",
+                [run.pk],
+            ),
+            (
+                "UPDATE market_ingestionrun SET status='quarantined',"
+                " failure_reason='probe', finished_at=now(), fetched_count=1,"
+                " rejected_count=1 WHERE id=%s",
+                [run.pk],
+            ),
+        ):
+            with self.assertRaises(DatabaseError) as caught:
+                with transaction.atomic(), connection.cursor() as cursor:
+                    cursor.execute(statement, params)
+            self.assertIn(QUARANTINE_MESSAGE, str(caught.exception))
+            connection.close()
+
+        # the same rejection reaches the ORM path store_ingestion uses.
+        with self.assertRaises(DatabaseError) as caught:
+            with transaction.atomic():
+                run.status = IngestionRun.Status.QUARANTINED
+                run.failure_reason = "incoming batch conflicts with governed dataset"
+                run.finished_at = timezone.now()
+                run.save()
+        self.assertIn(QUARANTINE_MESSAGE, str(caught.exception))
+        connection.close()
+
+        # 2. nothing partial survives any of the rejections.
+        run.refresh_from_db()
+        self.assertEqual(run.status, IngestionRun.Status.RUNNING)
+        self.assertIsNone(run.finished_at)
+        self.assertEqual(AuditEvent.objects.count(), before_events)
+        self.assertFalse(IngestionManifest.objects.filter(ingestion_run=run).exists())
+        self.assertEqual(Candle.objects.filter(ingestion_run=run).count(), 0)
+        self.assertEqual(HistoricalIngestionAttempt.objects.filter(chunk=attempt.chunk).count(), 1)
+
+    def test_quarantined_run_cannot_be_inserted_and_attached_to_an_attempt(self):
+        # 3. the terminal-INSERT route is closed by the attempt's lineage gate,
+        # so a quarantined run can never acquire a governed attempt.
+        chunk = HistoricalIngestionChunk.objects.select_related("plan").get(
+            logical_key=ACQUISITION_CANARY_LOGICAL_KEY
+        )
+        key = f"failed-break-ingestion-attempt:{chunk.logical_key}:1"
+        manifest_hash = stable_hash({"attempt": key})
+
+        def insert_run(cursor, status):
+            cursor.execute(
+                """INSERT INTO market_ingestionrun
+                   (source_id, instrument_id, granularity, requested_from, requested_to,
+                    parameters, request_manifest_hash, status, started_at, finished_at,
+                    fetched_count, stored_count, rejected_count, failure_reason,
+                    dataset_version_id)
+                   VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,now(),
+                           CASE WHEN %s='running' THEN NULL ELSE now() END,
+                           0,0,0,'',%s) RETURNING id""",
+                [
+                    chunk.plan.source_id,
+                    chunk.instrument_id,
+                    chunk.granularity,
+                    chunk.requested_from,
+                    chunk.requested_to,
+                    json.dumps(chunk.canonical_request),
+                    manifest_hash,
+                    status,
+                    status,
+                    chunk.dataset_version_id,
+                ],
+            )
+            return cursor.fetchone()[0]
+
+        def insert_attempt(cursor, run_id):
+            cursor.execute(
+                """INSERT INTO market_historicalingestionattempt
+                   (chunk_id, ingestion_run_id, attempt_number, idempotency_key, created_at)
+                   VALUES (%s,%s,1,%s,now())""",
+                [chunk.pk, run_id, key],
+            )
+
+        # only the status differs between the control and the forgeries.
+        for status in ("quarantined", "succeeded", "failed"):
+            with self.assertRaises(DatabaseError) as caught:
+                with transaction.atomic(), connection.cursor() as cursor:
+                    insert_attempt(cursor, insert_run(cursor, status))
+            self.assertIn("deterministic lineage", str(caught.exception))
+            connection.close()
+
+        with self.assertRaises(ForcedRollback), transaction.atomic(), connection.cursor() as cursor:
+            insert_attempt(cursor, insert_run(cursor, "running"))
+            raise ForcedRollback
+        self.assertFalse(HistoricalIngestionAttempt.objects.filter(chunk=chunk).exists())
+
     def test_deferred_trigger_is_installed_with_the_reviewed_shape(self):
         with connection.cursor() as cursor:
             cursor.execute(
@@ -459,6 +565,75 @@ class GovernedTerminalEvidenceTests(Gate7BAuditFixture):
         self.assertEqual(run_event.payload["error_code"], evidence.payload["error_code"])
         self.assertEqual(Candle.objects.filter(ingestion_run=attempt.ingestion_run_id).count(), 0)
 
+    def test_candle_conflict_quarantine_rolls_back_and_ends_failed(self):
+        # 4. the production persistence path: a governed candle conflict can no
+        # longer park the run in quarantine, and the outcome is still recorded
+        # as failed by the separate sanitized transaction, with both events.
+        run_historical_chunk(ACQUISITION_CANARY_LOGICAL_KEY, self.canary_client())
+        chunk = self.smallest_seeded_chunk()
+        sealed = chunk.discovery_inventory.observations.order_by("timestamp").first()
+        canary_run_id = HistoricalIngestionAttempt.objects.get(
+            chunk__logical_key=ACQUISITION_CANARY_LOGICAL_KEY
+        ).ingestion_run_id
+        # the forged row must not join the canary's own replay set
+        foreign_run_id = (
+            IngestionRun.objects.exclude(pk=canary_run_id).values_list("pk", flat=True).first()
+        )
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_candle DISABLE TRIGGER USER")
+            try:
+                cursor.execute(
+                    """INSERT INTO market_candle
+                       (instrument_id, ingestion_run_id, dataset_version_id, granularity,
+                        timestamp, complete, volume,
+                        bid_open, bid_high, bid_low, bid_close,
+                        ask_open, ask_high, ask_low, ask_close)
+                       VALUES (%s,%s,%s,%s,%s,true,%s,
+                               1.500000,1.500000,1.500000,1.500000,
+                               1.500000,1.500000,1.500000,1.500000)""",
+                    [
+                        chunk.instrument_id,
+                        foreign_run_id,
+                        chunk.dataset_version_id,
+                        chunk.granularity,
+                        sealed.timestamp,
+                        sealed.volume,
+                    ],
+                )
+            finally:
+                cursor.execute("ALTER TABLE market_candle ENABLE TRIGGER USER")
+        conflicting = Candle.objects.filter(
+            dataset_version_id=chunk.dataset_version_id, timestamp=sealed.timestamp
+        ).count()
+        self.assertEqual(conflicting, 1)
+
+        # the conflict path tries to quarantine; the governed rule refuses it and
+        # the run_historical_chunk handler still records the terminal outcome
+        with self.assertRaises(DatabaseError) as caught:
+            run_historical_chunk(chunk.logical_key, CanaryClient(chunk))
+        self.assertIn(QUARANTINE_MESSAGE, str(caught.exception))
+
+        attempt = HistoricalIngestionAttempt.objects.get(chunk__logical_key=chunk.logical_key)
+        run_event, evidence = self.assert_two_scope_evidence(
+            attempt, succeeded=False, evidence_type="market.historical_ingestion_failed"
+        )
+        self.assertEqual(evidence.payload["error_code"], "PERSISTENCE_FAILED")
+        self.assertEqual(run_event.payload["error_code"], "PERSISTENCE_FAILED")
+        self.assertEqual(
+            IngestionRun.objects.get(pk=attempt.ingestion_run_id).status,
+            IngestionRun.Status.FAILED,
+        )
+        # the quarantine attempt and everything it wrote rolled back
+        self.assertFalse(
+            IngestionRun.objects.filter(status=IngestionRun.Status.QUARANTINED).exists()
+        )
+        self.assertFalse(
+            IngestionManifest.objects.filter(ingestion_run=attempt.ingestion_run_id).exists()
+        )
+        self.assertEqual(Candle.objects.filter(ingestion_run=attempt.ingestion_run_id).count(), 0)
+        self.assertEqual(CandleConflict.objects.count(), 0)
+        self.assertEqual(DataQualityIncident.objects.count(), 0)
+
     def test_persistence_failure_recovery_commits_evidence_after_rollback(self):
         # 9. the persistence transaction rolls back; the sanitized failure
         # transaction becomes terminal and must carry both events.
@@ -572,6 +747,40 @@ class UngovernedTerminalCompatibilityTests(HistoricalFixtureMixin, TransactionTe
             ],
             ["market.historical_attempt_stale_failed"],
         )
+
+    def test_v1_and_prospective_quarantine_remain_permitted(self):
+        # 8. quarantine stays available where it was already permitted.
+        plan, _ = self.plan()
+        chunk = plan.chunks.first()
+        attempt, _ = begin_historical_attempt(chunk.logical_key)
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE market_ingestionrun SET status='quarantined',"
+                " failure_reason='v1 conflict', finished_at=now() WHERE id=%s",
+                [attempt.ingestion_run_id],
+            )
+        self.assertEqual(
+            IngestionRun.objects.get(pk=attempt.ingestion_run_id).status,
+            IngestionRun.Status.QUARANTINED,
+        )
+
+        prospective = IngestionRun.objects.create(
+            source=self.source,
+            instrument=Instrument.objects.get(code="EUR_USD"),
+            granularity="H1",
+            requested_from=timezone.now() - timedelta(hours=4),
+            requested_to=timezone.now() - timedelta(hours=2),
+            parameters={"probe": "prospective"},
+            request_manifest_hash=stable_hash({"probe": "prospective"}),
+        )
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE market_ingestionrun SET status='quarantined',"
+                " failure_reason='prospective conflict', finished_at=now() WHERE id=%s",
+                [prospective.pk],
+            )
+        prospective.refresh_from_db()
+        self.assertEqual(prospective.status, IngestionRun.Status.QUARANTINED)
 
     def test_prospective_ingestion_terminal_transition_is_unchanged(self):
         # 14. prospective ingestion carries no historical attempt at all.

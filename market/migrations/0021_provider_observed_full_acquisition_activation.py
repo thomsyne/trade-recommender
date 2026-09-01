@@ -635,6 +635,19 @@ INGESTION_RUN_GATE7B_PROSRC = r"""
               RAISE EXCEPTION 'ingestion runs with audit lineage cannot be deleted';
             END IF; RETURN OLD;
           END IF;
+          IF NEW.status='quarantined' AND EXISTS (
+               SELECT 1 FROM market_historicalingestionattempt a
+               JOIN market_historicalingestionchunk c ON c.id=a.chunk_id
+               JOIN market_datasetversion d ON d.id=c.dataset_version_id
+               JOIN market_historicaldatasetplan p ON p.id=c.plan_id
+               JOIN market_historicaldatacontract hc ON hc.id=p.data_contract_id
+               WHERE a.ingestion_run_id=NEW.id
+                 AND c.data_contract_sha256 IS NOT NULL
+                 AND d.data_contract_sha256=c.data_contract_sha256
+                 AND p.data_contract_sha256=c.data_contract_sha256
+                 AND hc.sha256=c.data_contract_sha256)
+          THEN RAISE EXCEPTION
+            'replacement acquisition runs may not be quarantined'; END IF;
           IF OLD.status <> 'running' OR NEW.status NOT IN ('succeeded','failed','quarantined')
              OR NEW.finished_at IS NULL OR NEW.source_id<>OLD.source_id
              OR NEW.dataset_version_id IS DISTINCT FROM OLD.dataset_version_id
