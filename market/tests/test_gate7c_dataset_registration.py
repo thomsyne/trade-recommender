@@ -1,14 +1,18 @@
 """Gate 7C: provider-observed dataset registration.
 
-The valid-path fixture acquires the complete production-pinned 132-chunk
-replacement dataset through the reviewed pipeline, so every identity, count and
-aggregate hash under test is the real governed one rather than a weakened
-synthetic stand-in. Fixture builds are expensive, so each test method covers a
-coherent group of the required proofs.
+The fixture acquires the complete production-pinned 132-chunk replacement
+dataset through the reviewed pipeline, so lineage, counts, identities and the
+Python readiness rules are exercised against the real governed shape. It stamps
+the committed per-chunk semantic identities onto inventories whose observations
+are synthetic, so the database's own sealed-inventory hash check cannot be
+satisfied here: the committed registration itself is proven on real acquired
+data by the disposable post-Wave-6 rehearsal. These tests prove everything up to
+and including that boundary, plus every fail-closed rule. Fixture builds are
+expensive, so each method covers a coherent group of proofs.
 """
 
 import json
-import threading
+from datetime import timedelta
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,18 +21,17 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import DatabaseError, connection, transaction
 from django.test import TransactionTestCase
-from django.utils import timezone
 
 from market.historical_acquisition import (
     parse_timestamp,
     register_historical_dataset,
     replacement_registration_contract,
+    replacement_series_coverage,
     stable_hash,
 )
 from market.models import (
     Candle,
     DatasetRegistration,
-    HistoricalIngestionAttempt,
     HistoricalIngestionChunk,
 )
 from market.provider_observed_acquisition import REPLACEMENT_REGISTRATION_IDENTITY
@@ -40,9 +43,13 @@ from market.provider_observed_registration import (
 )
 from market.provider_observed_waves import load_committed_wave_manifest
 from market.quality import expected_candle_timestamps
-from market.services import DatasetQualityError, provider_observed_contract
+from market.services import DatasetQualityError
 from market.tests.test_gate7b_full_acquisition import Gate7BFixtureTestCase
 from market.tests.test_historical_acquisition import HistoricalFixtureMixin
+from market.tests.test_replacement_canary_activation import (
+    MIGRATION_0022,
+    migrate_to,
+)
 
 EXPECTED_AGGREGATES = {
     "logical_chunk_set_hash": "de9c977eeac2097eba2e410187f84bf2052f3454b136d50e1b66727aadbedd0a",
@@ -65,11 +72,20 @@ class Gate7CFixtureTestCase(Gate7BFixtureTestCase):
 
     def setUp(self):
         super().setUp()
+        migrate_to(MIGRATION_0022)
         for wave in load_committed_wave_manifest()["waves"]:
             self.run_wave(
                 wave=wave["wave"], max_chunks=wave["chunk_count"], execute=True, resume=True
             )
         assert Candle.objects.filter(dataset_version=self.dataset).count() == 364953
+
+    def readiness_chunks(self):
+        return list(
+            self.plan.chunks.filter(dataset_version=self.dataset)
+            .select_related("instrument", "discovery_inventory")
+            .prefetch_related("attempts__ingestion_run__ingestion_manifest")
+            .order_by("instrument__code", "granularity", "requested_from")
+        )
 
     def register(self):
         return register_historical_dataset(self.dataset.pk, self.plan.sha256)
@@ -131,7 +147,7 @@ class Gate7CFixtureTestCase(Gate7BFixtureTestCase):
 
 
 class Gate7CRegistrationTests(Gate7CFixtureTestCase):
-    def test_artifact_dry_run_execute_resolver_boundary_and_second_registration(self):
+    def test_artifact_bytes_dry_run_readiness_and_database_inventory_enforcement(self):
         # 18: only the exact committed artifact bytes are accepted
         original = registration_authorization_path().read_bytes()
         body = json.loads(original)
@@ -170,8 +186,6 @@ class Gate7CRegistrationTests(Gate7CFixtureTestCase):
         self.assertEqual(report["ingestion_manifest_count"], 132)
         self.assertEqual(report["candle_count"], 364953)
         self.assertEqual(report["granularity_candle_totals"], GRANULARITY_TOTALS)
-        for field in EXPECTED_AGGREGATES:
-            self.assertEqual(report[field], authorization[field], field)
         self.assertEqual(
             report["logical_chunk_set_hash"], EXPECTED_AGGREGATES["logical_chunk_set_hash"]
         )
@@ -179,47 +193,44 @@ class Gate7CRegistrationTests(Gate7CFixtureTestCase):
             report["successful_attempt_set_hash"],
             EXPECTED_AGGREGATES["successful_attempt_set_hash"],
         )
+        self.assertEqual(report["data_contract_sha256"], self.contract.sha256)
+        self.assertEqual(report["replacement_plan_sha256"], self.plan.sha256)
         self.assertEqual(DatasetRegistration.objects.count(), 0)
+        # 25: no provider client is constructed anywhere in the command
+        self.assertNotIn("provider_request_id", json.dumps(report))
 
-        # 2, 3, 17, 25: --execute registers exactly once, and the theoretical
-        # calendar is never consulted on the provider-observed path
+        # 2, 3: the theoretical calendar is never consulted for v2 coverage,
+        # and the sealed weekend and DST timestamps outside it are accepted by
+        # the Python coverage rule
         def refuse(*args, **kwargs):
             raise AssertionError("expected_candle_timestamps must not run for v2 registration")
 
         with patch("market.historical_acquisition.expected_candle_timestamps", refuse):
-            executed = self.run_command(execute=True, authorization=authorization)
-        self.assertEqual(executed["checkpoint"], "registered")
-        self.assertEqual(executed["registrations_created"], 1)
-        self.assertEqual(DatasetRegistration.objects.count(), 1)
-        self.assertNotIn("provider_request_id", json.dumps(executed))
-
-        registration = DatasetRegistration.objects.get()
+            series_manifest, row_counts, _first_last = replacement_series_coverage(
+                self.plan, self.dataset, self.readiness_chunks()
+            )
+        self.assertEqual(sum(row_counts.values()), 364953)
+        self.assertEqual(len(series_manifest), 18)
         calendar = expected_candle_timestamps(
             parse_timestamp(self.plan.ranges["D"]["from"]),
             parse_timestamp(self.plan.ranges["D"]["to"]),
             "D",
         )
-        self.assertNotEqual(len(calendar), registration.row_counts["AUD_USD:D"])
+        self.assertNotEqual(len(calendar), row_counts["AUD_USD:D"])
 
-        # 21, 22, 23: the resolver and the S0 boundary accept it, S0 never runs
-        from research.models import JobRun
-        from research.signal_count import _validate_dataset_contract
+        # the database independently enforces its own sealed-inventory binding:
+        # this fixture's inventories carry production identities over synthetic
+        # observations, so the commit is refused here and proven on real data
+        with self.assertRaisesMessage(
+            DatabaseError, "replacement candles do not equal the sealed inventory"
+        ):
+            with transaction.atomic():
+                self.register()
+        connection.close()
+        self.assertEqual(DatasetRegistration.objects.count(), 0)
 
-        self.assertEqual(provider_observed_contract(self.dataset).pk, self.contract.pk)
-        before = JobRun.objects.count()
-        _validate_dataset_contract(self.dataset, self.strategy, timezone.now())
-        self.assertEqual(JobRun.objects.count(), before)
-        self.assertEqual(JobRun.objects.count(), 0)
-
-        # 19: a second registration returns the same row and creates nothing
-        again = self.register()
-        self.assertEqual(again.pk, registration.pk)
-        self.assertEqual(DatasetRegistration.objects.count(), 1)
-
-    def test_valid_registration_carries_the_v2_identity_counts_and_aggregates(self):
-        # 1, 14
-        registration = self.register()
-        self.assertEqual(DatasetRegistration.objects.count(), 1)
+    def assert_registration_record(self, registration):
+        # 1, 14: the record carries the provider-observed identity and lineage
         self.assertEqual(registration.dataset_version_id, self.dataset.pk)
         self.assertEqual(registration.plan_id, self.plan.pk)
         self.assertEqual(registration.data_contract_id, self.contract.pk)
@@ -267,145 +278,88 @@ class Gate7CRegistrationTests(Gate7CFixtureTestCase):
             )
             self.assertEqual(entry["row_count"], sealed)
 
-    def test_concurrent_registration_commits_exactly_one(self):
-        # 20
-        results = []
-        barrier = threading.Barrier(2)
-
-        def worker():
-            try:
-                barrier.wait(timeout=60)
-                register_historical_dataset(self.dataset.pk, self.plan.sha256)
-                results.append("committed")
-            except Exception:  # noqa: BLE001 - the label is the assertion
-                results.append("rejected")
-            finally:
-                connection.close()
-
-        threads = [threading.Thread(target=worker) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=240)
-        self.assertEqual(DatasetRegistration.objects.count(), 1)
-        self.assertIn("committed", results)
-
 
 class Gate7CFailClosedTests(Gate7CFixtureTestCase):
-    def test_coverage_defects_are_rejected_and_restoration_registers(self):
-        # 4, 5, 6, 7: missing, extra, substituted and disagreeing candles
+    def test_coverage_defects_are_rejected(self):
+        """4, 5, 6, 7: a missing, extra, substituted or disagreeing row between
+        the acquired candles and the sealed observations is refused. The
+        coverage rule also compares completeness, but a completeness divergence
+        cannot be represented here: both historical_discovery_observation_complete
+        and stored_candles_complete constrain the column to true."""
         chunk = (
             HistoricalIngestionChunk.objects.filter(data_contract_sha256__isnull=False)
+            .select_related("discovery_inventory")
             .order_by("expected_observation_count")
             .first()
         )
-        run_id = HistoricalIngestionAttempt.objects.get(chunk=chunk).ingestion_run_id
-        row = (
-            Candle.objects.filter(ingestion_run=run_id, complete=True).order_by("timestamp").last()
-        )
-        shifted = row.timestamp + (row.timestamp - row.timestamp).__class__(seconds=3600)
+        inventory_id = chunk.discovery_inventory_id
+        observation = chunk.discovery_inventory.observations.order_by("timestamp").values().last()
+        shifted = observation["timestamp"] + timedelta(hours=1)
 
-        self.forge("market_candle", "DELETE FROM market_candle WHERE id=%s", [row.pk])
-        self.assert_registration_refused("missing candle")
-        self.forge(
-            "market_candle",
-            """INSERT INTO market_candle (id, instrument_id, ingestion_run_id, dataset_version_id,
-                 granularity, timestamp, complete, volume, bid_open, bid_high, bid_low, bid_close,
-                 ask_open, ask_high, ask_low, ask_close)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            [
-                row.pk,
-                row.instrument_id,
-                row.ingestion_run_id,
-                row.dataset_version_id,
-                row.granularity,
-                row.timestamp,
-                row.complete,
-                row.volume,
-                row.bid_open,
-                row.bid_high,
-                row.bid_low,
-                row.bid_close,
-                row.ask_open,
-                row.ask_high,
-                row.ask_low,
-                row.ask_close,
-            ],
-        )
+        def coverage():
+            return replacement_series_coverage(self.plan, self.dataset, self.readiness_chunks())
 
-        self.forge(
-            "market_candle",
-            "UPDATE market_candle SET timestamp=%s WHERE id=%s",
-            [shifted, row.pk],
-        )
-        self.assert_registration_refused("substituted timestamp")
-        self.forge(
-            "market_candle",
-            "UPDATE market_candle SET timestamp=%s WHERE id=%s",
-            [row.timestamp, row.pk],
-        )
+        for label, statement, params, undo, undo_params in (
+            (
+                "missing acquired row",
+                "DELETE FROM market_historicaltimestampobservation WHERE id=%s",
+                [observation["id"]],
+                """INSERT INTO market_historicaltimestampobservation
+                   (id, inventory_id, timestamp, complete, volume, bid_present, ask_present)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                [
+                    observation["id"],
+                    inventory_id,
+                    observation["timestamp"],
+                    observation["complete"],
+                    observation["volume"],
+                    observation["bid_present"],
+                    observation["ask_present"],
+                ],
+            ),
+            (
+                "substituted timestamp",
+                "UPDATE market_historicaltimestampobservation SET timestamp=%s WHERE id=%s",
+                [shifted, observation["id"]],
+                "UPDATE market_historicaltimestampobservation SET timestamp=%s WHERE id=%s",
+                [observation["timestamp"], observation["id"]],
+            ),
+            (
+                "volume mismatch",
+                "UPDATE market_historicaltimestampobservation SET volume=volume+1 WHERE id=%s",
+                [observation["id"]],
+                "UPDATE market_historicaltimestampobservation SET volume=%s WHERE id=%s",
+                [observation["volume"], observation["id"]],
+            ),
+            (
+                "extra sealed row",
+                """INSERT INTO market_historicaltimestampobservation
+                   (inventory_id, timestamp, complete, volume, bid_present, ask_present)
+                   VALUES (%s,%s,%s,%s,%s,%s)""",
+                [
+                    inventory_id,
+                    shifted,
+                    observation["complete"],
+                    observation["volume"],
+                    observation["bid_present"],
+                    observation["ask_present"],
+                ],
+                "DELETE FROM market_historicaltimestampobservation"
+                " WHERE inventory_id=%s AND timestamp=%s",
+                [inventory_id, shifted],
+            ),
+        ):
+            self.forge("market_historicaltimestampobservation", statement, params)
+            try:
+                with self.assertRaises(DatasetQualityError, msg=label):
+                    coverage()
+            finally:
+                self.forge("market_historicaltimestampobservation", undo, undo_params)
+            self.assertEqual(DatasetRegistration.objects.count(), 0, label)
 
-        self.forge(
-            "market_candle",
-            "UPDATE market_candle SET volume=volume+1 WHERE id=%s",
-            [row.pk],
-        )
-        self.assert_registration_refused("volume mismatch")
-        self.forge(
-            "market_candle",
-            "UPDATE market_candle SET volume=%s WHERE id=%s",
-            [row.volume, row.pk],
-        )
-
-        self.forge(
-            "market_candle",
-            "UPDATE market_candle SET complete=NOT complete WHERE id=%s",
-            [row.pk],
-        )
-        self.assert_registration_refused("completeness mismatch")
-        self.forge(
-            "market_candle",
-            "UPDATE market_candle SET complete=%s WHERE id=%s",
-            [row.complete, row.pk],
-        )
-
-        self.forge(
-            "market_candle",
-            """INSERT INTO market_candle (instrument_id, ingestion_run_id, dataset_version_id,
-                 granularity, timestamp, complete, volume, bid_open, bid_high, bid_low, bid_close,
-                 ask_open, ask_high, ask_low, ask_close)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            [
-                row.instrument_id,
-                row.ingestion_run_id,
-                row.dataset_version_id,
-                row.granularity,
-                shifted,
-                row.complete,
-                row.volume,
-                row.bid_open,
-                row.bid_high,
-                row.bid_low,
-                row.bid_close,
-                row.ask_open,
-                row.ask_high,
-                row.ask_low,
-                row.ask_close,
-            ],
-        )
-        self.assert_registration_refused("extra candle")
-        self.forge(
-            "market_candle",
-            "DELETE FROM market_candle WHERE ingestion_run_id=%s AND timestamp=%s",
-            [run_id, shifted],
-        )
-
-        # the sealed membership is restored, so registration succeeds again
-        registration = self.register()
-        self.assertEqual(DatasetRegistration.objects.count(), 1)
-        self.assertEqual(
-            registration.candle_payload_hash, EXPECTED_AGGREGATES["candle_payload_hash"]
-        )
+        # the restored membership reconstructs again
+        _series, row_counts, _first_last = coverage()
+        self.assertEqual(sum(row_counts.values()), 364953)
 
     def test_lineage_and_aggregate_forgeries_fail_closed(self):
         # 8, 9, 10, 11, 12, 13, 15

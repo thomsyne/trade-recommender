@@ -37,7 +37,7 @@ from market.tests.test_replacement_canary_activation import (
     MIGRATION_0015,
     MIGRATION_0016,
     MIGRATION_0017,
-    MIGRATION_0021,
+    MIGRATION_0022,
     build_retry_ready_state,
     build_superseded_state,
     insert_raw_canary_attempt,
@@ -126,7 +126,7 @@ class Gate4FixtureTestCase(TransactionTestCase):
         ) = build_retry_ready_state(self.source)
         migrate_to(MIGRATION_0016)
         self.attempt_two = record_attempt_two_success(self.source, self.replacement)
-        migrate_to(MIGRATION_0021)
+        migrate_to(MIGRATION_0022)
         self.canary = self.replacement.chunks.select_related("instrument").get(
             logical_key=CANARY_V2_LOGICAL_KEY
         )
@@ -137,7 +137,7 @@ class Gate4FixtureTestCase(TransactionTestCase):
         )
 
     def tearDown(self):
-        migrate_to(MIGRATION_0021)
+        migrate_to(MIGRATION_0022)
         super().tearDown()
 
     def validator_outcomes(self):
@@ -379,7 +379,7 @@ class Gate4ActivationTests(Gate4FixtureTestCase):
 
 class Gate4PrerequisiteTests(TransactionTestCase):
     def tearDown(self):
-        migrate_to(MIGRATION_0021)
+        migrate_to(MIGRATION_0022)
         super().tearDown()
 
     def assert_activation_blocked(self, source, replacement):
