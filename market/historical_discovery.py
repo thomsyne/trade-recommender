@@ -273,7 +273,46 @@ def build_initial_discovery_plan():
     return {**payload, "plan_sha256": canonical_hash(payload)}
 
 
-def build_replacement_discovery_plan():
+def h1_request_boundaries(range_start, range_end, *, first_requested_from=None):
+    """The frozen v2 H1 windowing, optionally with an earlier first window.
+
+    The walk always starts from the frozen range start, so every window after
+    the first is identical whatever ``first_requested_from`` is. Only the first
+    window's opening bound moves, which is what a governed warm-up extension
+    needs: no window is added, removed or re-cut.
+
+    The override may only extend. A value equal to or later than the frozen
+    range start would silently truncate front coverage while still returning a
+    plausible twenty-window plan, so it is refused rather than accepted.
+    """
+    if first_requested_from is not None and first_requested_from >= range_start:
+        raise ValueError(
+            "an extended first H1 window must begin strictly before the frozen range start"
+        )
+    boundaries = []
+    requested_from = range_start
+    while requested_from < range_end:
+        requested_to = min(
+            requested_from + timedelta(hours=DISCOVERY_V2_H1_MAX_HOURS),
+            range_end,
+        )
+        boundaries.append((requested_from, requested_to))
+        requested_from = requested_to
+    if first_requested_from is not None:
+        boundaries[0] = (first_requested_from, boundaries[0][1])
+    return boundaries
+
+
+def build_provider_observed_discovery_plan(
+    *, discovery_version, plan_identity, h1_first_requested_from=None
+):
+    """Deterministic provider-observed discovery payload for one plan version.
+
+    ``h1_first_requested_from`` extends only the first H1 window of every
+    instrument. D and W requests, and H1 windows two onward, are byte-identical
+    across versions, so a successor plan differs from its predecessor in
+    exactly the six requests a governed warm-up extension touches.
+    """
     requests = []
     for instrument in INSTRUMENTS:
         for granularity in DISCOVERY_GRANULARITIES:
@@ -282,15 +321,9 @@ def build_replacement_discovery_plan():
             range_end = parse_timestamp(candle_range["to"])
             boundaries = [(range_start, range_end)]
             if granularity == "H1":
-                boundaries = []
-                requested_from = range_start
-                while requested_from < range_end:
-                    requested_to = min(
-                        requested_from + timedelta(hours=DISCOVERY_V2_H1_MAX_HOURS),
-                        range_end,
-                    )
-                    boundaries.append((requested_from, requested_to))
-                    requested_from = requested_to
+                boundaries = h1_request_boundaries(
+                    range_start, range_end, first_requested_from=h1_first_requested_from
+                )
             for requested_from, requested_to in boundaries:
                 request = canonical_request(
                     instrument=instrument,
@@ -308,7 +341,7 @@ def build_replacement_discovery_plan():
                             granularity=granularity,
                             requested_from=requested_from,
                             requested_to=requested_to,
-                            discovery_version=DISCOVERY_V2_VERSION,
+                            discovery_version=discovery_version,
                         ),
                         "canonical_request": request,
                         "canonical_request_sha256": request_sha,
@@ -316,8 +349,8 @@ def build_replacement_discovery_plan():
                 )
     payload = {
         "discovery_contract": DISCOVERY_CONTRACT,
-        "discovery_version": DISCOVERY_V2_VERSION,
-        "identity": DISCOVERY_V2_PLAN_IDENTITY,
+        "discovery_version": discovery_version,
+        "identity": plan_identity,
         "purpose": DISCOVERY_PURPOSE,
         "source": {"name": "OANDA v20", "governed_identity": SOURCE_IDENTITY},
         "environment": "practice",
@@ -330,6 +363,14 @@ def build_replacement_discovery_plan():
         "requests": requests,
     }
     return {**payload, "plan_sha256": canonical_hash(payload)}
+
+
+def build_replacement_discovery_plan():
+    """The accepted v2 plan. Its bytes are pinned by DISCOVERY_V2_PLAN_SHA256."""
+    return build_provider_observed_discovery_plan(
+        discovery_version=DISCOVERY_V2_VERSION,
+        plan_identity=DISCOVERY_V2_PLAN_IDENTITY,
+    )
 
 
 @transaction.atomic
