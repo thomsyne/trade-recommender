@@ -7,8 +7,10 @@ from market.provider_observed_successor import successor_readiness
 
 class Command(BaseCommand):
     help = (
-        "Report which successor discovery stage the governed sequence has opened, and the"
-        " exact logical keys it permits. Read-only: no database write, no provider client."
+        "Report which successor discovery chunks may actually be executed now, and the"
+        " plan's execution status: open, an attempt in progress, blocked by a failed"
+        " attempt, or successfully complete. A chunk that already has an attempt is never"
+        " reported as executable. Read-only: no database write, no provider client."
     )
 
     def handle(self, *args, **options):
