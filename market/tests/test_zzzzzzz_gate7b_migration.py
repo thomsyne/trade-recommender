@@ -25,6 +25,7 @@ REPLACED_FUNCTIONS = (
 NEW_FUNCTIONS = (
     "market_verify_replacement_canary_success",
     "market_validate_acquisition_audit",
+    "market_enforce_acquisition_audit_completeness",
 )
 
 
@@ -66,6 +67,18 @@ class Gate7BMigrationTests(TransactionTestCase):
                      AND t.tgname='market_acquisition_audit_validate'"""
             )
             return cursor.fetchone()[0] == 1
+
+    def completeness_trigger(self):
+        """The deferred constraint trigger's installed shape, or None."""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT t.tgdeferrable, t.tginitdeferred, t.tgconstraint <> 0, t.tgtype
+                   FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+                   WHERE NOT t.tgisinternal AND c.relname='market_ingestionrun'
+                     AND t.tgname='market_acquisition_audit_complete'"""
+            )
+            rows = cursor.fetchall()
+            return rows[0] if rows else None
 
     def build_gate7b_state(self):
         migrate_to(MIGRATION_0015)
@@ -121,15 +134,22 @@ class Gate7BMigrationTests(TransactionTestCase):
         self.assertEqual(self.prosrc_md5s(REPLACED_FUNCTIONS), expected_gate7b)
         self.assertEqual(set(self.prosrc_md5s(NEW_FUNCTIONS)), set(NEW_FUNCTIONS))
         self.assertTrue(self.audit_trigger_exists())
+        installed = self.completeness_trigger()
+        self.assertIsNotNone(installed)
+        deferrable, initially_deferred, is_constraint, tgtype = installed
+        self.assertEqual((deferrable, initially_deferred, is_constraint), (True, True, True))
+        self.assertEqual((tgtype & 1, tgtype & 2, tgtype & 16), (1, 0, 16))
 
         MigrationExecutor(connection).migrate(self.previous)
         self.assertEqual(self.prosrc_md5s(REPLACED_FUNCTIONS), expected_0020)
         self.assertEqual(self.prosrc_md5s(NEW_FUNCTIONS), {})
         self.assertFalse(self.audit_trigger_exists())
+        self.assertIsNone(self.completeness_trigger())
 
         MigrationExecutor(connection).migrate(self.current)
         self.assertEqual(self.prosrc_md5s(REPLACED_FUNCTIONS), expected_gate7b)
         self.assertTrue(self.audit_trigger_exists())
+        self.assertEqual(self.completeness_trigger(), installed)
 
     def test_preflight_rejects_altered_0020_governance_and_partial_installation(self):
         MigrationExecutor(connection).migrate(self.previous)

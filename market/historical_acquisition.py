@@ -1020,6 +1020,22 @@ def _record_historical_failure(attempt_id, failure):
         subject_id=str(attempt.pk),
         payload=payload,
     )
+    if chunk.data_contract_sha256 is not None:
+        # Governed replacement failures are terminal with two-scope evidence;
+        # the deferred completeness trigger requires both events at commit.
+        AuditEvent.objects.create(
+            event_type="market.ingestion_rejected",
+            actor="market.historical_acquisition.run_historical_chunk",
+            subject_type="IngestionRun",
+            subject_id=str(run.pk),
+            payload={
+                "schema_version": 1,
+                "error_code": failure.error_code,
+                "failure_stage": failure.failure_stage,
+                "logical_chunk_key": chunk.logical_key,
+                "attempt_id": attempt.pk,
+            },
+        )
 
 
 @transaction.atomic
@@ -1062,6 +1078,38 @@ def resolve_stale_historical_attempt(attempt_id, stale_threshold, reason):
             "reason": reason.strip(),
         },
     )
+    if chunk.data_contract_sha256 is not None:
+        # A governed replacement run may only become terminal together with its
+        # two-scope evidence; stale resolution records the same required pair.
+        AuditEvent.objects.create(
+            event_type="market.historical_ingestion_failed",
+            actor="market.historical_acquisition.resolve_stale_historical_attempt",
+            subject_type="HistoricalIngestionAttempt",
+            subject_id=str(attempt.pk),
+            payload={
+                "schema_version": 1,
+                "error_code": "STALE_ATTEMPT_RESOLVED",
+                "logical_chunk_key": chunk.logical_key,
+                "attempt_id": attempt.pk,
+                "attempt_number": attempt.attempt_number,
+                "ingestion_run_id": run.pk,
+                "failure_stage": "stale_resolution",
+                "reason": reason.strip(),
+            },
+        )
+        AuditEvent.objects.create(
+            event_type="market.ingestion_rejected",
+            actor="market.historical_acquisition.resolve_stale_historical_attempt",
+            subject_type="IngestionRun",
+            subject_id=str(run.pk),
+            payload={
+                "schema_version": 1,
+                "error_code": "STALE_ATTEMPT_RESOLVED",
+                "failure_stage": "stale_resolution",
+                "logical_chunk_key": chunk.logical_key,
+                "attempt_id": attempt.pk,
+            },
+        )
     attempt.ingestion_run = run
     return attempt
 

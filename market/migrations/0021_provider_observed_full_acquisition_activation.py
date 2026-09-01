@@ -647,6 +647,117 @@ INGESTION_RUN_GATE7B_PROSRC = r"""
           THEN RAISE EXCEPTION 'ingestion run may make one valid terminal transition only'; END IF;
           RETURN NEW;
         END """
+# Commit-time audit-evidence existence: a governed replacement-acquisition
+# run may only become terminal together with exactly its two-scope evidence.
+# Scoped relationally (run -> historical attempt -> chunk/dataset contract
+# lineage), inert for v1 acquisition, discovery and prospective ingestion;
+# installed only while Gate 7B activation is present.
+AUDIT_COMPLETENESS_PROSRC = r"""
+        DECLARE attempt record; chunk record; dataset record; manifest record;
+                run_event record; evidence record;
+                run_succeeded bigint; run_rejected bigint;
+                attempt_success bigint; attempt_failure bigint;
+        BEGIN
+          IF OLD.status <> 'running' OR NEW.status NOT IN ('succeeded','failed') THEN
+            RETURN NULL; END IF;
+          SELECT a.* INTO attempt FROM market_historicalingestionattempt a
+            WHERE a.ingestion_run_id=NEW.id;
+          IF attempt.id IS NULL THEN RETURN NULL; END IF;
+          SELECT c.* INTO STRICT chunk FROM market_historicalingestionchunk c
+            WHERE c.id=attempt.chunk_id;
+          IF chunk.data_contract_sha256 IS NULL THEN RETURN NULL; END IF;
+          SELECT d.* INTO STRICT dataset FROM market_datasetversion d
+            WHERE d.id=chunk.dataset_version_id;
+          IF dataset.data_contract_sha256 IS NULL
+             OR dataset.data_contract_sha256<>chunk.data_contract_sha256 THEN
+            RETURN NULL; END IF;
+          SELECT count(*) INTO run_succeeded FROM market_auditevent e
+            WHERE e.subject_type='IngestionRun' AND e.subject_id=NEW.id::text
+              AND e.event_type='market.ingestion_succeeded';
+          SELECT count(*) INTO run_rejected FROM market_auditevent e
+            WHERE e.subject_type='IngestionRun' AND e.subject_id=NEW.id::text
+              AND e.event_type='market.ingestion_rejected';
+          SELECT count(*) INTO attempt_success FROM market_auditevent e
+            WHERE e.subject_type='HistoricalIngestionAttempt'
+              AND e.subject_id=attempt.id::text
+              AND e.event_type IN ('market.replacement_canary_succeeded',
+                                   'market.replacement_acquisition_succeeded');
+          SELECT count(*) INTO attempt_failure FROM market_auditevent e
+            WHERE e.subject_type='HistoricalIngestionAttempt'
+              AND e.subject_id=attempt.id::text
+              AND e.event_type='market.historical_ingestion_failed';
+          IF NEW.status='succeeded' THEN
+            IF run_succeeded<>1 OR run_rejected<>0
+               OR attempt_success<>1 OR attempt_failure<>0
+            THEN RAISE EXCEPTION
+              'replacement acquisition terminal commit requires its audit evidence';
+            END IF;
+            SELECT m.* INTO manifest FROM market_ingestionmanifest m
+              WHERE m.ingestion_run_id=NEW.id;
+            SELECT e.* INTO STRICT run_event FROM market_auditevent e
+              WHERE e.subject_type='IngestionRun' AND e.subject_id=NEW.id::text
+                AND e.event_type='market.ingestion_succeeded';
+            SELECT e.* INTO STRICT evidence FROM market_auditevent e
+              WHERE e.subject_type='HistoricalIngestionAttempt'
+                AND e.subject_id=attempt.id::text
+                AND e.event_type IN ('market.replacement_canary_succeeded',
+                                     'market.replacement_acquisition_succeeded');
+            IF manifest.id IS NULL
+               OR (run_event.payload->>'fetched')::bigint
+                  IS DISTINCT FROM NEW.fetched_count
+               OR (run_event.payload->>'stored')::bigint
+                  IS DISTINCT FROM NEW.stored_count
+               OR run_event.payload->>'manifest' IS DISTINCT FROM manifest.sha256
+               OR evidence.payload->>'logical_key' IS DISTINCT FROM chunk.logical_key
+               OR (evidence.payload->>'attempt_number')::integer
+                  IS DISTINCT FROM attempt.attempt_number
+               OR evidence.payload->>'ingestion_manifest_sha256'
+                  IS DISTINCT FROM manifest.sha256
+               OR (evidence.payload->>'stored_candle_count')::bigint
+                  IS DISTINCT FROM NEW.stored_count
+               OR evidence.payload->>'canonical_request_sha256'
+                  IS DISTINCT FROM chunk.canonical_request_sha256
+               OR evidence.payload->>'terminal_event_sha256' IS DISTINCT FROM
+                  market_sha256(evidence.payload - 'schema_version' - 'provider_evidence'
+                                - 'terminal_event_sha256' - 'operational_evidence_sha256')
+               OR evidence.payload->>'operational_evidence_sha256' IS DISTINCT FROM
+                  market_sha256(jsonb_build_array(
+                    evidence.payload->'terminal_event_sha256',
+                    evidence.payload->'provider_evidence',
+                    to_jsonb(attempt.idempotency_key)))
+               OR (evidence.event_type='market.replacement_canary_succeeded'
+                   AND chunk.logical_key<>
+                'e0a19ed9db1707420233af059f7c9f8d84fe87afe1ad59e7ab2e8b195121fd3c')
+               OR (evidence.event_type='market.replacement_acquisition_succeeded'
+                   AND chunk.logical_key=
+                'e0a19ed9db1707420233af059f7c9f8d84fe87afe1ad59e7ab2e8b195121fd3c')
+            THEN RAISE EXCEPTION
+              'replacement acquisition terminal commit requires its audit evidence';
+            END IF;
+          ELSE
+            IF run_rejected<>1 OR run_succeeded<>0
+               OR attempt_failure<>1 OR attempt_success<>0
+            THEN RAISE EXCEPTION
+              'replacement acquisition terminal commit requires its audit evidence';
+            END IF;
+            SELECT e.* INTO STRICT run_event FROM market_auditevent e
+              WHERE e.subject_type='IngestionRun' AND e.subject_id=NEW.id::text
+                AND e.event_type='market.ingestion_rejected';
+            SELECT e.* INTO STRICT evidence FROM market_auditevent e
+              WHERE e.subject_type='HistoricalIngestionAttempt'
+                AND e.subject_id=attempt.id::text
+                AND e.event_type='market.historical_ingestion_failed';
+            IF coalesce(run_event.payload->>'error_code','')=''
+               OR coalesce(evidence.payload->>'error_code','')=''
+               OR evidence.payload->>'logical_chunk_key'
+                  IS DISTINCT FROM chunk.logical_key
+            THEN RAISE EXCEPTION
+              'replacement acquisition terminal commit requires its audit evidence';
+            END IF;
+          END IF;
+          RETURN NULL;
+        END """
+
 # The Gate 7A candle branch without its canary logical-key pin: every
 # replacement candle still requires exact sealed-observation equality
 # and the full strict price predicates for its own chunk.
@@ -900,6 +1011,19 @@ def install_full_acquisition(apps, schema_editor):
         "ON market_auditevent FOR EACH ROW "
         "EXECUTE FUNCTION market_validate_acquisition_audit();",
     )
+    _execute(
+        schema_editor,
+        "CREATE FUNCTION market_enforce_acquisition_audit_completeness() "
+        "RETURNS trigger AS $governed$" + AUDIT_COMPLETENESS_PROSRC + "$governed$ "
+        "LANGUAGE plpgsql;",
+    )
+    _execute(
+        schema_editor,
+        "CREATE CONSTRAINT TRIGGER market_acquisition_audit_complete "
+        "AFTER UPDATE OF status ON market_ingestionrun "
+        "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+        "EXECUTE FUNCTION market_enforce_acquisition_audit_completeness();",
+    )
 
 
 def remove_full_acquisition(apps, schema_editor):
@@ -937,6 +1061,14 @@ def remove_full_acquisition(apps, schema_editor):
         "CREATE OR REPLACE FUNCTION market_governed_candle_reject_mutation() "
         "RETURNS trigger AS $governed$" + gate7a.GOVERNED_CANDLE_GATE7A_PROSRC + "$governed$ "
         "LANGUAGE plpgsql;",
+    )
+    _execute(
+        schema_editor,
+        "DROP TRIGGER market_acquisition_audit_complete ON market_ingestionrun;",
+    )
+    _execute(
+        schema_editor,
+        "DROP FUNCTION market_enforce_acquisition_audit_completeness();",
     )
     _execute(
         schema_editor,
