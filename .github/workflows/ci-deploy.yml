@@ -27,6 +27,9 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: "1"
     services:
       postgres:
         image: postgres:17.6-alpine
@@ -69,9 +72,16 @@ jobs:
           "$RUNNER_TEMP/bin/terraform" fmt -check -recursive infra
 
   deploy:
+    # Production deployment is paused for the duration of the strategy programme.
+    # The guard is a repository variable, not a workflow edit, so resuming needs no
+    # code change: set PRODUCTION_DEPLOYMENTS_ENABLED to 'true' (GitHub compares
+    # strings case-insensitively, so 'True' and 'TRUE' also enable deployment).
+    # Absent or any other value leaves this job skipped. Checks still run in full,
+    # and the manual rollback path below is deliberately not gated.
     if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy')
+      vars.PRODUCTION_DEPLOYMENTS_ENABLED == 'true' &&
+      (github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))
     needs: checks
     runs-on: ubuntu-24.04
     concurrency:
