@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied
 from django.db import DatabaseError, connection, transaction
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from market.historical_acquisition import (
@@ -1411,6 +1411,49 @@ def _registration_hashes(plan):
     )
 
 
+def successor_registration_plan_sha256():
+    """The one successor plan Gate 8D3' admits, by portable governed identity."""
+    from market.provider_observed_outcome import accepted_successor_registration
+
+    return accepted_successor_registration()["plan_sha256"]
+
+
+def successor_registration_profile():
+    from market.provider_observed_outcome import accepted_successor_registration
+
+    return accepted_successor_registration()
+
+
+def _assert_successor_registration_admissible(plan, cross_series_report_sha256):
+    """The successor's own admission checks, mirroring the installed branch.
+
+    The committed Gate 8D3 artifact is verified here through its governed
+    loader: its bytes must hash to the digest pinned in code and its embedded
+    self-hash must verify. That artifact's file digest is the successor's
+    cross-series report, and migration 0024 pins the same literal, so the
+    database does not depend on this check.
+    """
+    from market.provider_observed_outcome import accepted_successor_registration
+
+    accepted = accepted_successor_registration()
+    if (
+        plan.identity != accepted["plan_identity"]
+        or plan.version != accepted["plan_version"]
+        or plan.canonical_request_manifest_sha256 != accepted["request_manifest_sha256"]
+        or plan.declared_chunk_count != accepted["chunk_count"]
+        or canonical_hash(plan.payload) != plan.sha256
+    ):
+        raise DatasetQualityError("only the accepted successor discovery plan may be approved")
+    if HistoricalDiscoverySupersession.objects.filter(
+        Q(superseded_plan=plan) | Q(replacement_plan=plan)
+    ).exists():
+        raise DatasetQualityError("gate 8D3-prime requires an unsuperseded successor plan")
+    if cross_series_report_sha256 != accepted["outcome_artifact_sha256"]:
+        raise DatasetQualityError(
+            "gate 8D3-prime approval requires the accepted successor outcome artifact hash"
+        )
+
+
 @transaction.atomic
 def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report_sha256):
     plan = HistoricalDiscoveryPlan.objects.select_for_update().get(sha256=plan_sha256)
@@ -1429,33 +1472,42 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
         raise DatasetQualityError("discovery plan is already sealed")
     if HistoricalDiscoverySupersession.objects.filter(superseded_plan=plan).exists():
         raise DatasetQualityError("superseded discovery plans cannot be approved")
-    if (
-        plan.sha256 != DISCOVERY_V2_PLAN_SHA256
-        or plan.identity != DISCOVERY_V2_PLAN_IDENTITY
-        or plan.version != DISCOVERY_V2_VERSION
-        or plan.canonical_request_manifest_sha256 != DISCOVERY_V2_MANIFEST_SHA256
-        or plan.declared_chunk_count != GATE5_ACCEPTED_INVENTORY_COUNT
-        or canonical_hash(plan.payload) != DISCOVERY_V2_PLAN_SHA256
-    ):
-        raise DatasetQualityError("only the approved replacement discovery plan may be approved")
-    if (
-        HistoricalDiscoverySupersession.objects.filter(
-            replacement_plan=plan,
-            superseded_plan_sha256=DISCOVERY_V1_PLAN_SHA256,
-            replacement_plan_sha256=DISCOVERY_V2_PLAN_SHA256,
-        ).count()
-        != 1
-    ):
-        raise DatasetQualityError("gate5 supersession lineage does not reconstruct")
-    _verify_canary_success_lineage(
-        plan, DatasetQualityError("gate5 canary lineage does not reconstruct")
-    )
+    successor = plan.sha256 == successor_registration_plan_sha256()
+    if not successor:
+        if (
+            plan.sha256 != DISCOVERY_V2_PLAN_SHA256
+            or plan.identity != DISCOVERY_V2_PLAN_IDENTITY
+            or plan.version != DISCOVERY_V2_VERSION
+            or plan.canonical_request_manifest_sha256 != DISCOVERY_V2_MANIFEST_SHA256
+            or plan.declared_chunk_count != GATE5_ACCEPTED_INVENTORY_COUNT
+            or canonical_hash(plan.payload) != DISCOVERY_V2_PLAN_SHA256
+        ):
+            raise DatasetQualityError(
+                "only the approved replacement discovery plan may be approved"
+            )
+        if (
+            HistoricalDiscoverySupersession.objects.filter(
+                replacement_plan=plan,
+                superseded_plan_sha256=DISCOVERY_V1_PLAN_SHA256,
+                replacement_plan_sha256=DISCOVERY_V2_PLAN_SHA256,
+            ).count()
+            != 1
+        ):
+            raise DatasetQualityError("gate5 supersession lineage does not reconstruct")
+        _verify_canary_success_lineage(
+            plan, DatasetQualityError("gate5 canary lineage does not reconstruct")
+        )
     approver = get_user_model().objects.select_for_update().get(pk=approver_id)
     if not approver.is_active or not approver.has_perm("market.approve_historical_discovery"):
         raise PermissionDenied("active governed discovery approval permission is required")
     if not re.fullmatch(r"[0-9a-f]{64}", cross_series_report_sha256):
         raise ValueError("cross-series report SHA-256 is invalid")
-    if cross_series_report_sha256 != DISCOVERY_COMPLETION_SUMMARY_SHA256:
+    if successor:
+        # The accepted Gate 8D3 outcome artifact is the successor's cross-series
+        # report. Its bytes, governed file pin and embedded self-hash are checked
+        # here; the database independently pins the same digest as a literal.
+        _assert_successor_registration_admissible(plan, cross_series_report_sha256)
+    elif cross_series_report_sha256 != DISCOVERY_COMPLETION_SUMMARY_SHA256:
         raise DatasetQualityError(
             "gate5 approval requires the committed cross-series completion-summary hash"
         )
@@ -1463,7 +1515,20 @@ def approve_and_register_discovery(plan_sha256, approver_id, cross_series_report
     observation_count = HistoricalTimestampObservation.objects.filter(
         inventory__chunk__plan=plan
     ).count()
-    if (
+    if successor:
+        expected = successor_registration_profile()
+        if (
+            chunk_hash != expected["request_manifest_sha256"]
+            or semantic_hash != expected["global_semantic_inventory_sha256"]
+            or operational_hash != expected["accepted_operational_evidence_set_sha256"]
+            or HistoricalTimestampInventory.objects.filter(chunk__plan=plan).count()
+            != expected["chunk_count"]
+            or observation_count != expected["observation_count"]
+        ):
+            raise DatasetQualityError(
+                "gate 8D3-prime successor registration state does not reconstruct"
+            )
+    elif (
         chunk_hash != DISCOVERY_V2_MANIFEST_SHA256
         or semantic_hash != GLOBAL_SEMANTIC_INVENTORY_SHA256
         or operational_hash != ACCEPTED_OPERATIONAL_EVIDENCE_SET_SHA256

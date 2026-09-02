@@ -14,6 +14,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
 from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
@@ -27,8 +28,10 @@ from market.historical_discovery import (
     parse_timestamp,
 )
 from market.models import (
+    HistoricalDiscoveryApproval,
     HistoricalDiscoveryAttempt,
     HistoricalDiscoveryPlan,
+    HistoricalDiscoveryRegistration,
     HistoricalTimestampInventory,
     HistoricalTimestampObservation,
     IngestionRun,
@@ -600,11 +603,23 @@ class Gate8bPrimeStagedExecutionTests(TransactionTestCase):
         for chunk in self.first_h1:
             record_attempt(chunk, status=IngestionRun.Status.SUCCEEDED)
         approver = get_user_model().objects.create_user("gate8b-prime-approver")
+        # The approver is deliberately given the real governed permission. An
+        # unauthorized user would stop at PermissionDenied, and authentication
+        # would then mask the refusal this gate actually exists to prove.
+        approver.user_permissions.add(
+            Permission.objects.get(codename="approve_historical_discovery")
+        )
+        approver = get_user_model().objects.get(pk=approver.pk)
+        self.assertTrue(approver.has_perm("market.approve_historical_discovery"))
         with self.assertRaisesMessage(
-            DatasetQualityError, "only the approved replacement discovery plan may be approved"
+            DatasetQualityError,
+            "gate 8D3-prime approval requires the accepted successor outcome artifact hash",
         ):
             approve_and_register_discovery(self.plan.sha256, approver.pk, "0" * 64)
-        self.assertIsNone(self.plan.__class__.objects.get(pk=self.plan.pk).sealed_at)
+        reloaded = self.plan.__class__.objects.get(pk=self.plan.pk)
+        self.assertIsNone(reloaded.sealed_at)
+        self.assertEqual(HistoricalDiscoveryApproval.objects.filter(plan=reloaded).count(), 0)
+        self.assertEqual(HistoricalDiscoveryRegistration.objects.filter(plan=reloaded).count(), 0)
         with self.assertRaises(Exception), transaction.atomic(), connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE market_historicaldiscoveryplan SET sealed_at=now() WHERE id=%s",
