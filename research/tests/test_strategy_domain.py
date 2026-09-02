@@ -20,6 +20,7 @@ from research.strategy import (
     confirm_sweep,
     daily_bias,
     daily_pivots,
+    daily_swing_superseded_at,
     detect_failed_sweep,
     ema,
     entry_eligibility,
@@ -218,6 +219,44 @@ class LevelTests(TestCase):
         )
         self.assertEqual(evaluate_level(expiring, [crossing], context()).state, Lifecycle.EXPIRED)
 
+    def test_new_daily_pivot_supersedes_original_and_derived_same_type_only(self):
+        def swing(key, role, source_at, activated_at):
+            return make_level(
+                key,
+                "CONFIRMED_DAILY_SWING",
+                role,
+                D("10"),
+                D("2"),
+                activated_at,
+                source_at,
+                D("0.01"),
+                context(),
+            )
+
+        original = swing("daily-swing:high:old", Role.RESISTANCE, START, START)
+        derived = swing(
+            "daily-swing:high:old:flip:later",
+            Role.SUPPORT,
+            START,
+            START + timedelta(days=1),
+        )
+        opposite = swing(
+            "daily-swing:low:other",
+            Role.SUPPORT,
+            START,
+            START + timedelta(days=1),
+        )
+        newer_at = START + timedelta(days=3)
+        newer = swing("daily-swing:high:new", Role.RESISTANCE, START + timedelta(days=2), newer_at)
+        levels = (original, derived, opposite, newer)
+        self.assertEqual(daily_swing_superseded_at(original, levels), newer_at)
+        self.assertEqual(daily_swing_superseded_at(derived, levels), newer_at)
+        self.assertIsNone(daily_swing_superseded_at(opposite, levels))
+        self.assertEqual(
+            evaluate_level(original, (), context(newer_at), superseded_at=newer_at).state,
+            Lifecycle.SUPERSEDED,
+        )
+
 
 class SetupTests(TestCase):
     def test_spread_only_movement_cannot_sweep_and_overlap_is_one_event(self):
@@ -257,7 +296,14 @@ class SetupTests(TestCase):
     def test_three_h1_window_is_exact_and_frozen_threshold_is_used(self):
         event = SweepEvent(START, Side.LONG, ("a",), D("11"), D("9"), Bias.BULLISH, D("8"))
         bars = [candle(i, "10.9", high="20", low="9", hours=1) for i in range(4)]
-        result = confirm_sweep(event, bars, [], context(), attributed_level_inactive_at={"a": None})
+        result = confirm_sweep(
+            event,
+            bars,
+            [],
+            context(),
+            attributed_level_inactive_at={"a": None},
+            sealed_h1_inventory=[bar.opened_at for bar in bars],
+        )
         self.assertEqual((result.state, result.at), ("EXPIRED", bars[2].completed_at))
 
     def test_sweep_bias_is_frozen_and_daily_invalidation_precedes_confirmation(self):
@@ -271,6 +317,7 @@ class SetupTests(TestCase):
             [invalidating_daily],
             context(),
             attributed_level_inactive_at={"a": None},
+            sealed_h1_inventory=[confirmation.opened_at],
         )
         self.assertEqual(result.state, "INVALIDATED")
 
@@ -284,6 +331,7 @@ class SetupTests(TestCase):
             [],
             context(),
             attributed_level_inactive_at={"a": None},
+            sealed_h1_inventory=[confirmation.opened_at],
             supporting_swings=[new_swing],
         )
         self.assertEqual((result.state, result.supporting_swing), ("CONFIRMED", D("8.5")))
@@ -297,6 +345,7 @@ class SetupTests(TestCase):
             [],
             context(),
             attributed_level_inactive_at={"a": START + timedelta(hours=1), "b": None},
+            sealed_h1_inventory=[confirmation.opened_at],
         )
         inactive = confirm_sweep(
             event,
@@ -307,6 +356,7 @@ class SetupTests(TestCase):
                 "a": START + timedelta(hours=1),
                 "b": START + timedelta(hours=1),
             },
+            sealed_h1_inventory=[confirmation.opened_at],
         )
         self.assertEqual(still_active.state, "CONFIRMED")
         self.assertEqual(inactive.state, "INVALIDATED")
@@ -320,6 +370,7 @@ class SetupTests(TestCase):
             [],
             context(),
             attributed_level_inactive_at={"a": None},
+            sealed_h1_inventory=[next_bar.opened_at],
         )
         gap = confirm_sweep(
             event,
@@ -327,6 +378,7 @@ class SetupTests(TestCase):
             [],
             context(),
             attributed_level_inactive_at={"a": None, "b": None},
+            sealed_h1_inventory=[START],
         )
         self.assertEqual(missing_level.state, "CANCELLED_DATA_QUALITY")
         self.assertEqual(gap.state, "CANCELLED_DATA_QUALITY")
@@ -339,6 +391,7 @@ class SetupTests(TestCase):
             [],
             context(START + timedelta(hours=1)),
             attributed_level_inactive_at={"a": None},
+            sealed_h1_inventory=[START],
         )
         self.assertEqual(
             (result.state, result.at),

@@ -453,6 +453,35 @@ def evaluate_level(
     return LevelState(Lifecycle.ACTIVE)
 
 
+def daily_swing_superseded_at(level: LevelSpec, levels: Iterable[LevelSpec]) -> datetime | None:
+    """Return the deterministic activation of the next same-type daily pivot.
+
+    A flipped role retains ``source_at`` and the original daily-swing key, so
+    this applies equally to the original level and every still-active role
+    derived from it. Unrelated families and the opposite pivot type do not
+    participate.
+    """
+    if level.family != "CONFIRMED_DAILY_SWING":
+        return None
+    original_key = level.key.split(":flip:", 1)[0]
+    parts = original_key.split(":", 2)
+    if len(parts) != 3 or parts[0] != "daily-swing" or parts[1] not in {"high", "low"}:
+        raise ValueError("daily-swing level lacks a governed original key")
+    kind = parts[1]
+    candidates = []
+    for candidate in levels:
+        if candidate.family != "CONFIRMED_DAILY_SWING" or candidate.source_at <= level.source_at:
+            continue
+        candidate_parts = candidate.key.split(":flip:", 1)[0].split(":", 2)
+        if (
+            len(candidate_parts) == 3
+            and candidate_parts[0] == "daily-swing"
+            and candidate_parts[1] == kind
+        ):
+            candidates.append((candidate.activated_at, candidate.key))
+    return min(candidates)[0] if candidates else None
+
+
 def flip_level(
     source: LevelSpec,
     activating_candle: Candle,
@@ -593,6 +622,7 @@ def confirm_sweep(
     context: Context,
     *,
     attributed_level_inactive_at: Mapping[str, datetime | None],
+    sealed_h1_inventory: Iterable[datetime],
     supporting_swings: Iterable[Pivot] = (),
 ) -> Confirmation:
     if set(attributed_level_inactive_at) != set(event.level_keys):
@@ -603,19 +633,23 @@ def confirm_sweep(
             available_h1.setdefault(candle.opened_at, []).append(candle)
     following = []
     missing_h1_at = None
-    previous_completion = event.at
-    for _ in range(3):
-        expected_open = _next_registered_h1_open(previous_completion)
+    successor_opens = tuple(
+        timestamp for timestamp in sorted(set(sealed_h1_inventory)) if timestamp >= event.at
+    )[:3]
+    for expected_open in successor_opens:
         expected_completion = expected_open + timedelta(hours=1)
         if expected_completion > context.as_of:
             break
         matches = available_h1.get(expected_open, [])
-        if len(matches) != 1 or not _is_registered_h1_successor(previous_completion, matches[0]):
+        if (
+            len(matches) != 1
+            or matches[0].opened_at != expected_open
+            or matches[0].completed_at != expected_completion
+        ):
             missing_h1_at = expected_completion
             break
         candle = matches[0]
         following.append(candle)
-        previous_completion = candle.completed_at
     daily_after_sweep = [
         candle for candle in completed_candles(daily, context) if candle.completed_at > event.at
     ]
@@ -692,29 +726,6 @@ def confirm_sweep(
     if len(following) == 3:
         return Confirmation("EXPIRED", following[-1].completed_at)
     return Confirmation("TRIGGER_PENDING")
-
-
-def _is_registered_h1_successor(previous_completion: datetime, candle: Candle) -> bool:
-    if candle.completed_at - candle.opened_at != timedelta(hours=1):
-        return False
-    if candle.opened_at == previous_completion:
-        return True
-    previous_local = previous_completion.astimezone(ZoneInfo("America/New_York"))
-    opened_local = candle.opened_at.astimezone(ZoneInfo("America/New_York"))
-    return (
-        previous_local.weekday() == 4
-        and previous_local.time() == time(17)
-        and opened_local.weekday() == 6
-        and opened_local.time() == time(17)
-        and candle.opened_at - previous_completion <= timedelta(days=3)
-    )
-
-
-def _next_registered_h1_open(previous_completion: datetime) -> datetime:
-    local = previous_completion.astimezone(ZoneInfo("America/New_York"))
-    if local.weekday() == 4 and local.time() == time(17):
-        return (local + timedelta(days=2)).replace(hour=17).astimezone(previous_completion.tzinfo)
-    return previous_completion
 
 
 def in_entry_session(timestamp) -> bool:

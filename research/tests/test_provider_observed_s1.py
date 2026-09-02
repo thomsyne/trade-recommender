@@ -354,7 +354,7 @@ class ProviderObservedRunTests(Gate1BFixtureTestCase):
             )
             self.assertEqual(rows.count(), 2, code)
 
-    def test_fall_back_cad_conversion_accepts_the_adjacent_sealed_candle(self):
+    def test_cad_conversion_uses_latest_sealed_completion_strictly_before_entry(self):
         from research.failed_break_detector import _cad_conversion, _latest_pre_entry_close
 
         fall_a, fall_b = FALL_BACK_HOURS
@@ -362,17 +362,21 @@ class ProviderObservedRunTests(Gate1BFixtureTestCase):
         v2_close = _latest_pre_entry_close(self.dataset, "USD_CAD", entry_timestamp, self.contract)
         self.assertIsNotNone(v2_close)
         rate, effective_at = v2_close
-        self.assertEqual(effective_at, fall_b)  # 05:00Z candle completes 06:00Z
-        # The legacy rule wrongly rejects the same sealed candle as
-        # incomplete for this entry (its wall-clock completion is 07:00Z).
+        self.assertLess(effective_at, entry_timestamp)
+        qualifying = [
+            timestamp
+            for timestamp in inventory_timestamps(self.contract, "USD_CAD", "H1")
+            if candle_completion(timestamp, "H1", self.contract) < entry_timestamp
+        ]
+        self.assertEqual(effective_at, candle_completion(qualifying[-1], "H1", self.contract))
         self.assertIsNone(_latest_pre_entry_close(self.dataset, "USD_CAD", entry_timestamp))
         usd_quoted = self.plan.chunks.filter(instrument__code="EUR_USD").first().instrument
         conversion_rate, conversion_at, conversion_identity = _cad_conversion(
             self.dataset, usd_quoted, entry_timestamp, self.contract
         )
         self.assertIsNotNone(conversion_rate)
-        self.assertEqual(conversion_at, fall_b)
-        self.assertEqual(conversion_identity, f"USD_CAD@{fall_b.isoformat()}")
+        self.assertEqual(conversion_at, effective_at)
+        self.assertTrue(conversion_identity.startswith("failed-break-cad-sealed-h1-midpoint-v1:"))
 
     def test_v2_completion_rule_is_one_to_one_across_dst(self):
         spring_a, spring_b = SPRING_FORWARD_HOURS
