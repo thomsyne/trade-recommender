@@ -164,10 +164,54 @@ def _replacement_chunk_rows(discovery_plan):
     return rows
 
 
-def _build_replacement_payloads(
-    *, contract_sha256, global_semantic_inventory_sha256, strategy, chunk_rows
+def acquisition_identities(
+    *,
+    acquisition_contract,
+    acquisition_version,
+    data_identity,
+    discovery_plan_sha256,
+    dataset_name,
+    dataset_version,
+    dataset_description,
 ):
-    """Pure deterministic construction from portable inputs only."""
+    """The portable identity bundle a provider-observed acquisition generation binds.
+
+    Every value is a governed identity or an already accepted evidence digest; no
+    operational row id, timestamp or provider result may enter this bundle.
+    """
+    return {
+        "acquisition_contract": acquisition_contract,
+        "acquisition_version": acquisition_version,
+        "data_identity": data_identity,
+        "discovery_plan_sha256": discovery_plan_sha256,
+        "dataset_name": dataset_name,
+        "dataset_version": dataset_version,
+        "dataset_description": dataset_description,
+    }
+
+
+REPLACEMENT_IDENTITIES = acquisition_identities(
+    acquisition_contract=REPLACEMENT_ACQUISITION_CONTRACT,
+    acquisition_version=REPLACEMENT_ACQUISITION_VERSION,
+    data_identity=REPLACEMENT_DATA_IDENTITY,
+    discovery_plan_sha256=DISCOVERY_V2_PLAN_SHA256,
+    dataset_name=REPLACEMENT_DATASET_NAME,
+    dataset_version=REPLACEMENT_DATASET_VERSION,
+    dataset_description=REPLACEMENT_DATASET_DESCRIPTION,
+)
+
+
+def _build_replacement_payloads(
+    *, contract_sha256, global_semantic_inventory_sha256, strategy, chunk_rows, identities=None
+):
+    """Pure deterministic construction from portable inputs only.
+
+    `identities` defaults to the predecessor v2 bundle, so the v2 plan, dataset
+    manifest and logical keys this function produced before parameterization are
+    unchanged byte-for-byte. Gate 8E passes the successor bundle instead; nothing
+    else about the construction differs between generations.
+    """
+    identities = REPLACEMENT_IDENTITIES if identities is None else identities
     granularity_bounds = {}
     for row in chunk_rows:
         bounds = granularity_bounds.setdefault(
@@ -179,23 +223,23 @@ def _build_replacement_payloads(
     instruments = sorted({row["instrument"] for row in chunk_rows})
     granularities = sorted(granularity_bounds)
     plan_payload = {
-        "acquisition_contract": REPLACEMENT_ACQUISITION_CONTRACT,
-        "acquisition_version": REPLACEMENT_ACQUISITION_VERSION,
+        "acquisition_contract": identities["acquisition_contract"],
+        "acquisition_version": identities["acquisition_version"],
         "source": {"name": "OANDA v20", "governed_identity": SOURCE_IDENTITY},
         "strategy": {
             "definition_key": strategy["definition_key"],
             "version": strategy["version"],
             "content_hash": strategy["content_hash"],
         },
-        "data_identity": REPLACEMENT_DATA_IDENTITY,
+        "data_identity": identities["data_identity"],
         "data_contract_sha256": contract_sha256,
-        "discovery_plan_sha256": DISCOVERY_V2_PLAN_SHA256,
+        "discovery_plan_sha256": identities["discovery_plan_sha256"],
         "phase1_spec_hash": PHASE1_SPEC_SHA256,
         "phase1_manifest_hash": PHASE1_MANIFEST_SHA256,
         "dataset": {
-            "name": REPLACEMENT_DATASET_NAME,
-            "version": REPLACEMENT_DATASET_VERSION,
-            "description": REPLACEMENT_DATASET_DESCRIPTION,
+            "name": identities["dataset_name"],
+            "version": identities["dataset_version"],
+            "description": identities["dataset_description"],
         },
         "instruments": instruments,
         "granularities": granularities,
@@ -228,7 +272,7 @@ def _build_replacement_payloads(
         "instruments": instruments,
         "granularities": granularities,
         "alignment": ALIGNMENT,
-        "data_identity": REPLACEMENT_DATA_IDENTITY,
+        "data_identity": identities["data_identity"],
         "historical_data_contract_sha256": contract_sha256,
         "global_semantic_inventory_sha256": global_semantic_inventory_sha256,
     }
