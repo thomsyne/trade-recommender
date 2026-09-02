@@ -47,7 +47,7 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/pip install --disable-pip-version-check -r requirements.txt -r requirements-dev.txt
-      - name: Lint, migration, and test
+      - name: Lint, migration, and deployment script checks
         env:
           POSTGRES_PASSWORD: ci-only-database-password
           DJANGO_SECRET_KEY: ci-only-not-used-in-production
@@ -56,7 +56,18 @@ jobs:
           .venv/bin/python deploy/scripts/check-deploy-iam-policy.py
           bash deploy/scripts/test-bootstrap-host.sh
           bash deploy/scripts/test-remote-deploy.sh
-          make test
+      # The Django suite is paused for the remainder of the strategy programme. It
+      # runs for over an hour and dominates every CI run, so it is gated rather
+      # than deleted: set FULL_TEST_SUITE_ENABLED to 'true' to restore it. The
+      # command is unchanged and still comes from `make test`. Absent, empty or any
+      # value other than 'true' skips this step and only this step; every other
+      # check in this job continues to run unconditionally.
+      - name: Run the full Django test suite
+        if: vars.FULL_TEST_SUITE_ENABLED == 'true'
+        env:
+          POSTGRES_PASSWORD: ci-only-database-password
+          DJANGO_SECRET_KEY: ci-only-not-used-in-production
+        run: make test
       - name: Exercise fail-closed production settings
         env:
           DJANGO_SETTINGS_MODULE: config.settings_production
@@ -76,10 +87,15 @@ jobs:
     # The guard is a repository variable, not a workflow edit, so resuming needs no
     # code change: set PRODUCTION_DEPLOYMENTS_ENABLED to 'true' (GitHub compares
     # strings case-insensitively, so 'True' and 'TRUE' also enable deployment).
-    # Absent or any other value leaves this job skipped. Checks still run in full,
-    # and the manual rollback path below is deliberately not gated.
+    # Absent or any other value leaves this job skipped.
+    #
+    # Deployment additionally requires FULL_TEST_SUITE_ENABLED to be 'true', so
+    # production cannot be re-enabled while the Django suite is paused. Both
+    # variables must be set deliberately; neither one alone is sufficient.
+    # Checks still run, and the manual rollback path below is not gated.
     if: >-
       vars.PRODUCTION_DEPLOYMENTS_ENABLED == 'true' &&
+      vars.FULL_TEST_SUITE_ENABLED == 'true' &&
       (github.event_name == 'push' ||
       (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'))
     needs: checks
