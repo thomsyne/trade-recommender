@@ -73,7 +73,10 @@ class Gate8EDiscoveryVersionSemanticsTests(SimpleTestCase):
 class Gate8ESuccessorCannotMasqueradeTests(SimpleTestCase):
     def test_successor_identity_and_hashes_differ_from_the_predecessor(self):
         self.assertNotEqual(SUCCESSOR_DATA_IDENTITY, REPLACEMENT_DATA_IDENTITY)
-        self.assertNotEqual(SUCCESSOR_CONTRACT_SHA256, canonical_hash(build_data_contract_payload(PREDECESSOR_SEMANTIC)))
+        self.assertNotEqual(
+            SUCCESSOR_CONTRACT_SHA256,
+            canonical_hash(build_data_contract_payload(PREDECESSOR_SEMANTIC)),
+        )
         identities = successor_identities()
         self.assertNotEqual(identities["data_identity"], REPLACEMENT_IDENTITIES["data_identity"])
         self.assertNotEqual(
@@ -100,9 +103,9 @@ class Gate8ESuccessorCannotMasqueradeTests(SimpleTestCase):
         identities = successor_identities()
         self.assertEqual(identities["discovery_plan_sha256"], accepted["plan_sha256"])
         self.assertEqual(
-            build_successor_data_contract_payload(
-                accepted["global_semantic_inventory_sha256"]
-            )["global_semantic_inventory_sha256"],
+            build_successor_data_contract_payload(accepted["global_semantic_inventory_sha256"])[
+                "global_semantic_inventory_sha256"
+            ],
             accepted["global_semantic_inventory_sha256"],
         )
         self.assertEqual(
@@ -122,9 +125,7 @@ class Gate8EAlteredEvidenceRefusedTests(SimpleTestCase):
         ):
             with self.subTest(altered=altered):
                 self.assertNotEqual(
-                    successor_data_contract_semantic_hash(
-                        global_semantic_inventory_sha256=altered
-                    ),
+                    successor_data_contract_semantic_hash(global_semantic_inventory_sha256=altered),
                     SUCCESSOR_CONTRACT_SHA256,
                 )
 
@@ -144,7 +145,15 @@ class Gate8EPortablePayloadPrivacyTests(SimpleTestCase):
     def test_no_username_identifier_or_operational_value_enters_the_contract_payload(self):
         payload = build_successor_data_contract_payload(ACCEPTED_SEMANTIC)
         blob = canonical_hash.__module__ and str(payload)
-        for forbidden in ("approved_by", "username", "user", "password", "token", "http", "/Users/"):
+        for forbidden in (
+            "approved_by",
+            "username",
+            "user",
+            "password",
+            "token",
+            "http",
+            "/Users/",
+        ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, blob)
         for value in payload.values():
@@ -156,9 +165,7 @@ class Gate8EShapeConstantsTests(SimpleTestCase):
         self.assertEqual(SUCCESSOR_CHUNK_COUNT, 132)
         self.assertEqual(SUCCESSOR_GRANULARITY_CHUNKS, {"D": 6, "H1": 120, "W": 6})
         self.assertEqual(SUCCESSOR_INSTRUMENT_CHUNKS, {"D": 1, "H1": 20, "W": 1})
-        self.assertEqual(
-            sum(SUCCESSOR_INSTRUMENT_CHUNKS.values()) * 6, SUCCESSOR_CHUNK_COUNT
-        )
+        self.assertEqual(sum(SUCCESSOR_INSTRUMENT_CHUNKS.values()) * 6, SUCCESSOR_CHUNK_COUNT)
         self.assertEqual(SUCCESSOR_ACQUISITION_VERSION, "phase-2b1r-v2")
 
     def test_the_acquisition_canary_is_the_lowest_ordinal_and_leaves_131_behind(self):
