@@ -8,6 +8,11 @@ from market.historical_acquisition import (
     replacement_registration_contract,
 )
 from market.models import DatasetRegistration, DatasetVersion, HistoricalDatasetPlan
+from market.provider_observed_gate8i import (
+    is_successor_registration,
+    load_committed_gate8i_acceptance,
+    verify_successor_registration_readiness,
+)
 from market.provider_observed_registration import (
     load_committed_registration_authorization,
     verify_registration_readiness,
@@ -19,7 +24,7 @@ class Command(BaseCommand):
     help = (
         "Verify and immutably register one completed failed-break historical dataset."
         " A provider-observed replacement dataset additionally requires the committed"
-        " Gate 7C registration authorization and an explicit --execute."
+        " registration authorization for its exact identity and an explicit --execute."
     )
 
     def add_arguments(self, parser):
@@ -83,11 +88,22 @@ class Command(BaseCommand):
 
     def handle_provider_observed(self, dataset, plan, options):
         try:
-            authorization = load_committed_registration_authorization()
+            successor = is_successor_registration(dataset, plan)
+            authorization = (
+                load_committed_gate8i_acceptance()
+                if successor
+                else load_committed_registration_authorization()
+            )
         except (ValueError, OSError) as error:
             raise CommandError(str(error)) from error
+        except DatasetQualityError as error:
+            raise CommandError(str(error)) from error
         try:
-            readiness = verify_registration_readiness(dataset, plan, authorization=authorization)
+            readiness = (
+                verify_successor_registration_readiness(dataset, plan, authorization=authorization)
+                if successor
+                else verify_registration_readiness(dataset, plan, authorization=authorization)
+            )
         except DatasetQualityError as error:
             raise CommandError(str(error)) from error
 
