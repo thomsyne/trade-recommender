@@ -822,8 +822,11 @@ SUCCESSOR_SEAL_PROSRC = r"""
             JOIN market_historicaldiscoverychunk c ON c.id=i.chunk_id
             WHERE c.plan_id=plan_key;
           -- Gate 8D3': the successor's accepted seal. The cross-series report is
-          -- the accepted Gate 8D3 outcome artifact, so this predicate is the
-          -- database actually comparing that artifact's file digest.
+          -- the accepted Gate 8D3 outcome artifact. This predicate compares the
+          -- registration row's cross_series_report_sha256 with an exact reviewed
+          -- literal whose value equals that artifact's file digest. PostgreSQL
+          -- does not read, hash or otherwise verify the artifact file itself;
+          -- the committed bytes are checked in Python by the governed loader.
           IF plan_row.sha256=
              'e35d669efa860dd44e5fc145a65aaeabcd0d8745df5718507fa2b1a38abb3f88' THEN
             IF registration_row.cross_series_report_sha256<>
