@@ -790,7 +790,7 @@ class StrategyPersistenceTests(TestCase):
                 execution_identity=self.strategy.execution_identity,
             )
 
-    def test_friday_confirmation_derives_sunday_new_york_entry_even_across_dst(self):
+    def test_friday_confirmation_uses_the_next_sealed_inventory_member(self):
         friday = datetime(2026, 3, 6, 22, tzinfo=UTC)
         setup = SetupEvent.objects.create(
             instrument=self.instrument,
@@ -816,22 +816,11 @@ class StrategyPersistenceTests(TestCase):
             execution_identity=self.strategy.execution_identity,
         )
         self.assertEqual(
-            derive_expected_entry_timestamp(setup),
-            datetime(2026, 3, 8, 21, tzinfo=UTC),
-        )
-        if connection.vendor != "postgresql":
-            return
-        SetupTransition.objects.create(
-            setup=setup,
-            book_identity="dst-correct",
-            from_state=SetupTransition.State.CONFIRMED,
-            to_state=SetupTransition.State.NO_TARGET,
-            effective_at=datetime(2026, 3, 8, 21, tzinfo=UTC),
-            reason="NO_ACTIVE_OPPOSING_LEVEL",
-            evidence_hash="4" * 64,
-            strategy_version=self.strategy,
-            dataset_version=self.dataset,
-            execution_identity=self.strategy.execution_identity,
+            derive_expected_entry_timestamp(
+                setup,
+                sealed_h1_inventory=(datetime(2026, 3, 9, 2, tzinfo=UTC),),
+            ),
+            datetime(2026, 3, 9, 2, tzinfo=UTC),
         )
         with self.assertRaises(DatabaseError), transaction.atomic():
             SetupTransition.objects.create(

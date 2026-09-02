@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from django.test import TestCase
 
-from market.models import DatasetVersion, Instrument, SourceRegistry
+from market.models import Candle, DatasetVersion, Instrument, SourceRegistry
 from market.oanda import CandleData
 from market.quality import expected_candle_timestamps
 from market.services import RequiredCandleRange, store_ingestion
@@ -21,6 +21,7 @@ from research.models import (
     StrategyDefinition,
     StrategyVersion,
 )
+from research.pre_s1_governance import PRE_S1_GOVERNANCE, PRE_S1_GOVERNANCE_SHA256
 from research.signal_count import (
     FROZEN_INSTRUMENTS,
     PARTITION_BOUNDARY_CENSOR_RULE,
@@ -204,6 +205,8 @@ class BoundedS1DetectorTests(TestCase):
         }
         if censor_rule is not None:
             configuration["partition_boundary_censor_rule"] = censor_rule
+            configuration["pre_s1_governance"] = PRE_S1_GOVERNANCE
+            configuration["pre_s1_governance_sha256"] = PRE_S1_GOVERNANCE_SHA256
         configuration.update(
             {
                 "s0_job_id": 1,
@@ -216,6 +219,9 @@ class BoundedS1DetectorTests(TestCase):
             "expected_analysis_sha256": stable_hash(expected),
             "observed_analysis_count": len(observed),
             "observed_analysis_sha256": stable_hash(observed),
+            "data_incomplete_count": 0,
+            "data_quality_cancellation_count": 0,
+            "complete": True,
             "partition_boundary_censored": list(censored_evidence),
             "partition_boundary_censored_sha256": stable_hash(list(censored_evidence)),
         }
@@ -247,7 +253,21 @@ class BoundedS1DetectorTests(TestCase):
             attribution_keys=list(attribution_keys),
             evidence_hash="6" * 64,
         )
-        return setup, partition_boundary_censorship(setup_id=setup.pk, sweep_timestamp=sweep_at)
+        inventory = tuple(
+            Candle.objects.filter(
+                dataset_version=self.dataset,
+                instrument=self.instruments["EUR_USD"],
+                granularity="H1",
+            )
+            .order_by("timestamp")
+            .values_list("timestamp", flat=True)
+        )
+        return setup, partition_boundary_censorship(
+            setup_id=setup.pk,
+            sweep_timestamp=sweep_at,
+            sealed_h1_inventory=inventory,
+            contract=object(),
+        )
 
     def test_zero_or_missing_analysis_cannot_verify_as_complete(self):
         expected = expected_analysis_keys(self.ranges)
@@ -259,6 +279,8 @@ class BoundedS1DetectorTests(TestCase):
             "strategy_content_hash": self.strategy.content_hash,
             "detector_version": self.strategy.detector_version,
             "partition_boundary_censor_rule": PARTITION_BOUNDARY_CENSOR_RULE,
+            "pre_s1_governance": PRE_S1_GOVERNANCE,
+            "pre_s1_governance_sha256": PRE_S1_GOVERNANCE_SHA256,
             "s0_job_id": 1,
             "s0_report_sha256": self.s0_output.report_sha256,
             "as_of": self.as_of.isoformat(),
@@ -268,6 +290,9 @@ class BoundedS1DetectorTests(TestCase):
             "expected_analysis_sha256": stable_hash(expected),
             "observed_analysis_count": 0,
             "observed_analysis_sha256": stable_hash(()),
+            "data_incomplete_count": 0,
+            "data_quality_cancellation_count": 0,
+            "complete": True,
             "partition_boundary_censored": [],
             "partition_boundary_censored_sha256": stable_hash([]),
         }
@@ -412,6 +437,10 @@ class BoundedS1DetectorTests(TestCase):
                 return_value=(self.ranges, self.s0_output),
             ),
             patch("research.signal_count.assert_dataset_window_usable"),
+            patch(
+                "research.signal_count._maximum_horizon_end",
+                return_value=datetime(2018, 12, 31, tzinfo=UTC),
+            ),
         ):
             output = run_s1(
                 dataset_id=self.dataset.pk,
@@ -543,6 +572,10 @@ class BoundedS1DetectorTests(TestCase):
                 return_value=(self.ranges, self.s0_output),
             ),
             patch("research.signal_count.assert_dataset_window_usable"),
+            patch(
+                "research.signal_count._maximum_horizon_end",
+                return_value=datetime(2018, 12, 31, tzinfo=UTC),
+            ),
         ):
             output = run_s1(
                 dataset_id=self.dataset.pk,

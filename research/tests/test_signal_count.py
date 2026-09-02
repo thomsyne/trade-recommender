@@ -8,6 +8,7 @@ from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
 
 from market.models import DatasetVersion, Instrument, SourceRegistry, dataset_manifest_sha256
+from market.quality import registered_candle_completion
 from market.services import RequiredCandleRange, store_ingestion
 from market.tests.factories import candle
 from research.models import (
@@ -31,7 +32,6 @@ from research.signal_count import (
     SignalCountOutput,
     _analysis_data_incomplete_count,
     _maximum_horizon_end,
-    _next_registered_h1_open,
     _partition_boundary_lifecycle_horizon,
     _s1_evaluation_queryset,
     _validate_s1_contract,
@@ -79,20 +79,31 @@ class SignalCountBoundaryTests(SimpleTestCase):
         )
 
     def test_partition_boundary_censorship_is_strict_and_timestamp_only(self):
-        new_york = ZoneInfo("America/New_York")
-        fully_observable = datetime(2018, 12, 31, 19, tzinfo=new_york)
-        entry_evidence_at_boundary = datetime(2018, 12, 31, 20, tzinfo=new_york)
-        third_confirmation_at_boundary = datetime(2018, 12, 31, 21, tzinfo=new_york)
+        fully_observable = datetime(2019, 1, 1, 0, tzinfo=UTC)
+        entry_evidence_at_boundary = datetime(2019, 1, 1, 1, tzinfo=UTC)
+        third_confirmation_at_boundary = datetime(2019, 1, 1, 2, tzinfo=UTC)
+        inventory = tuple(datetime(2019, 1, 1, hour, tzinfo=UTC) for hour in range(7))
 
         with patch("research.signal_count.Candle.objects") as candle_objects:
             self.assertIsNone(
-                partition_boundary_censorship(setup_id=1, sweep_timestamp=fully_observable)
+                partition_boundary_censorship(
+                    setup_id=1,
+                    sweep_timestamp=fully_observable,
+                    sealed_h1_inventory=inventory,
+                    contract=object(),
+                )
             )
             entry_censored = partition_boundary_censorship(
-                setup_id=2, sweep_timestamp=entry_evidence_at_boundary
+                setup_id=2,
+                sweep_timestamp=entry_evidence_at_boundary,
+                sealed_h1_inventory=inventory,
+                contract=object(),
             )
             confirmation_censored = partition_boundary_censorship(
-                setup_id=3, sweep_timestamp=third_confirmation_at_boundary
+                setup_id=3,
+                sweep_timestamp=third_confirmation_at_boundary,
+                sealed_h1_inventory=inventory,
+                contract=object(),
             )
         candle_objects.assert_not_called()
         self.assertEqual(entry_censored["entry_evidence_completion"], "2019-01-01T05:00:00+00:00")
@@ -101,36 +112,40 @@ class SignalCountBoundaryTests(SimpleTestCase):
             "2019-01-01T05:00:00+00:00",
         )
 
-    def test_partition_boundary_horizon_uses_friday_to_sunday_calendar(self):
-        new_york = ZoneInfo("America/New_York")
+    def test_partition_boundary_horizon_uses_unusual_sealed_successors(self):
+        sweep = datetime(2018, 12, 28, 22, tzinfo=UTC)
+        inventory = (
+            datetime(2018, 12, 30, 22, tzinfo=UTC),
+            datetime(2018, 12, 30, 23, tzinfo=UTC),
+            datetime(2018, 12, 31, 2, tzinfo=UTC),
+            datetime(2018, 12, 31, 4, tzinfo=UTC),
+        )
         latest_confirmation, entry_evidence = _partition_boundary_lifecycle_horizon(
-            datetime(2018, 12, 28, 17, tzinfo=new_york)
+            sweep, inventory, object()
         )
-        self.assertEqual(
-            latest_confirmation.astimezone(new_york),
-            datetime(2018, 12, 30, 20, tzinfo=new_york),
-        )
-        self.assertEqual(
-            entry_evidence.astimezone(new_york),
-            datetime(2018, 12, 30, 21, tzinfo=new_york),
-        )
+        self.assertEqual(latest_confirmation, datetime(2018, 12, 31, 3, tzinfo=UTC))
+        self.assertEqual(entry_evidence, datetime(2018, 12, 31, 5, tzinfo=UTC))
 
-    def test_partition_boundary_purge_uses_new_york_confirmation_and_weekend_alignment(self):
+    def test_maximum_horizon_uses_ten_sealed_daily_completions_and_next_h1(self):
         new_york = ZoneInfo("America/New_York")
-        retained_confirmation = datetime(2018, 12, 14, 17, tzinfo=new_york)
-        purged_confirmation = datetime(2018, 12, 28, 17, tzinfo=new_york)
-
-        retained_entry = _next_registered_h1_open(retained_confirmation)
-        purged_entry = _next_registered_h1_open(purged_confirmation)
-        self.assertEqual(retained_entry, datetime(2018, 12, 16, 17, tzinfo=new_york))
-        self.assertEqual(purged_entry, datetime(2018, 12, 30, 17, tzinfo=new_york))
-        self.assertLess(
-            _maximum_horizon_end(retained_entry),
-            datetime(2019, 1, 1, tzinfo=new_york),
+        entry = datetime(2018, 12, 2, 18, tzinfo=new_york)
+        daily = tuple(
+            datetime(2018, 12, day, 17, tzinfo=new_york)
+            for day in (2, 3, 4, 5, 6, 9, 10, 12, 13, 16)
         )
-        self.assertGreaterEqual(
-            _maximum_horizon_end(purged_entry),
-            datetime(2019, 1, 1, tzinfo=new_york),
+        tenth_completion = max(
+            completion
+            for timestamp in daily
+            if (completion := registered_candle_completion(timestamp, "D")) > entry
+        )
+        unusual_next_h1 = tenth_completion + timedelta(hours=5)
+        self.assertEqual(
+            _maximum_horizon_end(
+                entry,
+                sealed_daily_inventory=daily,
+                sealed_h1_inventory=(unusual_next_h1,),
+            ),
+            unusual_next_h1,
         )
 
     def test_s1_contract_rejects_missing_frozen_instrument(self):
@@ -615,6 +630,10 @@ class SignalCountFunctionalTests(TestCase):
                 "research.signal_count._validate_detector_coverage",
                 return_value=(detector, "d" * 64),
             ),
+            patch(
+                "research.signal_count._maximum_horizon_end",
+                return_value=datetime(2018, 12, 31, tzinfo=UTC),
+            ),
         ):
             output = run_s1(
                 dataset_id=dataset.pk,
@@ -731,6 +750,10 @@ class SignalCountFunctionalTests(TestCase):
                 "research.signal_count._validate_detector_coverage",
                 return_value=(detector, "d" * 64),
             ),
+            patch(
+                "research.signal_count._maximum_horizon_end",
+                return_value=datetime(2018, 12, 31, tzinfo=UTC),
+            ),
             self.assertRaisesMessage(ReturnBlindViolation, "would truncate"),
         ):
             run_s1(
@@ -776,6 +799,10 @@ class SignalCountFunctionalTests(TestCase):
             patch(
                 "research.signal_count._validate_detector_coverage",
                 return_value=(detector, "d" * 64),
+            ),
+            patch(
+                "research.signal_count._maximum_horizon_end",
+                return_value=datetime(2018, 12, 31, tzinfo=UTC),
             ),
             self.assertRaisesMessage(ReturnBlindViolation, "lifecycle is incomplete"),
         ):

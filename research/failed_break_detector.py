@@ -6,20 +6,17 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 
 from market.models import Candle as MarketCandle
-from market.models import DatasetVersion, Instrument
+from market.models import CandleConflict, DatasetVersion, IngestionRun, Instrument
 from market.quality import (
     expected_candle_timestamps,
     registered_candle_completion,
     registered_successor,
 )
-from market.services import (
-    assert_dataset_window_usable,
-    candle_completion,
-    sealed_inventory_membership,
-)
+from market.services import candle_completion, sealed_inventory_membership
 from research.failed_break_services import (
     books_for_setup,
     derive_expected_entry_timestamp,
@@ -41,7 +38,17 @@ from research.models import (
     SetupTransition,
     StrategyVersion,
 )
-from research.provider_observed import contract_for_dataset
+from research.pre_s1_governance import (
+    CAD_CONVERSION_POLICY_IDENTITY,
+    CAD_CONVERSION_ROUTE_SHA256,
+    CAD_CONVERSION_ROUTES,
+    PRE_S1_GOVERNANCE,
+    PRE_S1_GOVERNANCE_SHA256,
+)
+from research.provider_observed import (
+    contract_for_dataset,
+    dataset_inventory_timestamps,
+)
 from research.signal_count import (
     DEVELOPMENT_END,
     DEVELOPMENT_START,
@@ -50,7 +57,6 @@ from research.signal_count import (
     PIPETTES,
     S1_DETECTOR_JOB_NAME,
     _validate_s1_contract,
-    development_candle_range,
     expected_analysis_keys,
     partition_boundary_censorship,
     read_entry_projection,
@@ -59,8 +65,10 @@ from research.signal_count import (
 from research.strategy import (
     Bias,
     Candle,
+    Confirmation,
     Context,
     EntryOpen,
+    EntryResult,
     LevelSpec,
     LevelState,
     Lifecycle,
@@ -71,6 +79,7 @@ from research.strategy import (
     confirmed_swing_levels,
     daily_bias,
     daily_pivots,
+    daily_swing_superseded_at,
     detect_failed_sweep,
     entry_eligibility,
     evaluate_level,
@@ -128,17 +137,29 @@ def _read_candles(dataset, instrument, granularity, timestamps, contract=None):
     timestamps = tuple(timestamps)
     if not timestamps:
         return ()
-    return tuple(
-        _strategy_candle(row, contract)
-        for row in MarketCandle.objects.filter(
+    rows = list(
+        MarketCandle.objects.filter(
             dataset_version=dataset,
             instrument=instrument,
             granularity=granularity,
             timestamp__in=timestamps,
+            complete=True,
+            ingestion_run__dataset_version=dataset,
+            ingestion_run__status=IngestionRun.Status.SUCCEEDED,
         )
         .order_by("timestamp")
         .values(*DETECTION_CANDLE_FIELDS)
     )
+    if len(rows) != len(timestamps):
+        raise ValueError(f"sealed {granularity} inventory has missing or duplicate candles")
+    if CandleConflict.objects.filter(
+        dataset_version=dataset,
+        existing_candle__instrument=instrument,
+        existing_candle__granularity=granularity,
+        existing_candle__timestamp__in=timestamps,
+    ).exists():
+        raise ValueError(f"sealed {granularity} inventory has conflicting candle evidence")
+    return tuple(_strategy_candle(row, contract) for row in rows)
 
 
 def _range_timestamps(ranges, granularity, *, contract=None, instrument=None):
@@ -171,10 +192,11 @@ def _candle_completing_at(dataset, instrument, schedules, granularity, boundary,
     timestamp = schedules[granularity].get(boundary)
     if timestamp is None:
         return None
-    rows = _read_candles(dataset, instrument, granularity, (timestamp,), contract)
-    if len(rows) != 1:
-        raise ValueError(f"registered {granularity} candle is missing at {boundary.isoformat()}")
-    return rows[0]
+    try:
+        rows = _read_candles(dataset, instrument, granularity, (timestamp,), contract)
+    except ValueError:
+        return None
+    return rows[0] if len(rows) == 1 else None
 
 
 def _context(at, strategy, dataset):
@@ -224,55 +246,92 @@ def _persist_lifecycle(node, state):
     node.state = state
 
 
-def _latest_pre_entry_close(dataset, instrument_code, entry_timestamp, contract=None):
-    row = (
+def _latest_pre_entry_leg(dataset, instrument_code, entry_timestamp, contract=None):
+    """Resolve one leg from the latest sealed H1 completion strictly before entry."""
+    eligible = [
+        timestamp
+        for timestamp in dataset_inventory_timestamps(dataset, contract, instrument_code, "H1")
+        if candle_completion(timestamp, "H1", contract) < entry_timestamp
+    ]
+    if not eligible:
+        return None
+    timestamp = eligible[-1]
+    rows = list(
         MarketCandle.objects.filter(
             dataset_version=dataset,
             instrument__code=instrument_code,
             granularity="H1",
-            timestamp__lt=entry_timestamp,
-        )
-        .order_by("-timestamp")
-        .first()
+            timestamp=timestamp,
+            complete=True,
+            ingestion_run__dataset_version=dataset,
+            ingestion_run__status=IngestionRun.Status.SUCCEEDED,
+        ).select_related("ingestion_run__ingestion_manifest")[:2]
     )
-    if not row or candle_completion(row.timestamp, "H1", contract) > entry_timestamp:
+    if (
+        len(rows) != 1
+        or CandleConflict.objects.filter(
+            dataset_version=dataset, existing_candle=rows[0] if rows else None
+        ).exists()
+    ):
         return None
-    return row.midpoint_close, candle_completion(row.timestamp, "H1", contract)
+    row = rows[0]
+    try:
+        ingestion_manifest_sha256 = row.ingestion_run.ingestion_manifest.sha256
+    except ObjectDoesNotExist:
+        return None
+    completed_at = candle_completion(timestamp, "H1", contract)
+    evidence = {
+        "instrument": instrument_code,
+        "dataset_manifest_sha256": dataset.manifest_sha256,
+        "granularity": "H1",
+        "timestamp": timestamp.isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "midpoint_close": str(row.midpoint_close),
+        "ingestion_manifest_sha256": ingestion_manifest_sha256,
+    }
+    return row.midpoint_close, completed_at, {**evidence, "evidence_sha256": stable_hash(evidence)}
+
+
+def _latest_pre_entry_close(dataset, instrument_code, entry_timestamp, contract=None):
+    leg = _latest_pre_entry_leg(dataset, instrument_code, entry_timestamp, contract)
+    return (leg[0], leg[1]) if leg else None
+
+
+def _cad_conversion_with_evidence(dataset, instrument, entry_timestamp, contract=None):
+    quote = instrument.quote_currency
+    route = CAD_CONVERSION_ROUTES.get(quote)
+    body = {
+        "policy_identity": CAD_CONVERSION_POLICY_IDENTITY,
+        "route_table_sha256": CAD_CONVERSION_ROUTE_SHA256,
+        "account_currency": "CAD",
+        "quote_currency": quote,
+        "entry_timestamp": entry_timestamp.isoformat(),
+        "route": [],
+    }
+    if route is None:
+        return None, None, "", {**body, "failure": "UNSUPPORTED_QUOTE_CURRENCY"}
+    if not route:
+        body["resulting_cad_conversion"] = "1"
+        identity = f"{CAD_CONVERSION_POLICY_IDENTITY}:{stable_hash(body)}"
+        return Decimal(1), entry_timestamp, identity, body
+    result = Decimal(1)
+    effective_at = None
+    for instrument_code, direction in route:
+        leg = _latest_pre_entry_leg(dataset, instrument_code, entry_timestamp, contract)
+        if not leg or leg[0] <= 0:
+            body["failure"] = f"MISSING_OR_CONFLICTING_{instrument_code}"
+            return None, None, "", body
+        rate, completed_at, leg_evidence = leg
+        result = result * rate if direction == "multiply" else result / rate
+        effective_at = max(effective_at, completed_at) if effective_at else completed_at
+        body["route"].append({"direction": direction, **leg_evidence})
+    body["resulting_cad_conversion"] = str(result)
+    identity = f"{CAD_CONVERSION_POLICY_IDENTITY}:{stable_hash(body)}"
+    return result, effective_at, identity, body
 
 
 def _cad_conversion(dataset, instrument, entry_timestamp, contract=None):
-    quote = instrument.quote_currency
-    if quote == "CAD":
-        return Decimal(1), entry_timestamp, "CAD@identity"
-    usd_cad = _latest_pre_entry_close(dataset, "USD_CAD", entry_timestamp, contract)
-    if not usd_cad:
-        return None, None, ""
-    usd_cad_rate, usd_cad_at = usd_cad
-    if quote == "USD":
-        return usd_cad_rate, usd_cad_at, f"USD_CAD@{usd_cad_at.isoformat()}"
-    if quote == "GBP":
-        quote_usd = _latest_pre_entry_close(dataset, "GBP_USD", entry_timestamp, contract)
-        if not quote_usd:
-            return None, None, ""
-        quote_usd_rate, quote_usd_at = quote_usd
-        effective_at = min(quote_usd_at, usd_cad_at)
-        return (
-            quote_usd_rate * usd_cad_rate,
-            effective_at,
-            f"GBP_USD@{quote_usd_at.isoformat()}|USD_CAD@{usd_cad_at.isoformat()}",
-        )
-    if quote == "JPY":
-        usd_jpy = _latest_pre_entry_close(dataset, "USD_JPY", entry_timestamp, contract)
-        if not usd_jpy or usd_jpy[0] <= 0:
-            return None, None, ""
-        usd_jpy_rate, usd_jpy_at = usd_jpy
-        effective_at = min(usd_jpy_at, usd_cad_at)
-        return (
-            usd_cad_rate / usd_jpy_rate,
-            effective_at,
-            f"USD_JPY@{usd_jpy_at.isoformat()}|USD_CAD@{usd_cad_at.isoformat()}",
-        )
-    return None, None, ""
+    return _cad_conversion_with_evidence(dataset, instrument, entry_timestamp, contract)[:3]
 
 
 def _material_level_specs(weekly, daily, precision, strategy, dataset, as_of):
@@ -325,7 +384,12 @@ def _persist_material_levels(
             if node.state.state != Lifecycle.ACTIVE:
                 continue
             state = evaluate_level(
-                node.spec, daily_by_completion.values(), _context(as_of, strategy, dataset)
+                node.spec,
+                daily_by_completion.values(),
+                _context(as_of, strategy, dataset),
+                superseded_at=daily_swing_superseded_at(
+                    node.spec, (candidate.spec for candidate in nodes)
+                ),
             )
             if state.state == Lifecycle.ACTIVE:
                 continue
@@ -388,8 +452,8 @@ def _evaluate_entry(
         active_specs.append(stored_spec)
         states[stored_spec.key] = node.state
         records_by_key[stored_spec.key] = node.record
-    conversion_rate, conversion_at, conversion_identity = _cad_conversion(
-        dataset, instrument, entry_at, contract
+    conversion_rate, conversion_at, conversion_identity, conversion_evidence = (
+        _cad_conversion_with_evidence(dataset, instrument, entry_at, contract)
     )
     result = entry_eligibility(
         _entry_event(pending),
@@ -411,6 +475,7 @@ def _evaluate_entry(
         "decision": result.decision,
         "reason": result.reason,
         "entry_open_present": opening is not None,
+        "cad_conversion": conversion_evidence,
     }
     for book in books_for_setup(pending.setup):
         persist_entry_evaluation(
@@ -450,24 +515,81 @@ def _seed_h1_atr(candles, context):
     return (points[-1].value, []) if points else (None, ranges)
 
 
+def _persist_data_incomplete_remainder(
+    *,
+    instrument,
+    dataset,
+    strategy,
+    ranges,
+    pending,
+    remaining_h1,
+    failed_at,
+    reason,
+):
+    """Persist deterministic terminal evidence for an unresolved sealed-data gap."""
+    failure_evidence = {
+        "failure": reason,
+        "first_unresolved_completion": failed_at.isoformat(),
+        "governed_outcome": "DATA_INCOMPLETE",
+    }
+    for candidate in tuple(pending):
+        global_transition = candidate.setup.setuptransition_set.filter(book_identity="").first()
+        if global_transition is None:
+            persist_confirmation(
+                setup=candidate.setup,
+                confirmation=Confirmation("CANCELLED_DATA_QUALITY", failed_at),
+                evidence={**failure_evidence, "setup_id": candidate.setup.pk},
+                required_ranges=ranges,
+                as_of=failed_at,
+            )
+        elif global_transition.to_state == SetupTransition.State.CONFIRMED:
+            entry_at = derive_expected_entry_timestamp(candidate.setup)
+            result = EntryResult("CANCELLED_DATA_QUALITY", "DATA_INCOMPLETE")
+            for book in books_for_setup(candidate.setup):
+                persist_entry_evaluation(
+                    setup=candidate.setup,
+                    book_identity=book,
+                    result=result,
+                    opening=None,
+                    target_level=None,
+                    evidence={**failure_evidence, "setup_id": candidate.setup.pk},
+                    required_ranges=ranges,
+                    as_of=failed_at,
+                    expected_entry_timestamp=entry_at,
+                )
+    for completion, _ in remaining_h1:
+        evidence = {
+            **failure_evidence,
+            "completed_h1_timestamp": completion.isoformat(),
+            "reason": (reason if completion == failed_at else "PRIOR_REQUIRED_EVIDENCE_UNRESOLVED"),
+        }
+        persist_analysis(
+            instrument=instrument,
+            strategy_version=strategy,
+            dataset_version=dataset,
+            completed_h1_timestamp=completion,
+            result=AnalysisRun.Result.DATA_INCOMPLETE,
+            evidence=evidence,
+            required_ranges=ranges,
+            as_of=completion,
+        )
+
+
 def _instrument_detector(
     *, instrument, dataset, strategy, ranges, spread_ceiling, as_of, contract=None
 ):
-    for required in ranges:
-        assert_dataset_window_usable(
-            dataset,
-            instrument,
-            (development_candle_range(required, contract=contract, instrument=instrument.code),),
-            as_of,
-        )
     development_start = DEVELOPMENT_START.astimezone(UTC)
     development_end = DEVELOPMENT_END.astimezone(UTC)
+    inventories = {
+        granularity: tuple(
+            _range_timestamps(ranges, granularity, contract=contract, instrument=instrument)
+        )
+        for granularity in ("W", "D", "H1")
+    }
     schedules = {
         granularity: {
             candle_completion(timestamp, granularity, contract): timestamp
-            for timestamp in _range_timestamps(
-                ranges, granularity, contract=contract, instrument=instrument
-            )
+            for timestamp in inventories[granularity]
             if candle_completion(timestamp, granularity, contract) < development_end
         }
         for granularity in ("W", "D", "H1")
@@ -477,11 +599,29 @@ def _instrument_detector(
         for completion, timestamp in schedules["H1"].items()
         if development_start <= completion < development_end
     )
-    weekly = _admitted_before(
-        dataset, instrument, ranges, "W", development_start, contract=contract
-    )
-    daily = _admitted_before(dataset, instrument, ranges, "D", development_start, contract=contract)
-    h1 = _admitted_before(dataset, instrument, ranges, "H1", development_start, contract=contract)
+    try:
+        weekly = _admitted_before(
+            dataset, instrument, ranges, "W", development_start, contract=contract
+        )
+        daily = _admitted_before(
+            dataset, instrument, ranges, "D", development_start, contract=contract
+        )
+        h1 = _admitted_before(
+            dataset, instrument, ranges, "H1", development_start, contract=contract
+        )
+    except ValueError:
+        if development_h1:
+            _persist_data_incomplete_remainder(
+                instrument=instrument,
+                dataset=dataset,
+                strategy=strategy,
+                ranges=ranges,
+                pending=(),
+                remaining_h1=development_h1,
+                failed_at=development_h1[0][0],
+                reason="MISSING_OR_CONFLICTING_WARMUP_EVIDENCE",
+            )
+        return
     nodes = []
     known_spec_keys = set()
     specs, _, pivots = _material_level_specs(
@@ -509,7 +649,20 @@ def _instrument_detector(
         ).values_list("level__stable_key", flat=True)
     )
 
-    for completion, opened_at in development_h1:
+    for h1_index, (completion, opened_at) in enumerate(development_h1):
+        candle = _candle_completing_at(dataset, instrument, schedules, "H1", completion, contract)
+        if candle is None or candle.opened_at != opened_at:
+            _persist_data_incomplete_remainder(
+                instrument=instrument,
+                dataset=dataset,
+                strategy=strategy,
+                ranges=ranges,
+                pending=pending,
+                remaining_h1=development_h1[h1_index:],
+                failed_at=completion,
+                reason="MISSING_OR_CONFLICTING_H1_EVIDENCE",
+            )
+            return
         for candidate in tuple(pending):
             confirmed = candidate.setup.setuptransition_set.filter(
                 from_state=SetupTransition.State.TRIGGER_PENDING,
@@ -540,9 +693,6 @@ def _instrument_detector(
                 )
                 pending.remove(candidate)
 
-        candle = _candle_completing_at(dataset, instrument, schedules, "H1", completion, contract)
-        if candle is None or candle.opened_at != opened_at:
-            raise ValueError(f"registered H1 candle is missing at {completion.isoformat()}")
         previous_close = h1[-1].close if h1 else candle.close
         true_range = max(
             candle.high - candle.low,
@@ -563,6 +713,18 @@ def _instrument_detector(
             completed_candle = _candle_completing_at(
                 dataset, instrument, schedules, granularity, completion, contract
             )
+            if schedules[granularity].get(completion) is not None and completed_candle is None:
+                _persist_data_incomplete_remainder(
+                    instrument=instrument,
+                    dataset=dataset,
+                    strategy=strategy,
+                    ranges=ranges,
+                    pending=pending,
+                    remaining_h1=development_h1[h1_index:],
+                    failed_at=completion,
+                    reason=f"MISSING_OR_CONFLICTING_{granularity}_EVIDENCE",
+                )
+                return
             if completed_candle is not None:
                 admitted.append(completed_candle)
                 structure_changed = True
@@ -612,6 +774,7 @@ def _instrument_detector(
                 daily,
                 _context(completion, strategy, dataset),
                 attributed_level_inactive_at=inactive,
+                sealed_h1_inventory=inventories["H1"],
                 supporting_swings=pivots,
             )
             if confirmation.state != SetupTransition.State.TRIGGER_PENDING:
@@ -670,7 +833,9 @@ def _instrument_detector(
                     consumed.update(event.level_keys)
                     if (
                         partition_boundary_censorship(
-                            setup_id=setup.pk, sweep_timestamp=setup.sweep_h1_timestamp
+                            setup_id=setup.pk,
+                            sweep_timestamp=setup.sweep_h1_timestamp,
+                            sealed_h1_inventory=inventories["H1"],
                         )
                         is None
                     ):
@@ -777,9 +942,23 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
         ).values_list("instrument__code", "completed_h1_timestamp", "result")
     )
     observed = tuple(sorted((code, timestamp.isoformat()) for code, timestamp, _ in observed_rows))
-    if observed != expected or any(
+    data_incomplete_count = sum(
         result == AnalysisRun.Result.DATA_INCOMPLETE for _, _, result in observed_rows
-    ):
+    )
+    data_quality_cancellation_count = (
+        SetupTransition.objects.filter(
+            setup__dataset_version=dataset,
+            setup__strategy_version=strategy,
+            to_state=SetupTransition.State.CANCELLED_DATA_QUALITY,
+        ).count()
+        + EntryEligibilityEvaluation.objects.filter(
+            setup__dataset_version=dataset,
+            setup__strategy_version=strategy,
+            decision=EntryEligibilityEvaluation.Decision.CANCELLED_DATA_QUALITY,
+        ).count()
+    )
+    exact_coverage = observed == expected
+    if not exact_coverage:
         missing = sorted(set(expected) - set(observed))[:3]
         unexpected = sorted(set(observed) - set(expected))[:3]
         raise ValueError(
@@ -792,21 +971,27 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
         strategy_version=strategy,
         sweep_h1_timestamp__gte=DEVELOPMENT_START.astimezone(UTC),
         sweep_h1_timestamp__lt=DEVELOPMENT_END.astimezone(UTC),
-    ).values("pk", "sweep_h1_timestamp")
+    ).values("pk", "sweep_h1_timestamp", "instrument__code")
     censored_evidence = sorted(
         (
             evidence
             for row in setup_rows
             if (
                 evidence := partition_boundary_censorship(
-                    setup_id=row["pk"], sweep_timestamp=row["sweep_h1_timestamp"]
+                    setup_id=row["pk"],
+                    sweep_timestamp=row["sweep_h1_timestamp"],
+                    sealed_h1_inventory=dataset_inventory_timestamps(
+                        dataset, contract, row["instrument__code"], "H1"
+                    ),
+                    contract=contract,
                 )
             )
         ),
         key=lambda row: row["setup_id"],
     )
     censored_setup_ids = frozenset(row["setup_id"] for row in censored_evidence)
-    _assert_complete_setup_lifecycle(dataset, strategy, censored_setup_ids)
+    if data_incomplete_count == 0 and data_quality_cancellation_count == 0:
+        _assert_complete_setup_lifecycle(dataset, strategy, censored_setup_ids)
 
     configuration = {
         "identity": S1_DETECTOR_JOB_NAME,
@@ -816,6 +1001,8 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
         "strategy_content_hash": strategy.content_hash,
         "detector_version": strategy.detector_version,
         "partition_boundary_censor_rule": PARTITION_BOUNDARY_CENSOR_RULE,
+        "pre_s1_governance": PRE_S1_GOVERNANCE,
+        "pre_s1_governance_sha256": PRE_S1_GOVERNANCE_SHA256,
         "s0_job_id": s0_job_id,
         "s0_report_sha256": s0_output.report_sha256,
         "as_of": as_of.isoformat(),
@@ -825,6 +1012,11 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
         "expected_analysis_sha256": stable_hash(expected),
         "observed_analysis_count": len(observed),
         "observed_analysis_sha256": stable_hash(observed),
+        "data_incomplete_count": data_incomplete_count,
+        "data_quality_cancellation_count": data_quality_cancellation_count,
+        "complete": (
+            exact_coverage and data_incomplete_count == 0 and data_quality_cancellation_count == 0
+        ),
         "partition_boundary_censored": censored_evidence,
         "partition_boundary_censored_sha256": stable_hash(censored_evidence),
     }
@@ -835,7 +1027,13 @@ def run_s1_detector(*, dataset_id, strategy_version_id, s0_job_id, as_of):
         "dataset_version": dataset,
         "config_hash": stable_hash(configuration),
         "as_of": as_of,
-        "status": JobRun.Status.SUCCEEDED,
+        "status": (
+            JobRun.Status.SUCCEEDED
+            if exact_coverage
+            and data_incomplete_count == 0
+            and data_quality_cancellation_count == 0
+            else JobRun.Status.DATA_INCOMPLETE
+        ),
         "evidence": {"configuration": configuration, "report": report},
     }
     job, created = JobRun.objects.get_or_create(

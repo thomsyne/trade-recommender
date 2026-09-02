@@ -5,12 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict
-from datetime import time, timedelta
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 from django.db import transaction
 
+from market.models import Candle as MarketCandle
 from market.quality import (
     expected_candle_timestamps,
     registered_candle_completion,
@@ -32,6 +31,7 @@ from research.models import (
     SetupLevelAttribution,
     SetupTransition,
 )
+from research.provider_observed import inventory_timestamps
 from research.strategy import Confirmation, EntryOpen, EntryResult, LevelSpec, SweepEvent
 
 COMBINED_BOOK = "failed-break-any-level-deduplicated-v1"
@@ -328,17 +328,35 @@ def books_for_setup(setup: SetupEvent) -> tuple[str, ...]:
     return tuple(sorted({COMBINED_BOOK, *(FAMILY_BOOKS[family] for family in families)}))
 
 
-def derive_expected_entry_timestamp(setup: SetupEvent):
+def derive_expected_entry_timestamp(setup: SetupEvent, *, sealed_h1_inventory=None):
+    """Select the entry open from sealed provider-observed H1 membership."""
     confirmation = setup.setuptransition_set.get(
         from_state=SetupTransition.State.TRIGGER_PENDING,
         to_state=SetupTransition.State.CONFIRMED,
         book_identity="",
     )
-    timestamp = confirmation.effective_at
-    local = timestamp.astimezone(ZoneInfo("America/New_York"))
-    if local.weekday() == 4 and local.time() == time(17):
-        return (local + timedelta(days=2)).replace(hour=17).astimezone(timestamp.tzinfo)
-    return timestamp
+    if sealed_h1_inventory is None:
+        contract = provider_observed_contract(setup.dataset_version)
+        sealed_h1_inventory = (
+            inventory_timestamps(contract, setup.instrument.code, "H1")
+            if contract is not None
+            else MarketCandle.objects.filter(
+                dataset_version=setup.dataset_version,
+                instrument=setup.instrument,
+                granularity="H1",
+                complete=True,
+            )
+            .order_by("timestamp")
+            .values_list("timestamp", flat=True)
+        )
+    successors = sorted(
+        timestamp
+        for timestamp in set(sealed_h1_inventory)
+        if timestamp >= confirmation.effective_at
+    )
+    if not successors:
+        raise DatasetQualityError("no sealed H1 entry successor exists after confirmation")
+    return successors[0]
 
 
 def current_setup_state(setup: SetupEvent) -> str:

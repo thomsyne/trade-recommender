@@ -50,17 +50,24 @@ from research.models import (
     SetupTransition,
     StrategyVersion,
 )
+from research.pre_s1_governance import PRE_S1_GOVERNANCE, PRE_S1_GOVERNANCE_SHA256
 from research.provider_observed import (
     contract_for_dataset,
     contract_range_bounds,
+    dataset_inventory_timestamps,
     entry_timestamp_is_sealed,
     inventory_window,
+)
+from research.s0_acceptance import (
+    ACCEPTED_EFFECTIVE_DATA_IDENTITY,
+    S0AcceptanceError,
+    verify_s0_acceptance,
 )
 
 SIGNAL_COUNT_IDENTITY = "failed-break-signal-count-v1"
 S0_JOB_NAME = "failed-break-signal-count-s0"
 S1_DETECTOR_JOB_NAME = "failed-break-signal-count-s1-detector"
-PARTITION_BOUNDARY_CENSOR_RULE = "development-sweep-three-h1-plus-entry-v1"
+PARTITION_BOUNDARY_CENSOR_RULE = "development-sweep-sealed-three-h1-plus-entry-v2"
 PHASE1_MANIFEST_SHA256 = "f857dd9155646093616af0d87e534552540752541f2cb33a6ce3e3c68af0b882"
 PHASE1_SPEC_SHA256 = "47d0346bcf723cb78a71763df43f6b092b0c235bb1d17ccbe69f17d9550203cd"
 FROZEN_INSTRUMENTS = frozenset({"EUR_USD", "GBP_USD", "EUR_GBP", "USD_CAD", "USD_JPY", "AUD_USD"})
@@ -160,6 +167,8 @@ S1_COVERAGE_FIELDS = frozenset(
         "detector_job_id",
         "detector_report_sha256",
         "partition_boundary_censor_rule",
+        "pre_s1_governance",
+        "pre_s1_governance_sha256",
         "as_of",
         "bounded",
         "complete",
@@ -866,6 +875,16 @@ def _validated_s0_job(*, s0_job_id, dataset, strategy):
         or not distribution_hashes
     ):
         raise ReturnBlindViolation("stored S0 audit hashes or identities do not verify")
+    if contract is not None and contract.identity == ACCEPTED_EFFECTIVE_DATA_IDENTITY:
+        try:
+            verify_s0_acceptance(
+                job=job,
+                output=reconstructed,
+                dataset=dataset,
+                strategy=strategy,
+            )
+        except S0AcceptanceError as error:
+            raise ReturnBlindViolation("stored S0 audit is not governed and accepted") from error
     return reconstructed
 
 
@@ -966,6 +985,8 @@ def _validate_detector_coverage(
             "strategy_content_hash",
             "detector_version",
             "partition_boundary_censor_rule",
+            "pre_s1_governance",
+            "pre_s1_governance_sha256",
             "s0_job_id",
             "s0_report_sha256",
             "as_of",
@@ -977,6 +998,8 @@ def _validate_detector_coverage(
         or configuration.get("strategy_content_hash") != strategy.content_hash
         or configuration.get("detector_version") != strategy.detector_version
         or configuration.get("partition_boundary_censor_rule") != PARTITION_BOUNDARY_CENSOR_RULE
+        or configuration.get("pre_s1_governance") != PRE_S1_GOVERNANCE
+        or configuration.get("pre_s1_governance_sha256") != PRE_S1_GOVERNANCE_SHA256
         or configuration.get("s0_job_id") != s0_job_id
         or configuration.get("s0_report_sha256") != s0_report_sha256
         or configuration.get("as_of") != as_of.isoformat()
@@ -989,12 +1012,18 @@ def _validate_detector_coverage(
             "expected_analysis_sha256",
             "observed_analysis_count",
             "observed_analysis_sha256",
+            "data_incomplete_count",
+            "data_quality_cancellation_count",
+            "complete",
             "partition_boundary_censored",
             "partition_boundary_censored_sha256",
         }
         or report.get("report_sha256") != stable_hash(report_body)
         or report.get("expected_analysis_count") != len(expected)
         or report.get("expected_analysis_sha256") != expected_hash
+        or report.get("data_incomplete_count") != 0
+        or report.get("data_quality_cancellation_count") != 0
+        or report.get("complete") is not True
         or not isinstance(censored_evidence, list)
         or any(not isinstance(row, Mapping) for row in censored_evidence)
         or censored_evidence != sorted(censored_evidence, key=lambda row: row.get("setup_id", -1))
@@ -1020,13 +1049,14 @@ def _validate_detector_coverage(
     ):
         raise ReturnBlindViolation("S1 detector analysis coverage is incomplete or unresolved")
 
+    contract = contract_for_dataset(dataset)
     setup_rows = list(
         SetupEvent.objects.filter(
             dataset_version=dataset,
             strategy_version=strategy,
             sweep_h1_timestamp__gte=DEVELOPMENT_START.astimezone(UTC),
             sweep_h1_timestamp__lt=DEVELOPMENT_END.astimezone(UTC),
-        ).values("pk", "sweep_h1_timestamp")
+        ).values("pk", "sweep_h1_timestamp", "instrument__code")
     )
     expected_censored = sorted(
         (
@@ -1034,7 +1064,12 @@ def _validate_detector_coverage(
             for row in setup_rows
             if (
                 evidence := partition_boundary_censorship(
-                    setup_id=row["pk"], sweep_timestamp=row["sweep_h1_timestamp"]
+                    setup_id=row["pk"],
+                    sweep_timestamp=row["sweep_h1_timestamp"],
+                    sealed_h1_inventory=dataset_inventory_timestamps(
+                        dataset, contract, row["instrument__code"], "H1"
+                    ),
+                    contract=contract,
                 )
             )
         ),
@@ -1060,53 +1095,62 @@ def _s1_evaluation_queryset(setup_ids):
     )
 
 
-def _next_registered_h1_open(timestamp):
-    local = timestamp.astimezone(ZoneInfo("America/New_York"))
-    if local.weekday() == 4 and local.time() == time(17):
-        return (local + timedelta(days=2)).replace(hour=17).astimezone(timestamp.tzinfo)
-    return timestamp
-
-
-def _partition_boundary_lifecycle_horizon(sweep_timestamp):
-    completion = sweep_timestamp
-    for _ in range(3):
-        confirmation_open = _next_registered_h1_open(completion)
-        completion = registered_candle_completion(confirmation_open, "H1")
-    latest_confirmation_completion = completion
-    entry_open = _next_registered_h1_open(latest_confirmation_completion)
-    entry_evidence_completion = registered_candle_completion(entry_open, "H1")
+def _partition_boundary_lifecycle_horizon(sweep_timestamp, sealed_h1_inventory, contract=None):
+    successors = tuple(
+        timestamp for timestamp in sorted(set(sealed_h1_inventory)) if timestamp >= sweep_timestamp
+    )[:4]
+    if len(successors) < 4:
+        return None, None
+    latest_confirmation_completion = candle_completion(successors[2], "H1", contract)
+    entry_evidence_completion = candle_completion(successors[3], "H1", contract)
     return latest_confirmation_completion, entry_evidence_completion
 
 
-def partition_boundary_censorship(*, setup_id, sweep_timestamp):
+def partition_boundary_censorship(*, setup_id, sweep_timestamp, sealed_h1_inventory, contract=None):
     """Return canonical timestamp-only evidence when development cannot observe a setup."""
     latest_confirmation_completion, entry_evidence_completion = (
-        _partition_boundary_lifecycle_horizon(sweep_timestamp)
+        _partition_boundary_lifecycle_horizon(sweep_timestamp, sealed_h1_inventory, contract)
     )
-    if entry_evidence_completion < DEVELOPMENT_END.astimezone(UTC):
+    if (
+        entry_evidence_completion is not None
+        and entry_evidence_completion < DEVELOPMENT_END.astimezone(UTC)
+    ):
         return None
     body = {
         "setup_id": setup_id,
         "sweep_timestamp": sweep_timestamp.isoformat(),
         "rule": PARTITION_BOUNDARY_CENSOR_RULE,
         "partition_boundary": DEVELOPMENT_END.astimezone(UTC).isoformat(),
-        "latest_confirmation_completion": latest_confirmation_completion.isoformat(),
-        "entry_evidence_completion": entry_evidence_completion.isoformat(),
+        "latest_confirmation_completion": (
+            latest_confirmation_completion.isoformat() if latest_confirmation_completion else None
+        ),
+        "entry_evidence_completion": (
+            entry_evidence_completion.isoformat() if entry_evidence_completion else None
+        ),
     }
     return {**body, "evidence_sha256": stable_hash(body)}
 
 
-def _maximum_horizon_end(entry_timestamp):
-    local = entry_timestamp.astimezone(ZoneInfo("America/New_York"))
-    day = local.date()
-    completions = 0
-    while completions < 10:
-        candidate = datetime.combine(day, time(17), tzinfo=local.tzinfo)
-        if candidate > local and candidate.weekday() < 5:
-            completions += 1
-            last_completion = candidate
-        day += timedelta(days=1)
-    return _next_registered_h1_open(last_completion.astimezone(entry_timestamp.tzinfo))
+def _maximum_horizon_end(
+    entry_timestamp, *, sealed_daily_inventory, sealed_h1_inventory, contract=None
+):
+    """First sealed H1 open after ten actual provider-D completions."""
+    completions = tuple(
+        completion
+        for timestamp in sorted(set(sealed_daily_inventory))
+        if (completion := candle_completion(timestamp, "D", contract)) > entry_timestamp
+    )
+    if len(completions) < 10:
+        return None
+    tenth_completion = completions[9]
+    return next(
+        (
+            timestamp
+            for timestamp in sorted(set(sealed_h1_inventory))
+            if timestamp >= tenth_completion
+        ),
+        None,
+    )
 
 
 def _cluster_summary(counter):
@@ -1120,11 +1164,20 @@ def _cluster_summary(counter):
     }
 
 
-def _maximum_concurrency(entries):
+def _maximum_concurrency(entries, inventories_by_code, contract=None):
     changes = []
-    for timestamp in entries:
+    for instrument_code, timestamp in entries:
+        inventories = inventories_by_code[instrument_code]
+        horizon_end = _maximum_horizon_end(
+            timestamp,
+            sealed_daily_inventory=inventories["D"],
+            sealed_h1_inventory=inventories["H1"],
+            contract=contract,
+        )
+        if horizon_end is None:
+            raise ReturnBlindViolation("sealed inventory cannot resolve the ten-session horizon")
         changes.append((timestamp, 1))
-        changes.append((_maximum_horizon_end(timestamp), -1))
+        changes.append((horizon_end, -1))
     active = 0
     peak = 0
     for _, delta in sorted(changes, key=lambda item: (item[0], item[1])):
@@ -1169,6 +1222,13 @@ def run_s1(
     if set(instruments_by_code) != set(ranges_by_instrument):
         raise ReturnBlindViolation("dataset required_ranges references an unknown instrument")
     s1_contract = contract_for_dataset(dataset)
+    inventories_by_code = {
+        code: {
+            granularity: dataset_inventory_timestamps(dataset, s1_contract, code, granularity)
+            for granularity in ("D", "H1")
+        }
+        for code in sorted(ranges_by_instrument)
+    }
     for code, ranges in ranges_by_instrument.items():
         assert_dataset_window_usable(
             dataset,
@@ -1230,11 +1290,29 @@ def run_s1(
             effective_at__lt=development_end,
         )
         .order_by("effective_at", "setup_id")
-        .values("setup_id", "effective_at")
+        .values("setup_id", "effective_at", "setup__instrument__code")
     )
     for confirmation in confirmation_rows.iterator(chunk_size=10_000):
-        entry_timestamp = _next_registered_h1_open(confirmation["effective_at"])
-        if _maximum_horizon_end(entry_timestamp) >= development_end:
+        code = confirmation["setup__instrument__code"]
+        entry_timestamp = next(
+            (
+                timestamp
+                for timestamp in inventories_by_code[code]["H1"]
+                if timestamp >= confirmation["effective_at"]
+            ),
+            None,
+        )
+        horizon_end = (
+            _maximum_horizon_end(
+                entry_timestamp,
+                sealed_daily_inventory=inventories_by_code[code]["D"],
+                sealed_h1_inventory=inventories_by_code[code]["H1"],
+                contract=s1_contract,
+            )
+            if entry_timestamp is not None
+            else None
+        )
+        if horizon_end is None or horizon_end >= development_end:
             purged += 1
             continue
         confirmations.append(confirmation)
@@ -1355,6 +1433,7 @@ def run_s1(
         by_session[_session_label(transition["effective_at"])] += 1
         by_book[evaluation["book_identity"]] += 1
         if evaluation["decision"] == EntryEligibilityEvaluation.Decision.ENTRY_PENDING:
+            setup = setups[evaluation["setup_id"]]
             projection_key = (
                 evaluation["setup__instrument_id"],
                 evaluation["entry_timestamp"],
@@ -1377,15 +1456,15 @@ def run_s1(
                 projected_entries.add(projection_key)
                 projections_read += 1
             entry_timestamp = evaluation["entry_timestamp"]
-            eligible_entries.append(entry_timestamp)
+            instrument_code = setup["instrument__code"]
+            eligible_entries.append((instrument_code, entry_timestamp))
             eligible_entries_by_book.setdefault(evaluation["book_identity"], []).append(
-                entry_timestamp
+                (instrument_code, entry_timestamp)
             )
             simultaneous[entry_timestamp.isoformat()] += 1
             simultaneous_by_book.setdefault(evaluation["book_identity"], Counter())[
                 entry_timestamp.isoformat()
             ] += 1
-            setup = setups[evaluation["setup_id"]]
             base_side = "long" if setup["direction"] == SetupEvent.Direction.LONG else "short"
             quote_side = "short" if base_side == "long" else "long"
             shared_currency[
@@ -1496,6 +1575,8 @@ def run_s1(
         "detector_job_id": detector_job.pk,
         "detector_report_sha256": detector_report_sha256,
         "partition_boundary_censor_rule": PARTITION_BOUNDARY_CENSOR_RULE,
+        "pre_s1_governance": PRE_S1_GOVERNANCE,
+        "pre_s1_governance_sha256": PRE_S1_GOVERNANCE_SHA256,
         "maximum_setups": maximum_setups,
         "as_of": as_of.isoformat(),
         **s1_v2_audit,
@@ -1512,6 +1593,8 @@ def run_s1(
             "detector_job_id": detector_job.pk,
             "detector_report_sha256": detector_report_sha256,
             "partition_boundary_censor_rule": PARTITION_BOUNDARY_CENSOR_RULE,
+            "pre_s1_governance": PRE_S1_GOVERNANCE,
+            "pre_s1_governance_sha256": PRE_S1_GOVERNANCE_SHA256,
             "as_of": as_of.isoformat(),
             "bounded": True,
             "complete": True,
@@ -1544,9 +1627,11 @@ def run_s1(
                 },
             },
             "maximum_horizon_concurrency": {
-                "all_books": _maximum_concurrency(eligible_entries),
+                "all_books": _maximum_concurrency(
+                    eligible_entries, inventories_by_code, s1_contract
+                ),
                 "by_strategy_identity": {
-                    book: _maximum_concurrency(entries)
+                    book: _maximum_concurrency(entries, inventories_by_code, s1_contract)
                     for book, entries in sorted(eligible_entries_by_book.items())
                 },
             },

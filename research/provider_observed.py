@@ -8,7 +8,7 @@ point-in-time and entry semantics; membership questions are answered here.
 
 from __future__ import annotations
 
-from market.models import HistoricalTimestampObservation
+from market.models import Candle, HistoricalTimestampObservation, IngestionRun
 
 
 def contract_for_dataset(dataset):
@@ -59,3 +59,21 @@ def entry_timestamp_is_sealed(contract, instrument_code, timestamp):
         inventory__chunk__granularity="H1",
         timestamp=timestamp,
     ).exists()
+
+
+def dataset_inventory_timestamps(dataset, contract, instrument_code, granularity):
+    """Ordered governed membership, retaining actual-row legacy compatibility."""
+    if contract is not None:
+        return inventory_timestamps(contract, instrument_code, granularity)
+    return tuple(
+        Candle.objects.filter(
+            dataset_version=dataset,
+            instrument__code=instrument_code,
+            granularity=granularity,
+            complete=True,
+            ingestion_run__dataset_version=dataset,
+            ingestion_run__status=IngestionRun.Status.SUCCEEDED,
+        )
+        .order_by("timestamp")
+        .values_list("timestamp", flat=True)
+    )
