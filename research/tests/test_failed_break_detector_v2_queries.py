@@ -9,6 +9,7 @@ from django.test.utils import CaptureQueriesContext
 
 from market.models import (
     Candle,
+    DatasetRegistration,
     DatasetVersion,
     HistoricalDataContract,
     HistoricalDatasetPlan,
@@ -26,7 +27,17 @@ from market.models import (
     Instrument,
     SourceRegistry,
 )
-from research.failed_break_detector_v2 import load_instrument_snapshot
+from research.failed_break_detector_v2 import (
+    SUCCESSOR_CONTRACT_SHA256,
+    SUCCESSOR_DATA_IDENTITY,
+    SUCCESSOR_DATASET_VERSION,
+    SUCCESSOR_INVENTORY_SHA256,
+    SUCCESSOR_MANIFEST_SHA256,
+    SUCCESSOR_REGISTRATION_CONFIGURATION_SHA256,
+    SUCCESSOR_REGISTRATION_REPORT_SHA256,
+    load_instrument_snapshot,
+    validate_registered_successor,
+)
 from research.models import StrategyDefinition, StrategyVersion
 
 START = datetime(2015, 1, 1, tzinfo=UTC)
@@ -157,28 +168,36 @@ class DetectorV2QueryBudgetTests(TestCase):
             report_sha256="f" * 64,
             registered_at=START,
         )
-        cls.contract = HistoricalDataContract.objects.create(
-            identity="fixture-v2",
-            strategy_version=strategy,
-            discovery_registration=registration,
-            superseded_data_identity="fixture-v1",
-            phase1_spec_hash="2" * 64,
-            phase1_manifest_hash="3" * 64,
-            global_semantic_inventory_sha256="a" * 64,
-            approval_sha256=approval.sha256,
-            registration_report_sha256=registration.report_sha256,
-            payload={"fixture": "v2"},
-            sha256="",
-        )
-        cls.dataset = DatasetVersion.objects.create(
-            name="fixture-v2",
-            version="fixture-v2",
-            source=source,
-            description="fixture",
-            manifest={"fixture": "v2"},
-            manifest_sha256="",
-            data_contract_sha256=cls.contract.sha256,
-        )
+        cls.contract = HistoricalDataContract.objects.bulk_create(
+            [
+                HistoricalDataContract(
+                    identity=SUCCESSOR_DATA_IDENTITY,
+                    strategy_version=strategy,
+                    discovery_registration=registration,
+                    superseded_data_identity="fixture-v1",
+                    phase1_spec_hash="2" * 64,
+                    phase1_manifest_hash="3" * 64,
+                    global_semantic_inventory_sha256=SUCCESSOR_INVENTORY_SHA256,
+                    approval_sha256=approval.sha256,
+                    registration_report_sha256=registration.report_sha256,
+                    payload={"fixture": "v2"},
+                    sha256=SUCCESSOR_CONTRACT_SHA256,
+                )
+            ]
+        )[0]
+        cls.dataset = DatasetVersion.objects.bulk_create(
+            [
+                DatasetVersion(
+                    name=SUCCESSOR_DATA_IDENTITY,
+                    version=SUCCESSOR_DATASET_VERSION,
+                    source=source,
+                    description="fixture",
+                    manifest={"fixture": "v2"},
+                    manifest_sha256=SUCCESSOR_MANIFEST_SHA256,
+                    data_contract_sha256=SUCCESSOR_CONTRACT_SHA256,
+                )
+            ]
+        )[0]
         plan = HistoricalDatasetPlan.objects.create(
             identity="fixture-v2",
             source=source,
@@ -193,6 +212,29 @@ class DetectorV2QueryBudgetTests(TestCase):
             sha256="",
             data_contract=cls.contract,
             data_contract_sha256=cls.contract.sha256,
+        )
+        DatasetRegistration.objects.bulk_create(
+            [
+                DatasetRegistration(
+                    dataset_version=cls.dataset,
+                    plan=plan,
+                    series_manifest={},
+                    row_counts={},
+                    first_last_timestamps={},
+                    missingness={},
+                    conflict_count=0,
+                    incident_count=0,
+                    logical_chunk_set_hash="4" * 64,
+                    successful_attempt_set_hash="5" * 64,
+                    ingestion_manifest_set_hash="6" * 64,
+                    candle_key_hash="7" * 64,
+                    candle_payload_hash="8" * 64,
+                    configuration_sha256=SUCCESSOR_REGISTRATION_CONFIGURATION_SHA256,
+                    report_sha256=SUCCESSOR_REGISTRATION_REPORT_SHA256,
+                    data_contract=cls.contract,
+                    global_semantic_inventory_sha256=SUCCESSOR_INVENTORY_SHA256,
+                )
+            ]
         )
         for ordinal, granularity in enumerate(("H1", "D", "W"), start=1):
             inventory, members = inventories[granularity]
@@ -267,6 +309,12 @@ class DetectorV2QueryBudgetTests(TestCase):
             granularity: (members[0], members[-1])
             for granularity, (_, members) in inventories.items()
         }
+
+    def test_registration_validation_uses_one_query(self):
+        with CaptureQueriesContext(connection) as captured:
+            identity = validate_registered_successor(self.dataset, self.contract)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(identity["contract_sha256"], SUCCESSOR_CONTRACT_SHA256)
 
     def test_preload_query_budget_is_three_independent_of_row_count(self):
         narrow = {key: (value[0], value[0]) for key, value in self.ranges.items()}

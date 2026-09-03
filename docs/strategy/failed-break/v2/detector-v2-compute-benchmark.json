@@ -1,0 +1,46 @@
+{
+  "environment": {
+    "django": "5.2.17",
+    "harness_sha256": "7716b25b9388077a2fab1ed942c7328efa5e901d021f0c9a671b09b41a68aa57",
+    "machine": "arm64",
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python": "3.11.4",
+    "repository_commit": "270b7b388acc94060b0ba06558a1a034383a481a"
+  },
+  "invocation_workload": {
+    "event_count": 63500,
+    "granularity_counts": {
+      "D": 3000,
+      "H1": 60000,
+      "W": 500
+    },
+    "inventory_sha256": "d5bb9e6f4100c60272d92ba632eb1e65710c0808830cbb95f95c327a6926e139",
+    "workload": "deterministic synthetic sealed completion inventory"
+  },
+  "projection": {
+    "analysis_runs_projected": 60000,
+    "completion_batches": 60572,
+    "daily_members_admitted": 3000,
+    "h1_members_admitted": 60000,
+    "weekly_members_admitted": 500
+  },
+  "scope": {
+    "excludes": [
+      "persistent S1 evidence writes",
+      "database registration validation",
+      "ORM inventory preload",
+      "return or outcome calculation"
+    ],
+    "includes": [
+      "sealed inventory construction and canonical hashing",
+      "ordered completion-stream merge",
+      "admission projection and exact membership assertion",
+      "sealed ten-D-session horizon index construction"
+    ]
+  },
+  "timings_seconds": {
+    "detector_computation": 0.2831254579978122,
+    "inventory_loading": 0.07242629200118245,
+    "total": 0.412538583001151
+  }
+}
