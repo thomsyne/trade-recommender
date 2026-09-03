@@ -231,6 +231,17 @@ class CommittedProjectionTests(unittest.TestCase):
         self.assertFalse(artifact["authorization_effective"])
         self.assertEqual(artifact["report"]["recommendation"]["choice"], "B")
         self.assertFalse(artifact["report"]["recommendation"]["effective"])
+        self.assertEqual(
+            g.PROJECTION_FILE_SHA256,
+            "34a89d96143066b7bcbdf16af031687e1284d694af759d4719bf0d097b12cba1",
+        )
+        self.assertEqual(
+            g.PROJECTION_SHA256,
+            "01f91963bd3972038ba33cc801bc21ab57247747f406381dbd5b62d6bbdb41fb",
+        )
+        reason = artifact["report"]["recommendation"]["reason"]
+        self.assertIn("unconditionally immutable", reason)
+        self.assertNotIn("merely", reason)
 
     def test_actual_entry_clusters_pinned_not_confirmed_setup_or_book_counts(self):
         artifact = g.verify_committed()

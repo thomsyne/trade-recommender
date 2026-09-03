@@ -20,15 +20,22 @@ from statistics import NormalDist
 from time import perf_counter
 from zoneinfo import ZoneInfo
 
-from research.s2_policy import ACCEPTED_JOBS, COMBINED_BOOK, PolicyRefusal, digest, load_policy
+from research.s2_policy import (
+    ACCEPTED_JOBS,
+    CANDIDATE_POLICY_SHA256,
+    COMBINED_BOOK,
+    PolicyRefusal,
+    digest,
+    load_candidate_policy,
+)
 
 CANDIDATE_COMMIT = "cfe9d19eef2f76bec2328098be77f68bf3103320"
 PROJECTION_PATH = (
     Path(__file__).resolve().parent.parent
     / "docs/strategy/failed-break/v1/s2-geometry-projection-v1.json"
 )
-PROJECTION_FILE_SHA256 = "04fdd37beb0bffb39b29b21a65e1af6bdfd1ae18eb515538d70e3a5c9a5fed35"
-PROJECTION_SHA256 = "022cc786e9c6ea98a0631115b98c9ce9562234dbc5e60a3beb203559de6d47dc"
+PROJECTION_FILE_SHA256 = "34a89d96143066b7bcbdf16af031687e1284d694af759d4719bf0d097b12cba1"
+PROJECTION_SHA256 = "01f91963bd3972038ba33cc801bc21ab57247747f406381dbd5b62d6bbdb41fb"
 NY = ZoneInfo("America/New_York")
 DEVELOPMENT_END = datetime(2019, 1, 1, 5, tzinfo=UTC)
 FAMILY_BOOKS = {
@@ -486,7 +493,7 @@ def build_report(events, policy):
             "choice": "B",
             "effective": False,
             "text": "Recommend a separately authorized exploratory-only freeze with promotion permanently prohibited regardless of outcomes; do not activate it here",
-            "reason": "90 dependent eligible physical events cannot establish confirmatory adequacy at 0.20R for all preregistered dispersion scenarios; allocation/resolution and comparator floors remain unknown. Do not move the practical-effect target merely to claim power.",
+            "reason": "90 dependent eligible physical events cannot establish confirmatory adequacy at 0.20R for all preregistered dispersion scenarios; allocation/resolution and comparator floors remain unknown. The 0.20R practical-effect target is unconditionally immutable after the return-blind geometry became known.",
         },
     }
 
@@ -743,7 +750,7 @@ def read_once():
     import psycopg
 
     started = perf_counter()
-    policy = load_policy()
+    policy = load_candidate_policy()
     with psycopg.connect(
         dbname="trade_recommender_research",
         user="trade_recommender",
@@ -850,10 +857,12 @@ def verify_committed():
         body.pop("projection_sha256") == PROJECTION_SHA256 == digest(body),
         "projection self-hash changed",
     )
-    policy = load_policy()
+    policy = load_candidate_policy()
     require(
         artifact["candidate_commit"] == CANDIDATE_COMMIT
-        and artifact["candidate_policy_sha256"] == policy["policy_sha256"]
+        and artifact["candidate_policy_sha256"]
+        == policy["policy_sha256"]
+        == CANDIDATE_POLICY_SHA256
         and artifact["authorization_effective"] is False,
         "candidate/authority mismatch",
     )

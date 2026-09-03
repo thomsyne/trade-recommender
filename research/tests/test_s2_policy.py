@@ -71,7 +71,21 @@ def reference_horizon(inventory, code, entry):
 class ArtifactTests(unittest.TestCase):
     def test_canonical_self_hash_sources_and_every_accepted_job_reconstruct(self):
         policy = s2.load_policy()
-        self.assertEqual(policy["policy_sha256"], s2.POLICY_SHA256)
+        self.assertEqual(
+            policy["policy_sha256"],
+            s2.POLICY_SHA256,
+        )
+        self.assertEqual(
+            s2.POLICY_SHA256,
+            "f5d1a762d065271f5565a27450f6f8585e26cd976ac414084bd17257cc3cfeb8",
+        )
+        self.assertEqual(
+            s2.ARTIFACT_SHA256,
+            "2907ef566b08bc042ba81ef3ffc192af760b85e168f97e63aa8743ba9564e429",
+        )
+        self.assertEqual(
+            hashlib.sha256(s2.ARTIFACT_PATH.read_bytes()).hexdigest(), s2.ARTIFACT_SHA256
+        )
         self.assertEqual(
             s2._verify_jobs(policy["accepted_job_evidence"])["counts"]["entry_eligible"], 204
         )
@@ -89,16 +103,56 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(policy["rules"]["target"]["minimum_R"], "1.5")
         self.assertEqual(policy["rules"]["holding"]["count"], 10)
 
-    def test_every_new_rule_pending_and_no_effective_authority(self):
+    def test_every_reviewed_default_is_exactly_transcribed_and_resolved(self):
         policy = s2.load_policy()
-        self.assertTrue(
-            all(d["status"] == "PENDING_OWNER_AUTHORIZATION" for d in policy["decision_ledger"])
+        candidate = s2.load_candidate_policy()
+        self.assertEqual(
+            [
+                {key: value for key, value in row.items() if key != "status"}
+                for row in policy["decision_ledger"]
+            ],
+            [
+                {key: value for key, value in row.items() if key != "status"}
+                for row in candidate["decision_ledger"]
+            ],
         )
-        self.assertIsNone(policy["effective_at"])
-        self.assertTrue(all(value is False for value in policy["authorization"].values()))
+        self.assertTrue(
+            all(d["status"] == "RESOLVED_OWNER_AUTHORIZED" for d in policy["decision_ledger"])
+        )
+        self.assertEqual(policy["effective_at"], "2026-09-03")
+        self.assertEqual(s2.require_frozen_policy(), policy)
+
+    def test_exploratory_boundary_and_three_authorities_are_exact(self):
+        policy = s2.load_policy()
+        self.assertIs(policy["exploratory_only"], True)
+        self.assertIs(policy["promotion_eligible"], False)
+        self.assertIs(policy["promotion_permanently_prohibited"], True)
+        self.assertEqual(
+            policy["authority_separation"],
+            {
+                "policy_freeze": "AUTHORIZED_EFFECTIVE",
+                "exploratory_return_execution": "SEPARATELY_UNAUTHORIZED",
+                "strategy_promotion": "PERMANENTLY_PROHIBITED",
+            },
+        )
         self.assertFalse(s2.readiness()["execution_ready"])
-        with self.assertRaises(s2.PolicyRefusal):
-            s2.require_frozen_policy()
+        self.assertTrue(s2.readiness()["returns_blocked"])
+
+    def test_every_promotion_override_channel_is_powerless(self):
+        for channel in ("owner", "cli", "environment", "database", "data_only"):
+            with (
+                self.subTest(channel=channel),
+                self.assertRaisesRegex(s2.PolicyRefusal, "permanently prohibited"),
+            ):
+                s2.require_strategy_promotion(**{channel: True})
+        with patch.dict("os.environ", {"S2_PROMOTION_ELIGIBLE": "true"}):
+            with self.assertRaisesRegex(s2.PolicyRefusal, "permanently prohibited"):
+                s2.require_strategy_promotion()
+
+    def test_return_execution_remains_separately_unauthorized(self):
+        for override in ({}, {"owner": True}, {"database": True}, {"data_only": True}):
+            with self.assertRaisesRegex(s2.PolicyRefusal, "separately unauthorized"):
+                s2.require_exploratory_return_execution(**override)
 
     def test_outcome_injection_rehashed_report_still_rejected(self):
         jobs = copy.deepcopy(s2.load_policy()["accepted_job_evidence"])
@@ -137,6 +191,41 @@ class ArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(s2.PolicyRefusal, "self-hash"):
             s2._verified_document(forged, hashlib.sha256(forged).hexdigest(), "policy_sha256")
 
+    def test_loader_refuses_rehashed_boundary_changes_and_override_grants(self):
+        mutations = {
+            "missing_exploratory": lambda body: body.pop("exploratory_only"),
+            "promotion_eligible": lambda body: body.__setitem__("promotion_eligible", True),
+            "not_permanent": lambda body: body.__setitem__(
+                "promotion_permanently_prohibited", False
+            ),
+            "authority_grant": lambda body: body["authorization"].__setitem__(
+                "strategy_promotion", True
+            ),
+            "owner_override": lambda body: body["exploratory_boundary"][
+                "promotion_override_channels"
+            ].__setitem__("owner", "ALLOWED"),
+        }
+        original = Path.read_bytes
+        for name, mutate in mutations.items():
+            body = json.loads(original(s2.ARTIFACT_PATH))
+            mutate(body)
+            body.pop("policy_sha256", None)
+            policy_hash = s2.digest(body)
+            body["policy_sha256"] = policy_hash
+            raw = s2.canonical_bytes(body) + b"\n"
+
+            def substituted(path, *, _raw=raw):
+                return _raw if path.resolve() == s2.ARTIFACT_PATH.resolve() else original(path)
+
+            with (
+                self.subTest(name=name),
+                patch.object(Path, "read_bytes", substituted),
+                patch.object(s2, "ARTIFACT_SHA256", hashlib.sha256(raw).hexdigest()),
+                patch.object(s2, "POLICY_SHA256", policy_hash),
+                self.assertRaises(s2.PolicyRefusal),
+            ):
+                s2.load_policy()
+
     def test_governed_source_drift_refused_without_editing_files(self):
         original = Path.read_bytes
 
@@ -158,20 +247,29 @@ class ArtifactTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             s2.load_policy(path="arbitrary.json")
 
-    def test_count_only_diagnostic_never_counts_family_evaluations_as_independent(self):
+    def test_actual_geometry_adequacy_and_non_authoritative_proxies_are_pinned(self):
         diagnostic = s2.design_diagnostic(s2.load_policy())
         self.assertEqual(diagnostic["combined_eligible_physical_events"], 90)
-        self.assertEqual(diagnostic["family_plus_combined_evaluations_not_independent"], 204)
+        self.assertEqual(diagnostic["entry_week_kish_exact"], "2025/34")
+        self.assertEqual(diagnostic["shared_factor_kish_exact"], "4050/67")
         self.assertEqual(
-            diagnostic["confirmed_week_clusters_not_eligible_clusters"],
-            {"members": 316, "raw_clusters": 196, "kish_exact": "49928/331"},
+            diagnostic["adequacy_at_0_20R"],
+            {
+                "sigma_0_5_R": "ADEQUATE",
+                "sigma_1_0_R": "NOT_ADEQUATE",
+                "sigma_1_5_R": "NOT_ADEQUATE",
+            },
+        )
+        self.assertFalse(diagnostic["confirmatory_adequacy_across_preregistered_scenarios"])
+        self.assertEqual(
+            diagnostic["singleton_408_statistic"],
+            "NON_AUTHORITATIVE_NOT_INDEPENDENCE_EVIDENCE",
         )
         self.assertEqual(
-            diagnostic["minimum_independent_units_at_proposed_effect_by_assumed_sigma_R"],
-            {"0.5": 50, "1": 197, "2": 785},
+            diagnostic["confirmed_setup_kish"],
+            "PROHIBITED_SUBSTITUTE_FOR_TRADE_LEVEL_EFFECTIVE_SAMPLE_SIZE",
         )
         self.assertIsNone(diagnostic["attained_power"])
-        self.assertFalse(diagnostic["sufficiency_claim"])
 
     def test_bad_cluster_histogram_refused(self):
         with self.assertRaises(s2.PolicyRefusal):
@@ -181,10 +279,22 @@ class ArtifactTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             s2.main([])
-        self.assertEqual(json.loads(output.getvalue())["status"], "REVIEW_REQUIRED")
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+        self.assertEqual(
+            json.loads(output.getvalue())["status"],
+            "EFFECTIVE_EXPLORATORY_ONLY_RETURNS_SEPARATELY_UNAUTHORIZED",
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
             s2.main(["--require-frozen"])
-        self.assertEqual(raised.exception.code, 2)
+        self.assertTrue(json.loads(output.getvalue())["policy_freeze_authorized"])
+        for option in ("--require-return-execution", "--require-promotion"):
+            with (
+                self.subTest(option=option),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                s2.main([option])
+            self.assertEqual(raised.exception.code, 2)
 
     def test_execute_and_arbitrary_input_options_do_not_exist(self):
         for option in ("--execute", "--dataset-id", "--artifact", "--outcomes"):
@@ -209,7 +319,11 @@ class ArtifactTests(unittest.TestCase):
 
     def test_readiness_needs_no_database_network_or_writable_file(self):
         original = Path.read_bytes
-        allowed = {s2.ARTIFACT_PATH.resolve()}
+        allowed = {
+            s2.ARTIFACT_PATH.resolve(),
+            s2.CANDIDATE_ARTIFACT_PATH.resolve(),
+            s2.GEOMETRY_ARTIFACT_PATH.resolve(),
+        }
         policy = s2.load_policy()
         allowed.update((s2.ROOT / path).resolve() for path in policy["source_sha256"])
 
@@ -224,7 +338,34 @@ class ArtifactTests(unittest.TestCase):
             patch.object(Path, "write_bytes", side_effect=AssertionError("write forbidden")),
             patch.object(Path, "write_text", side_effect=AssertionError("write forbidden")),
         ):
-            self.assertEqual(s2.readiness()["status"], "REVIEW_REQUIRED")
+            self.assertEqual(
+                s2.readiness()["status"],
+                "EFFECTIVE_EXPLORATORY_ONLY_RETURNS_SEPARATELY_UNAUTHORIZED",
+            )
+
+    def test_freeze_provenance_proves_no_outcome_or_persistent_access(self):
+        policy = s2.load_policy()
+        self.assertEqual(
+            {
+                key: policy["freeze_provenance"][key]
+                for key in (
+                    "candle_payload_read",
+                    "database_read",
+                    "outcome_evidence_accessed",
+                    "provider_or_network_access",
+                    "return_calculated",
+                )
+            },
+            {
+                "candle_payload_read": False,
+                "database_read": False,
+                "outcome_evidence_accessed": False,
+                "provider_or_network_access": False,
+                "return_calculated": False,
+            },
+        )
+        self.assertNotIn("merely", policy["rules"]["change_control"]["rule"])
+        self.assertIn("unconditionally immutable", policy["rules"]["change_control"]["rule"])
 
 
 class MetadataBoundaryTests(unittest.TestCase):

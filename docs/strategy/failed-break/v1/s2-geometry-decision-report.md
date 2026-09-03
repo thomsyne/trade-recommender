@@ -3,8 +3,9 @@
 Recommendation: **B — a separately authorized exploratory-only backtest freeze
 that can never authorize promotion, regardless of outcome.** This recommendation
 is **not effective**. S2, return access and all partition unlocks remain blocked.
-Do not raise the practical-effect target merely to make the existing cohort look
-adequately powered. No additional acquisition is proposed as this gate's action.
+The 0.20R practical-effect target is unconditionally immutable after the
+return-blind geometry became known. No additional acquisition is proposed as
+this gate's action.
 
 Candidate commit `cfe9d19eef2f76bec2328098be77f68bf3103320` and all its files are
 unchanged. This gate adds a projector, a canonical artifact, tests and this report.

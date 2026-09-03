@@ -1,6 +1,6 @@
-"""Offline S2 policy reconstruction, NOT execution or policy activation.
+"""Offline effective S2 exploratory policy verification, NOT return execution.
 
-Only the committed candidate and accepted, hash-pinned JobRun exports are read.
+Only committed policy/geometry artifacts and accepted, hash-pinned JobRun exports are read.
 There are no ORM, provider, strategy runner or outcome imports. Timestamp-only
 helpers specify the boundary a separately authorized executor must later honor.
 """
@@ -15,15 +15,24 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
-from math import ceil
 from pathlib import Path
-from statistics import NormalDist
 
 ROOT = Path(__file__).resolve().parent.parent
-ARTIFACT_PATH = ROOT / "docs/strategy/failed-break/v1/s2-policy-candidate-v1.json"
-ARTIFACT_SHA256 = "8c4bf890213a1d1b1e965e21cf409a0ce2166cd622b608ef5e033077a51996a3"
-POLICY_SHA256 = "e285d0e3aaa988f41982a8fcfc6f111fa68d13e176eb0d4c2eab636c55cf472d"
-BASELINE = "7e34bdf9dbf5b43e45f638acbd685a7070d1733e"
+DOCS = ROOT / "docs/strategy/failed-break/v1"
+ARTIFACT_PATH = DOCS / "s2-exploratory-policy-freeze-v1.json"
+ARTIFACT_SHA256 = "2907ef566b08bc042ba81ef3ffc192af760b85e168f97e63aa8743ba9564e429"
+POLICY_SHA256 = "f5d1a762d065271f5565a27450f6f8585e26cd976ac414084bd17257cc3cfeb8"
+CANDIDATE_ARTIFACT_PATH = DOCS / "s2-policy-candidate-v1.json"
+CANDIDATE_ARTIFACT_SHA256 = "8c4bf890213a1d1b1e965e21cf409a0ce2166cd622b608ef5e033077a51996a3"
+CANDIDATE_POLICY_SHA256 = "e285d0e3aaa988f41982a8fcfc6f111fa68d13e176eb0d4c2eab636c55cf472d"
+GEOMETRY_ARTIFACT_PATH = DOCS / "s2-geometry-projection-v1.json"
+GEOMETRY_ARTIFACT_SHA256 = "34a89d96143066b7bcbdf16af031687e1284d694af759d4719bf0d097b12cba1"
+GEOMETRY_PROJECTION_SHA256 = "01f91963bd3972038ba33cc801bc21ab57247747f406381dbd5b62d6bbdb41fb"
+GEOMETRY_REPORT_SHA256 = "28c2a5cbe182ebcee35c2d576b505fd277397b54e664691f954ac4b23c2b87ac"
+SOURCE_BASELINE = "7e34bdf9dbf5b43e45f638acbd685a7070d1733e"
+FREEZE_BASELINE = "58fb2bb83c58aa1397ce315ab21239da74019cd7"
+CANDIDATE_COMMIT = "cfe9d19eef2f76bec2328098be77f68bf3103320"
+GEOMETRY_COMMIT = "58fb2bb83c58aa1397ce315ab21239da74019cd7"
 ACCEPTED_JOBS = {
     1: (
         "failed-break-signal-count-s0",
@@ -135,18 +144,164 @@ def _verify_jobs(jobs):
     return final
 
 
-def load_policy() -> dict:
-    """Fixed-path, fixed-digest candidate; no environment or caller override."""
+def load_candidate_policy() -> dict:
+    """Historical reviewed candidate, retained as the exact defaults source."""
     try:
-        policy = _verified_document(ARTIFACT_PATH.read_bytes(), ARTIFACT_SHA256, "policy_sha256")
-        _require(policy["policy_sha256"] == POLICY_SHA256, "unreviewed policy identity")
+        policy = _verified_document(
+            CANDIDATE_ARTIFACT_PATH.read_bytes(),
+            CANDIDATE_ARTIFACT_SHA256,
+            "policy_sha256",
+        )
         _require(
             policy["schema"] == "failed-break-s2-policy-candidate-v1"
-            and policy["repository_baseline"] == BASELINE
+            and policy["repository_baseline"] == SOURCE_BASELINE
+            and policy["policy_sha256"] == CANDIDATE_POLICY_SHA256
             and policy["status"] == "CANDIDATE_PENDING_OWNER_AUTHORIZATION"
             and policy["effective_at"] is None
             and all(value is False for value in policy["authorization"].values()),
-            "candidate cannot claim activation authority",
+            "historical candidate identity/authority changed",
+        )
+        return policy
+    except (KeyError, TypeError, OSError) as error:
+        raise PolicyRefusal("incomplete committed S2 candidate") from error
+
+
+def _load_geometry() -> dict:
+    geometry = _verified_document(
+        GEOMETRY_ARTIFACT_PATH.read_bytes(),
+        GEOMETRY_ARTIFACT_SHA256,
+        "projection_sha256",
+    )
+    _require(
+        geometry["projection_sha256"] == GEOMETRY_PROJECTION_SHA256
+        and geometry["report_sha256"] == GEOMETRY_REPORT_SHA256
+        and digest(geometry["report"]) == GEOMETRY_REPORT_SHA256
+        and digest(geometry["events"]) == geometry["event_set_sha256"]
+        and geometry["candidate_commit"] == CANDIDATE_COMMIT
+        and geometry["candidate_policy_sha256"] == CANDIDATE_POLICY_SHA256
+        and geometry["authorization_effective"] is False,
+        "return-blind geometry identity changed",
+    )
+    return geometry
+
+
+def _expected_geometry_acceptance(geometry):
+    combined = geometry["report"]["books"][COMBINED_BOOK]
+    return {
+        "cohort": "REGISTERED_SUCCESSOR_2010_2018",
+        "confirmatory_adequacy_across_preregistered_scenarios": False,
+        "confirmed_setup_kish": "PROHIBITED_SUBSTITUTE_FOR_TRADE_LEVEL_EFFECTIVE_SAMPLE_SIZE",
+        "mde_adequacy_at_minimum_primary_expectancy_R_0_20": {
+            "sigma_0_5_R": "ADEQUATE",
+            "sigma_1_0_R": "NOT_ADEQUATE",
+            "sigma_1_5_R": "NOT_ADEQUATE",
+        },
+        "mde_R_entry_week_kish": combined["mde_R_eligible_geometry"]["entry_week_kish"],
+        "mde_R_shared_factor_kish": combined["mde_R_eligible_geometry"]["shared_factor_kish"],
+        "physical_events": combined["eligible_physical_count"],
+        "singleton_408_statistic": "NON_AUTHORITATIVE_NOT_INDEPENDENCE_EVIDENCE",
+        "trade_level_entry_week_kish": combined["geometry"]["entry_weeks"]["kish_exact"],
+        "trade_level_shared_factor_kish": combined["geometry"]["shared_factors"]["kish_exact"],
+    }
+
+
+def load_policy() -> dict:
+    """Fixed-path, exact effective freeze; no caller/environment/DB override."""
+    try:
+        candidate = load_candidate_policy()
+        geometry = _load_geometry()
+        policy = _verified_document(ARTIFACT_PATH.read_bytes(), ARTIFACT_SHA256, "policy_sha256")
+        _require(policy["policy_sha256"] == POLICY_SHA256, "unreviewed effective policy")
+        _require(
+            policy["schema"] == "failed-break-s2-exploratory-policy-freeze-v1"
+            and policy["repository_baseline"] == FREEZE_BASELINE
+            and policy["status"] == "EFFECTIVE_EXPLORATORY_ONLY"
+            and policy["effective_at"] == "2026-09-03"
+            and policy["exploratory_only"] is True
+            and policy["promotion_eligible"] is False
+            and policy["promotion_permanently_prohibited"] is True,
+            "effective exploratory boundary changed",
+        )
+        _require(
+            policy["authorization"]
+            == {
+                "automatic_promotion": False,
+                "exploratory_return_execution": False,
+                "partition_unlock": False,
+                "persistent_write": False,
+                "policy_execution": False,
+                "policy_freeze": True,
+                "provider_access": False,
+                "return_calculation": False,
+                "strategy_promotion": False,
+            }
+            and policy["authority_separation"]
+            == {
+                "exploratory_return_execution": "SEPARATELY_UNAUTHORIZED",
+                "policy_freeze": "AUTHORIZED_EFFECTIVE",
+                "strategy_promotion": "PERMANENTLY_PROHIBITED",
+            },
+            "authorization separation changed or override introduced",
+        )
+        _require(
+            policy["exploratory_boundary"]
+            == {
+                "applies_to_cohort": "REGISTERED_SUCCESSOR_2010_2018",
+                "future_confirmatory_requirement": (
+                    "SEPARATELY_GOVERNED_GENUINELY_UNTOUCHED_COHORT"
+                ),
+                "live_trading_authorization_path": "NONE_PERMANENTLY_PROHIBITED",
+                "outcome_independent": (
+                    "PERMANENT_NON_PROMOTION_REGARDLESS_OF_ANY_OBSERVED_OUTCOME"
+                ),
+                "practical_effect_target_after_geometry": "IMMUTABLE_0.20R",
+                "promotion_override_channels": {
+                    "cli": "PROHIBITED",
+                    "data_only": "PROHIBITED",
+                    "database": "PROHIBITED",
+                    "environment": "PROHIBITED",
+                    "owner": "PROHIBITED",
+                },
+                "promotion_path": "NONE",
+            },
+            "permanent cohort prohibition changed",
+        )
+        _require(
+            policy["promotion_language_supersession"]
+            == {
+                "effective_rule": "NO_OWNER_OR_OTHER_PROMOTION_PATH",
+                "retained_candidate_language": (
+                    "VERBATIM_FOR_REVIEW_TRACEABILITY_NOT_EFFECTIVE_PROMOTION_AUTHORITY"
+                ),
+                "scope": (
+                    "All promotion, not-promotable and owner-gate wording inside the verbatim "
+                    "S2-01 through S2-07 recommendation payloads is subordinate to the permanent "
+                    "exploratory boundary."
+                ),
+                "superseded_path": "decision_ledger[S2-05].recommendation.owner_gate",
+            },
+            "historical owner-gate wording was not subordinated",
+        )
+        _require(
+            policy["candidate_source"]
+            == {
+                "artifact_sha256": CANDIDATE_ARTIFACT_SHA256,
+                "candidate_commit": CANDIDATE_COMMIT,
+                "policy_sha256": CANDIDATE_POLICY_SHA256,
+                "schema": "failed-break-s2-policy-candidate-v1",
+            }
+            and policy["geometry_source"]
+            == {
+                "artifact_sha256": GEOMETRY_ARTIFACT_SHA256,
+                "artifact_revision": "ADDITIVE_FREEZE_COMMIT_WORDING_CORRECTION",
+                "event_set_sha256": geometry["event_set_sha256"],
+                "projection_sha256": GEOMETRY_PROJECTION_SHA256,
+                "report_sha256": GEOMETRY_REPORT_SHA256,
+                "source_geometry_commit": GEOMETRY_COMMIT,
+                "source_projection_sha256": geometry["source_projection_sha256"],
+            }
+            and policy["geometry_acceptance"] == _expected_geometry_acceptance(geometry),
+            "candidate/geometry binding or adequacy statement changed",
         )
         for relative, expected in policy["source_sha256"].items():
             path = (ROOT / relative).resolve()
@@ -155,12 +310,11 @@ def load_policy() -> dict:
                 hashlib.sha256(path.read_bytes()).hexdigest() == expected,
                 f"governed source changed: {relative}",
             )
-        docs = ROOT / "docs/strategy/failed-break/v1"
-        manifest = json.loads((docs / "phase-1-freeze-manifest.json").read_bytes())
+        manifest = json.loads((DOCS / "phase-1-freeze-manifest.json").read_bytes())
         for field, rules in policy["reconstructed_manifest_rules"].items():
             _require(manifest[field] == rules, f"manifest rules changed: {field}")
         s0 = _verified_document(
-            (docs / "phase-2b1r-pre-s1-s0-acceptance.json").read_bytes(),
+            (DOCS / "phase-2b1r-pre-s1-s0-acceptance.json").read_bytes(),
             policy["pre_s1_governance"]["s0_acceptance_artifact_sha256"],
             "acceptance_sha256",
         )
@@ -183,10 +337,33 @@ def load_policy() -> dict:
             _require(policy["lineage"][field] == s0[field], "registration identity mismatch")
         _require(
             [d["id"] for d in policy["decision_ledger"]] == [f"S2-{i:02d}" for i in range(1, 8)]
+            and all(d["status"] == "RESOLVED_OWNER_AUTHORIZED" for d in policy["decision_ledger"])
+            and [
+                {key: value for key, value in row.items() if key != "status"}
+                for row in policy["decision_ledger"]
+            ]
+            == [
+                {key: value for key, value in row.items() if key != "status"}
+                for row in candidate["decision_ledger"]
+            ],
+            "seven decisions not resolved from exact reviewed defaults",
+        )
+        _require(
+            policy["metrics"]["status"]
+            == "FORMULAS_FROZEN_EXPLORATORY_RETURN_EXECUTION_SEPARATELY_UNAUTHORIZED"
+            and policy["future_execution_contract"]["authority"] is False
+            and policy["future_execution_contract"]["implemented"] is False
             and all(
-                d["status"] == "PENDING_OWNER_AUTHORIZATION" for d in policy["decision_ledger"]
+                policy["freeze_provenance"][field] is False
+                for field in (
+                    "candle_payload_read",
+                    "database_read",
+                    "outcome_evidence_accessed",
+                    "provider_or_network_access",
+                    "return_calculated",
+                )
             ),
-            "decision ledger authorization mismatch",
+            "return execution or outcome access claimed by freeze",
         )
         return policy
     except (KeyError, TypeError, OSError) as error:
@@ -213,58 +390,72 @@ def _cluster_facts(summary):
 
 
 def design_diagnostic(policy) -> dict:
-    """Count-only design sensitivity; no empirical/simulated trade returns."""
-    final = policy["accepted_job_evidence"][2]["evidence"]["report"]
-    coverage = final["coverage"]
-    eligible = coverage["simultaneous_requests"]["by_strategy_identity"][COMBINED_BOOK]["members"]
-    statistical = policy["decision_ledger"][2]["recommendation"]
-    effect = float(policy["decision_ledger"][4]["recommendation"]["minimum_primary_expectancy_R"])
-    alpha = 1 - float(statistical["confidence_level"])
-    power = float(statistical["target_design_power"])
-    z = NormalDist().inv_cdf(1 - alpha / 2) + NormalDist().inv_cdf(power)
+    """Accepted actual return-blind geometry; never a return or power estimate."""
+    geometry = policy["geometry_acceptance"]
     return {
-        "basis": "HYPOTHETICAL_NORMAL_INDEPENDENT_DESIGN_NOT_OBSERVED_POWER",
-        "confirmed_week_clusters_not_eligible_clusters": _cluster_facts(
-            coverage["issuance_week_clusters"]
-        ),
-        "combined_eligible_physical_events": eligible,
-        "family_plus_combined_evaluations_not_independent": final["counts"]["entry_eligible"],
-        "eligible_week_factor_cluster_geometry": "NOT_IDENTIFIED_BY_ACCEPTED_AGGREGATES",
-        "minimum_independent_units_at_proposed_effect_by_assumed_sigma_R": {
-            str(sigma): ceil((z * sigma / effect) ** 2) for sigma in (0.5, 1, 2)
+        "basis": "ACCEPTED_RETURN_BLIND_TRADE_LEVEL_GEOMETRY",
+        "combined_eligible_physical_events": geometry["physical_events"],
+        "entry_week_kish_exact": geometry["trade_level_entry_week_kish"],
+        "shared_factor_kish_exact": geometry["trade_level_shared_factor_kish"],
+        "minimum_detectable_effect_R": {
+            "entry_week_kish": geometry["mde_R_entry_week_kish"],
+            "shared_factor_kish": geometry["mde_R_shared_factor_kish"],
         },
+        "adequacy_at_0_20R": geometry["mde_adequacy_at_minimum_primary_expectancy_R_0_20"],
+        "confirmatory_adequacy_across_preregistered_scenarios": False,
+        "singleton_408_statistic": geometry["singleton_408_statistic"],
+        "confirmed_setup_kish": geometry["confirmed_setup_kish"],
         "attained_power": None,
-        "sufficiency_claim": False,
     }
 
 
 def readiness() -> dict:
     policy = load_policy()
     return {
-        "status": "REVIEW_REQUIRED",
-        "candidate_integrity_verified": True,
+        "status": "EFFECTIVE_EXPLORATORY_ONLY_RETURNS_SEPARATELY_UNAUTHORIZED",
+        "effective_policy_integrity_verified": True,
         "policy_sha256": policy["policy_sha256"],
         "artifact_sha256": ARTIFACT_SHA256,
         "dataset_id": DATASET_ID,
         "effective_data_identity": SUCCESSOR,
         "strategy_version_id": 1,
         "accepted_s1_report_sha256": ACCEPTED_JOBS[3][2],
-        "pending_decisions": [row["id"] for row in policy["decision_ledger"]],
+        "resolved_decisions": [row["id"] for row in policy["decision_ledger"]],
         "design_diagnostic": design_diagnostic(policy),
+        "exploratory_only": True,
+        "promotion_eligible": False,
+        "promotion_permanently_prohibited": True,
+        "policy_freeze_authorized": True,
+        "exploratory_return_execution_authorized": False,
+        "strategy_promotion_authorized": False,
+        "returns_blocked": True,
         "execution_ready": False,
         "live_database_verified": False,
         "blockers": [
-            "Owner decisions and hash-bound effective-time authorization absent",
-            "Eligible week/shared-factor geometry and final count-only power design not established",
-            "No authorized execution/return adapter or partition-unlock authority in this gate",
+            "Exploratory return execution remains separately unauthorized",
+            "No authorized execution/return adapter or persistent-write authority exists in this gate",
         ],
     }
 
 
 def require_frozen_policy():
+    """Verify and return the effective policy; grants no execution authority."""
+    return load_policy()
+
+
+def require_exploratory_return_execution(**requested_overrides):
+    """A separate authorization and implementation are required after this freeze."""
     load_policy()
     raise PolicyRefusal(
-        "S2 candidate is not an authorized effective freeze; returns remain blocked"
+        "exploratory return execution is separately unauthorized; policy freeze is not execution"
+    )
+
+
+def require_strategy_promotion(**requested_overrides):
+    """Irreversible policy/cohort prohibition; overrides are deliberately powerless."""
+    load_policy()
+    raise PolicyRefusal(
+        "strategy promotion is permanently prohibited for this policy and 2010-2018 cohort"
     )
 
 
@@ -417,12 +608,26 @@ def main(argv=None):
     parser.add_argument(
         "--require-frozen",
         action="store_true",
-        help="Fail until a separately authorized effective policy exists",
+        help="Verify the fixed effective policy without granting return execution",
+    )
+    parser.add_argument(
+        "--require-return-execution",
+        action="store_true",
+        help="Fail closed: return execution remains separately unauthorized",
+    )
+    parser.add_argument(
+        "--require-promotion",
+        action="store_true",
+        help="Fail closed: this policy/cohort is permanently non-promotable",
     )
     args = parser.parse_args(argv)
     try:
         if args.require_frozen:
             require_frozen_policy()
+        if args.require_return_execution:
+            require_exploratory_return_execution()
+        if args.require_promotion:
+            require_strategy_promotion()
         print(json.dumps(readiness(), sort_keys=True))
     except PolicyRefusal as error:
         parser.exit(2, f"S2 refused: {error}\n")
