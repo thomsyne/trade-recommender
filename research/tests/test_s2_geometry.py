@@ -1,6 +1,8 @@
 """Small return-blind metadata fixtures; no live query or outcome values."""
 
 import ast
+import hashlib
+import re
 import unittest
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -9,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from research import s2_geometry as g
+from research import s2_policy as s2
 from research.s2_policy import COMBINED_BOOK, PolicyRefusal, load_policy
 
 
@@ -218,6 +221,28 @@ class GeometryTests(unittest.TestCase):
 
 
 class CommittedProjectionTests(unittest.TestCase):
+    def test_decision_report_publishes_current_geometry_identities(self):
+        artifact = g.verify_committed()
+        report_path = g.PROJECTION_PATH.with_name("s2-geometry-decision-report.md")
+        published = dict(
+            re.findall(
+                r"^(Geometry (?:artifact SHA|self-hash|report SHA)): `([0-9a-f]{64})`$",
+                report_path.read_text(),
+                re.MULTILINE,
+            )
+        )
+        expected = {
+            "Geometry artifact SHA": hashlib.sha256(g.PROJECTION_PATH.read_bytes()).hexdigest(),
+            "Geometry self-hash": artifact["projection_sha256"],
+            "Geometry report SHA": artifact["report_sha256"],
+        }
+        self.assertEqual(published, expected)
+        self.assertEqual(expected["Geometry artifact SHA"], g.PROJECTION_FILE_SHA256)
+        self.assertEqual(expected["Geometry artifact SHA"], s2.GEOMETRY_ARTIFACT_SHA256)
+        self.assertEqual(expected["Geometry self-hash"], g.PROJECTION_SHA256)
+        self.assertEqual(expected["Geometry self-hash"], s2.GEOMETRY_PROJECTION_SHA256)
+        self.assertEqual(expected["Geometry report SHA"], s2.GEOMETRY_REPORT_SHA256)
+
     def test_full_projection_reconstructs_offline_no_connection(self):
         with (
             patch("socket.socket.connect", side_effect=AssertionError("network forbidden")),

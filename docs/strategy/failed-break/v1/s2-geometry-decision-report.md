@@ -197,11 +197,11 @@ env -i PATH=/usr/bin:/bin .venv/bin/python -m research.s2_geometry --verify-comm
 env -i PATH=/usr/bin:/bin .venv/bin/python -m unittest research.tests.test_s2_geometry research.tests.test_s2_policy
 ```
 
-Projection SHA: `022cc786e9c6ea98a0631115b98c9ce9562234dbc5e60a3beb203559de6d47dc`
+Geometry self-hash: `af2f0d6e2e865dcdc8d9825c039d5df650059e717cd09fad92b0f41ff72a8fb7`
 
-Artifact file SHA: `04fdd37beb0bffb39b29b21a65e1af6bdfd1ae18eb515538d70e3a5c9a5fed35`
+Geometry artifact SHA: `4749633ac8c3f28e977e7697ba9f1b9d32425de84afde183a2d0fd98e4c7b27b`
 
-Report SHA: `84c53bd85255e7ac6a38dedbfce37dd87ac1a2618d5ae535557a8e06ed283266`
+Geometry report SHA: `f6f9df6a9b2c943171018a8674e659c5fd773a6ae1f4b4562ab097fd90096e8b`
 
 Event set SHA: `bcaa65ec285f491c4bbb543591f77f2ae6eaa73e37899728ccc538a2e00eb273`
 
