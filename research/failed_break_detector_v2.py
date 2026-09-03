@@ -49,6 +49,7 @@ V2_ADMISSION_IDENTITY = "sealed-multitimeframe-completion-stream-v2"
 V2_SUPPORTING_SWING_IDENTITY = "supporting-swing-pivot-lifetime-v2"
 V2_HORIZON_IDENTITY = "sealed-provider-d-ten-session-horizon-v1"
 SUCCESSOR_DATA_IDENTITY = "oanda-ba-ny17-friday-provider-observed-v2"
+SUCCESSOR_DATASET_NAME = "failed-break-provider-observed-historical"
 SUCCESSOR_DATASET_VERSION = "phase-2b1r-v2"
 SUCCESSOR_MANIFEST_SHA256 = "11da094fc7ca6a30e946be33523757d7ab559a9ad1951c9142e8969539930014"
 SUCCESSOR_CONTRACT_SHA256 = "d630cc100cd06abdaa5d08d88353542999d625dd0c80f43eecbb5f649109f11c"
@@ -111,7 +112,7 @@ def validate_registered_successor(
     """Validate stable dataset/registration invariants once before preloading."""
 
     if (
-        dataset.name != SUCCESSOR_DATA_IDENTITY
+        dataset.name != SUCCESSOR_DATASET_NAME
         or dataset.version != SUCCESSOR_DATASET_VERSION
         or dataset.manifest_sha256 != SUCCESSOR_MANIFEST_SHA256
         or dataset.data_contract_sha256 != SUCCESSOR_CONTRACT_SHA256

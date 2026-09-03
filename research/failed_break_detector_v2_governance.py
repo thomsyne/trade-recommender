@@ -8,14 +8,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT_PATH = ROOT / "docs/strategy/failed-break/v2/detector-admission-correction-v2.json"
-ARTIFACT_SHA256 = "ff452b978ea0d7d22cc9c3e5a668b69efcb4d4fa783a8e3e7ded5754ccd4286c"
-POLICY_SHA256 = "f448df725daaa9c7056e695dcaaff7da21f47bc30bac0cb6c0ba6c691966488b"
+ARTIFACT_SHA256 = "3b9188749c10581d7518e25838a2cb65704d1329e7ebe3061cd7fe4b82115861"
+POLICY_SHA256 = "0946c470e82a458a0a626960cf20063ae42f183d59429a9d23dbf6f32ce59f4d"
 SCHEMA = "failed-break-detector-admission-correction-v2"
 STRATEGY_IDENTITY = "failed-break-phase-1-admission-correction-v2"
 DETECTOR_IDENTITY = "failed-break-detector-v2-admission-correction"
 DATA_IDENTITY = "oanda-ba-ny17-friday-provider-observed-v2"
+DATASET_NAME = "failed-break-provider-observed-historical"
 STRATEGY_CONTENT_SHA256 = ARTIFACT_SHA256
-DETECTOR_SOURCE_SHA256 = "65becf5f77455003056499e153f95a94eca6925c5d96726fe8ff276fb6de443d"
+DETECTOR_SOURCE_SHA256 = "d6728111464474dce8fe4875e0548a91c32d28f599e5f57bb31d410326070135"
 
 
 class DetectorV2GovernanceRefusal(ValueError):
@@ -50,6 +51,24 @@ def load_v2_policy() -> dict:
         _require(
             policy["repository_baseline"] == "0a52192d6675a92fe312635896c2f0d1c6dfde96",
             "baseline changed",
+        )
+        _require(
+            policy["dataset"]
+            == {
+                "data_contract_sha256": (
+                    "d630cc100cd06abdaa5d08d88353542999d625dd0c80f43eecbb5f649109f11c"
+                ),
+                "effective_data_identity": DATA_IDENTITY,
+                "global_semantic_inventory_sha256": (
+                    "f0285221956d4ec2d802eba1dc80f5a6d2a7be6697e62b1b3782705886b69427"
+                ),
+                "manifest_sha256": (
+                    "11da094fc7ca6a30e946be33523757d7ab559a9ad1951c9142e8969539930014"
+                ),
+                "name": DATASET_NAME,
+                "version": "phase-2b1r-v2",
+            },
+            "v2 dataset identity changed",
         )
         _require(
             policy["strategy"]

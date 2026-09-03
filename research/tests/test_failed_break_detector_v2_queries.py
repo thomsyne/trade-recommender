@@ -27,18 +27,22 @@ from market.models import (
     Instrument,
     SourceRegistry,
 )
+from market.provider_observed_acquisition import REPLACEMENT_DATASET_NAME
 from research.failed_break_detector_v2 import (
     SUCCESSOR_CONTRACT_SHA256,
     SUCCESSOR_DATA_IDENTITY,
+    SUCCESSOR_DATASET_NAME,
     SUCCESSOR_DATASET_VERSION,
     SUCCESSOR_INVENTORY_SHA256,
     SUCCESSOR_MANIFEST_SHA256,
     SUCCESSOR_REGISTRATION_CONFIGURATION_SHA256,
     SUCCESSOR_REGISTRATION_REPORT_SHA256,
+    DetectorV2EvidenceError,
     load_instrument_snapshot,
     validate_registered_successor,
 )
 from research.models import StrategyDefinition, StrategyVersion
+from research.s0_acceptance import ACCEPTED_EFFECTIVE_DATA_IDENTITY
 
 START = datetime(2015, 1, 1, tzinfo=UTC)
 
@@ -171,7 +175,8 @@ class DetectorV2QueryBudgetTests(TestCase):
         cls.contract = HistoricalDataContract.objects.bulk_create(
             [
                 HistoricalDataContract(
-                    identity=SUCCESSOR_DATA_IDENTITY,
+                    id=2,
+                    identity=ACCEPTED_EFFECTIVE_DATA_IDENTITY,
                     strategy_version=strategy,
                     discovery_registration=registration,
                     superseded_data_identity="fixture-v1",
@@ -188,7 +193,8 @@ class DetectorV2QueryBudgetTests(TestCase):
         cls.dataset = DatasetVersion.objects.bulk_create(
             [
                 DatasetVersion(
-                    name=SUCCESSOR_DATA_IDENTITY,
+                    id=3,
+                    name=REPLACEMENT_DATASET_NAME,
                     version=SUCCESSOR_DATASET_VERSION,
                     source=source,
                     description="fixture",
@@ -310,11 +316,71 @@ class DetectorV2QueryBudgetTests(TestCase):
             for granularity, (_, members) in inventories.items()
         }
 
-    def test_registration_validation_uses_one_query(self):
+    def test_exact_accepted_dataset3_identity_uses_one_registration_query(self):
+        self.assertEqual(self.dataset.pk, 3)
+        self.assertEqual(self.contract.pk, 2)
+        self.assertEqual(self.dataset.name, REPLACEMENT_DATASET_NAME)
+        self.assertEqual(self.contract.identity, ACCEPTED_EFFECTIVE_DATA_IDENTITY)
+        self.assertNotEqual(self.dataset.name, self.contract.identity)
+        self.assertEqual(SUCCESSOR_DATASET_NAME, REPLACEMENT_DATASET_NAME)
+        self.assertEqual(SUCCESSOR_DATA_IDENTITY, ACCEPTED_EFFECTIVE_DATA_IDENTITY)
         with CaptureQueriesContext(connection) as captured:
             identity = validate_registered_successor(self.dataset, self.contract)
         self.assertEqual(len(captured), 1)
         self.assertEqual(identity["contract_sha256"], SUCCESSOR_CONTRACT_SHA256)
+
+    def test_contract_identity_as_dataset_name_is_refused(self):
+        self.dataset.name = ACCEPTED_EFFECTIVE_DATA_IDENTITY
+        with self.assertRaisesRegex(DetectorV2EvidenceError, "identity mismatch"):
+            validate_registered_successor(self.dataset, self.contract)
+
+    def test_dataset_name_as_contract_identity_is_refused(self):
+        self.contract.identity = REPLACEMENT_DATASET_NAME
+        with self.assertRaisesRegex(DetectorV2EvidenceError, "identity mismatch"):
+            validate_registered_successor(self.dataset, self.contract)
+
+    def test_every_other_pinned_identity_mismatch_remains_fail_closed(self):
+        mutations = (
+            (self.dataset, "version", "wrong-version"),
+            (self.dataset, "manifest_sha256", "0" * 64),
+            (self.dataset, "data_contract_sha256", "0" * 64),
+            (self.contract, "sha256", "0" * 64),
+            (self.contract, "global_semantic_inventory_sha256", "0" * 64),
+        )
+        for target, field, wrong_value in mutations:
+            with self.subTest(field=field):
+                original = getattr(target, field)
+                setattr(target, field, wrong_value)
+                try:
+                    with self.assertRaisesRegex(DetectorV2EvidenceError, "identity mismatch"):
+                        validate_registered_successor(self.dataset, self.contract)
+                finally:
+                    setattr(target, field, original)
+
+    def test_every_registration_identity_mismatch_remains_fail_closed(self):
+        registration = DatasetRegistration.objects.get(dataset_version=self.dataset)
+        mutations = (
+            ("configuration_sha256", "0" * 64),
+            ("report_sha256", "0" * 64),
+            ("global_semantic_inventory_sha256", "0" * 64),
+            ("conflict_count", 1),
+            ("incident_count", 1),
+        )
+        for field, wrong_value in mutations:
+            with self.subTest(field=field):
+                original = getattr(registration, field)
+                DatasetRegistration.objects.filter(pk=registration.pk).update(
+                    **{field: wrong_value}
+                )
+                try:
+                    with self.assertRaisesRegex(
+                        DetectorV2EvidenceError, "registration identity or quality"
+                    ):
+                        validate_registered_successor(self.dataset, self.contract)
+                finally:
+                    DatasetRegistration.objects.filter(pk=registration.pk).update(
+                        **{field: original}
+                    )
 
     def test_preload_query_budget_is_three_independent_of_row_count(self):
         narrow = {key: (value[0], value[0]) for key, value in self.ranges.items()}

@@ -18,6 +18,7 @@ from research.failed_break_detector_v2 import (
     PHASE_ORDER,
     SUCCESSOR_CONTRACT_SHA256,
     SUCCESSOR_DATA_IDENTITY,
+    SUCCESSOR_DATASET_NAME,
     SUCCESSOR_DATASET_VERSION,
     SUCCESSOR_INVENTORY_SHA256,
     SUCCESSOR_MANIFEST_SHA256,
@@ -276,6 +277,9 @@ class V2GovernanceTests(SimpleTestCase):
     def test_policy_is_hash_bound_and_runtime_authority_remains_blocked(self):
         policy = load_v2_policy()
         readiness = v2_readiness()
+        self.assertEqual(policy["dataset"]["name"], SUCCESSOR_DATASET_NAME)
+        self.assertEqual(policy["dataset"]["effective_data_identity"], SUCCESSOR_DATA_IDENTITY)
+        self.assertNotEqual(policy["dataset"]["name"], policy["dataset"]["effective_data_identity"])
         self.assertEqual(policy["strategy"]["identity"], readiness["strategy_identity"])
         self.assertEqual(readiness["strategy_content_sha256"], governance.ARTIFACT_SHA256)
         self.assertEqual(
@@ -299,7 +303,7 @@ class V2GovernanceTests(SimpleTestCase):
 
     def test_unregistered_successor_fails_closed(self):
         dataset = SimpleNamespace(
-            name=SUCCESSOR_DATA_IDENTITY,
+            name=SUCCESSOR_DATASET_NAME,
             version=SUCCESSOR_DATASET_VERSION,
             manifest_sha256=SUCCESSOR_MANIFEST_SHA256,
             data_contract_sha256=SUCCESSOR_CONTRACT_SHA256,
