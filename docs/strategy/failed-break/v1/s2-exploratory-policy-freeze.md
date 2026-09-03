@@ -7,11 +7,11 @@ the canonical policy; the JSON artifact is authoritative.
 
 - Candidate commit: `cfe9d19eef2f76bec2328098be77f68bf3103320`
 - Geometry commit: `58fb2bb83c58aa1397ce315ab21239da74019cd7`
-- Effective artifact SHA-256: `2907ef566b08bc042ba81ef3ffc192af760b85e168f97e63aa8743ba9564e429`
-- Effective policy self-hash: `f5d1a762d065271f5565a27450f6f8585e26cd976ac414084bd17257cc3cfeb8`
-- Corrected geometry artifact SHA-256: `34a89d96143066b7bcbdf16af031687e1284d694af759d4719bf0d097b12cba1`
-- Corrected geometry self-hash: `01f91963bd3972038ba33cc801bc21ab57247747f406381dbd5b62d6bbdb41fb`
-- Corrected geometry report SHA-256: `28c2a5cbe182ebcee35c2d576b505fd277397b54e664691f954ac4b23c2b87ac`
+- Effective artifact SHA-256: `4f70ea3c86569de5b54ad3f18d7c1021b6067532ba9fb42b62faf1a0b2676e8c`
+- Effective policy self-hash: `c30896d2fcd943f647f93f53077e7d7d9163c455cca20aad91df8fbcd667e26f`
+- Clarified geometry artifact SHA-256: `4749633ac8c3f28e977e7697ba9f1b9d32425de84afde183a2d0fd98e4c7b27b`
+- Clarified geometry self-hash: `af2f0d6e2e865dcdc8d9825c039d5df650059e717cd09fad92b0f41ff72a8fb7`
+- Clarified geometry report SHA-256: `f6f9df6a9b2c943171018a8674e659c5fd773a6ae1f4b4562ab097fd90096e8b`
 
 ## Effective boundary
 
@@ -24,12 +24,28 @@ confirmatory evaluation requires a separately governed, genuinely untouched
 cohort. This policy and cohort also have no live-trading authorization path.
 
 The 0.20R practical-effect target is unconditionally immutable after the
-return-blind geometry became known. At that target, the trade-level effective
-sample size is adequate for the sigma=0.5R scenario and inadequate for the
-sigma=1.0R and sigma=1.5R scenarios. Confirmatory adequacy is therefore not
-established across the preregistered scenarios. The 408 singleton statistic is
-non-authoritative, and confirmed-setup Kish cannot substitute for trade-level
-effective sample size.
+return-blind geometry became known. The S2-03 `[0.5R, 1.0R, 2.0R]` grid is the
+hypothetical statistical-sensitivity simulation grid. The separate
+`[0.5R, 1.0R, 1.5R]` grid is solely the return-blind geometry/MDE diagnostic
+grid. They are not interchangeable, and neither overrides the other. No
+observed return may select, replace or reinterpret either grid.
+
+At the 0.20R target, the geometry/MDE diagnostic is adequate at sigma=0.5R and
+inadequate at sigma=1.0R and sigma=1.5R. Confirmatory adequacy is therefore not
+established across that diagnostic grid, and the diagnostic cannot authorize
+promotion. The S2-03 2.0R simulation point remains intact. The 408 singleton
+statistic is non-authoritative, and confirmed-setup Kish cannot substitute for
+trade-level effective sample size.
+
+The 15-cell cost sensitivity is exactly the Cartesian product of three
+commission assumptions and five financing assumptions. It is a commission ×
+financing grid, not an adverse-slippage grid. S2-02 keeps additional slippage at
+zero and adds no slippage model; observed bid/ask spread remains applied under
+the governed execution convention. Exploratory results therefore exclude
+additional execution slippage beyond that spread. This optimistic limitation is
+another reason they cannot authorize promotion or live trading. Any future
+slippage model requires a new strategy/policy version and genuinely untouched
+confirmatory evidence.
 
 ## Decision ledger
 

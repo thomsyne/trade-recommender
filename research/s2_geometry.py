@@ -34,8 +34,8 @@ PROJECTION_PATH = (
     Path(__file__).resolve().parent.parent
     / "docs/strategy/failed-break/v1/s2-geometry-projection-v1.json"
 )
-PROJECTION_FILE_SHA256 = "34a89d96143066b7bcbdf16af031687e1284d694af759d4719bf0d097b12cba1"
-PROJECTION_SHA256 = "01f91963bd3972038ba33cc801bc21ab57247747f406381dbd5b62d6bbdb41fb"
+PROJECTION_FILE_SHA256 = "4749633ac8c3f28e977e7697ba9f1b9d32425de84afde183a2d0fd98e4c7b27b"
+PROJECTION_SHA256 = "af2f0d6e2e865dcdc8d9825c039d5df650059e717cd09fad92b0f41ff72a8fb7"
 NY = ZoneInfo("America/New_York")
 DEVELOPMENT_END = datetime(2019, 1, 1, 5, tzinfo=UTC)
 FAMILY_BOOKS = {
@@ -44,6 +44,7 @@ FAMILY_BOOKS = {
     "TWENTY_SESSION_BREAKOUT_FLIP": "failed-break-breakout-flip-v1",
 }
 BOOKS = tuple(sorted((COMBINED_BOOK, *FAMILY_BOOKS.values())))
+GEOMETRY_MDE_SIGMA_GRID = ("0.5", "1.0", "1.5")
 
 # Every selected expression has a named allowlisted output. No SELECT *,
 # arbitrary table, arbitrary predicate or free-form SQL is accepted by the reader.
@@ -485,7 +486,15 @@ def build_report(events, policy):
         "singleton_408_shared_currency_statistic": "NON_AUTHORITATIVE_NOT_INDEPENDENCE_EVIDENCE",
         "confirmed_setup_kish": "PROHIBITED_SUBSTITUTE_FOR_TRADE_LEVEL_EFFECTIVE_SAMPLE_SIZE",
         "mde_method": "(z_0.975+z_0.80)*hypothetical_sigma/sqrt(Kish); 95% two-sided normal design, 80% power; not empirical power; residual temporal/factor dependence may reduce true effective N",
-        "sigma_R": ["0.5", "1.0", "1.5"],
+        "sigma_R": list(GEOMETRY_MDE_SIGMA_GRID),
+        "sigma_grid_governance": {
+            "interchangeable_with_s2_03": False,
+            "observed_return_selection_or_reinterpretation": "PROHIBITED",
+            "overrides_s2_03": False,
+            "promotion_authority": False,
+            "purpose": "RETURN_BLIND_GEOMETRY_MDE_DIAGNOSTIC",
+            "sigma_R": list(GEOMETRY_MDE_SIGMA_GRID),
+        },
         "resolved_allocated_physical_trades": None,
         "resolved_count_status": "UNKNOWABLE_WITHOUT_FORBIDDEN_EXIT_EVIDENCE",
         "actual_allocation_status": "UNKNOWABLE_WITHOUT_MARKED_EQUITY_AND_EARLIER_EXITS",
@@ -493,7 +502,7 @@ def build_report(events, policy):
             "choice": "B",
             "effective": False,
             "text": "Recommend a separately authorized exploratory-only freeze with promotion permanently prohibited regardless of outcomes; do not activate it here",
-            "reason": "90 dependent eligible physical events cannot establish confirmatory adequacy at 0.20R for all preregistered dispersion scenarios; allocation/resolution and comparator floors remain unknown. The 0.20R practical-effect target is unconditionally immutable after the return-blind geometry became known.",
+            "reason": "90 dependent eligible physical events cannot establish confirmatory adequacy at 0.20R across all return-blind geometry/MDE diagnostic points; allocation/resolution and comparator floors remain unknown. The 0.20R practical-effect target is unconditionally immutable after the return-blind geometry became known.",
         },
     }
 

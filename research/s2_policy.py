@@ -20,19 +20,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs/strategy/failed-break/v1"
 ARTIFACT_PATH = DOCS / "s2-exploratory-policy-freeze-v1.json"
-ARTIFACT_SHA256 = "2907ef566b08bc042ba81ef3ffc192af760b85e168f97e63aa8743ba9564e429"
-POLICY_SHA256 = "f5d1a762d065271f5565a27450f6f8585e26cd976ac414084bd17257cc3cfeb8"
+ARTIFACT_SHA256 = "4f70ea3c86569de5b54ad3f18d7c1021b6067532ba9fb42b62faf1a0b2676e8c"
+POLICY_SHA256 = "c30896d2fcd943f647f93f53077e7d7d9163c455cca20aad91df8fbcd667e26f"
 CANDIDATE_ARTIFACT_PATH = DOCS / "s2-policy-candidate-v1.json"
 CANDIDATE_ARTIFACT_SHA256 = "8c4bf890213a1d1b1e965e21cf409a0ce2166cd622b608ef5e033077a51996a3"
 CANDIDATE_POLICY_SHA256 = "e285d0e3aaa988f41982a8fcfc6f111fa68d13e176eb0d4c2eab636c55cf472d"
 GEOMETRY_ARTIFACT_PATH = DOCS / "s2-geometry-projection-v1.json"
-GEOMETRY_ARTIFACT_SHA256 = "34a89d96143066b7bcbdf16af031687e1284d694af759d4719bf0d097b12cba1"
-GEOMETRY_PROJECTION_SHA256 = "01f91963bd3972038ba33cc801bc21ab57247747f406381dbd5b62d6bbdb41fb"
-GEOMETRY_REPORT_SHA256 = "28c2a5cbe182ebcee35c2d576b505fd277397b54e664691f954ac4b23c2b87ac"
+GEOMETRY_ARTIFACT_SHA256 = "4749633ac8c3f28e977e7697ba9f1b9d32425de84afde183a2d0fd98e4c7b27b"
+GEOMETRY_PROJECTION_SHA256 = "af2f0d6e2e865dcdc8d9825c039d5df650059e717cd09fad92b0f41ff72a8fb7"
+GEOMETRY_REPORT_SHA256 = "f6f9df6a9b2c943171018a8674e659c5fd773a6ae1f4b4562ab097fd90096e8b"
 SOURCE_BASELINE = "7e34bdf9dbf5b43e45f638acbd685a7070d1733e"
 FREEZE_BASELINE = "58fb2bb83c58aa1397ce315ab21239da74019cd7"
 CANDIDATE_COMMIT = "cfe9d19eef2f76bec2328098be77f68bf3103320"
 GEOMETRY_COMMIT = "58fb2bb83c58aa1397ce315ab21239da74019cd7"
+CORRECTION_PARENT_COMMIT = "aa8224fb1125258556a816c0e961db1b0f0a094a"
+S2_03_SIGMA_GRID = ("0.5", "1.0", "2.0")
+GEOMETRY_MDE_SIGMA_GRID = ("0.5", "1.0", "1.5")
 ACCEPTED_JOBS = {
     1: (
         "failed-break-signal-count-s0",
@@ -189,7 +192,7 @@ def _expected_geometry_acceptance(geometry):
     combined = geometry["report"]["books"][COMBINED_BOOK]
     return {
         "cohort": "REGISTERED_SUCCESSOR_2010_2018",
-        "confirmatory_adequacy_across_preregistered_scenarios": False,
+        "confirmatory_adequacy_across_geometry_mde_diagnostic_grid": False,
         "confirmed_setup_kish": "PROHIBITED_SUBSTITUTE_FOR_TRADE_LEVEL_EFFECTIVE_SAMPLE_SIZE",
         "mde_adequacy_at_minimum_primary_expectancy_R_0_20": {
             "sigma_0_5_R": "ADEQUATE",
@@ -202,6 +205,100 @@ def _expected_geometry_acceptance(geometry):
         "singleton_408_statistic": "NON_AUTHORITATIVE_NOT_INDEPENDENCE_EVIDENCE",
         "trade_level_entry_week_kish": combined["geometry"]["entry_weeks"]["kish_exact"],
         "trade_level_shared_factor_kish": combined["geometry"]["shared_factors"]["kish_exact"],
+    }
+
+
+def _expected_sigma_grid_governance(candidate, geometry):
+    design_sensitivity = candidate["decision_ledger"][2]["recommendation"]["design_sensitivity"]
+    _require(
+        design_sensitivity
+        == (
+            "Analytical normal-design sensitivity only: hypothetical sigma_R in [0.5,1,2], "
+            "not estimated from returns. Eligible event/week cluster geometry is not present in "
+            "the accepted aggregate; do not treat confirmed-week Kish as eligible independence "
+            "or claim achieved power."
+        ),
+        "S2-03 statistical-sensitivity source changed",
+    )
+    geometry_grid = geometry["report"]["sigma_grid_governance"]
+    _require(
+        geometry_grid
+        == {
+            "interchangeable_with_s2_03": False,
+            "observed_return_selection_or_reinterpretation": "PROHIBITED",
+            "overrides_s2_03": False,
+            "promotion_authority": False,
+            "purpose": "RETURN_BLIND_GEOMETRY_MDE_DIAGNOSTIC",
+            "sigma_R": list(GEOMETRY_MDE_SIGMA_GRID),
+        }
+        and geometry["report"]["sigma_R"] == list(GEOMETRY_MDE_SIGMA_GRID),
+        "geometry/MDE diagnostic grid changed",
+    )
+    return {
+        "geometry_mde_diagnostic": {
+            **geometry_grid,
+            "adequacy_at_practical_effect_target_R_0_20": {
+                "sigma_0_5_R": "ADEQUATE",
+                "sigma_1_0_R": "NOT_ADEQUATE",
+                "sigma_1_5_R": "NOT_ADEQUATE",
+            },
+            "confirmatory_adequacy_across_grid": False,
+        },
+        "relationship": {
+            "interchangeable": False,
+            "observed_return_may_select_replace_or_reinterpret": False,
+            "override": "NEITHER_GRID_OVERRIDES_THE_OTHER",
+        },
+        "s2_03_statistical_sensitivity": {
+            "hypothetical": True,
+            "observed_return_selection_or_estimation": "PROHIBITED",
+            "purpose": "HYPOTHETICAL_STATISTICAL_SENSITIVITY_SIMULATION",
+            "sigma_R": list(S2_03_SIGMA_GRID),
+        },
+    }
+
+
+def _expected_cost_grid_governance(candidate):
+    recommendation = candidate["decision_ledger"][1]["recommendation"]
+    sensitivity = candidate["reconstructed_manifest_rules"]["costs"]["sensitivity"]
+    _require(
+        recommendation["additional_slippage_pips"] == "0"
+        and recommendation["semantics"]
+        == (
+            "No additional slippage model, not a claim that historical slippage was zero; retain "
+            "adverse gap and stop-first rules. Commission unknown/excluded and financing "
+            "unavailable/excluded in primary."
+        )
+        and sensitivity["identity"] == "cost-commission-financing-grid-v1"
+        and sensitivity["round_turn_commission_pips"] == [0, 0.5, 1]
+        and sensitivity["annual_notional_financing_rates"] == [-0.06, -0.03, 0, 0.03, 0.06],
+        "S2-02 cost source changed",
+    )
+    return {
+        "additional_slippage_model": "NONE",
+        "additional_slippage_pips": "0",
+        "limitation": {
+            "additional_execution_slippage_beyond_governed_bid_ask_spread": "EXCLUDED",
+            "assessment": "OPTIMISTIC_LIMITATION",
+            "exploratory_results_cannot_authorize_promotion_or_live_trading": True,
+            "future_slippage_model_requires": [
+                "NEW_STRATEGY_POLICY_VERSION",
+                "GENUINELY_UNTOUCHED_CONFIRMATORY_EVIDENCE",
+            ],
+        },
+        "observed_bid_ask_spread": "APPLIED_UNDER_GOVERNED_EXECUTION_CONVENTION",
+        "sensitivity_grid": {
+            "axes": [
+                "round_turn_commission_pips",
+                "annual_notional_financing_rates",
+            ],
+            "annual_notional_financing_rates": sensitivity["annual_notional_financing_rates"],
+            "cell_count": 15,
+            "classification": "COMMISSION_X_FINANCING_NOT_SLIPPAGE",
+            "identity": sensitivity["identity"],
+            "round_turn_commission_pips": sensitivity["round_turn_commission_pips"],
+            "slippage_axis": False,
+        },
     }
 
 
@@ -221,6 +318,17 @@ def load_policy() -> dict:
             and policy["promotion_eligible"] is False
             and policy["promotion_permanently_prohibited"] is True,
             "effective exploratory boundary changed",
+        )
+        _require(
+            policy["clarification_source"]
+            == {
+                "authorized_scope": "SIGMA_GRID_AND_COST_GRID_DESCRIPTIONS_ONLY",
+                "parent_commit": CORRECTION_PARENT_COMMIT,
+            }
+            and policy["sigma_grid_governance"]
+            == _expected_sigma_grid_governance(candidate, geometry)
+            and policy["cost_grid_governance"] == _expected_cost_grid_governance(candidate),
+            "authorized sigma/cost clarification changed",
         )
         _require(
             policy["authorization"]
@@ -293,7 +401,7 @@ def load_policy() -> dict:
             and policy["geometry_source"]
             == {
                 "artifact_sha256": GEOMETRY_ARTIFACT_SHA256,
-                "artifact_revision": "ADDITIVE_FREEZE_COMMIT_WORDING_CORRECTION",
+                "artifact_revision": "ADDITIVE_POLICY_CLARIFICATION",
                 "event_set_sha256": geometry["event_set_sha256"],
                 "projection_sha256": GEOMETRY_PROJECTION_SHA256,
                 "report_sha256": GEOMETRY_REPORT_SHA256,
@@ -402,7 +510,8 @@ def design_diagnostic(policy) -> dict:
             "shared_factor_kish": geometry["mde_R_shared_factor_kish"],
         },
         "adequacy_at_0_20R": geometry["mde_adequacy_at_minimum_primary_expectancy_R_0_20"],
-        "confirmatory_adequacy_across_preregistered_scenarios": False,
+        "confirmatory_adequacy_across_geometry_mde_diagnostic_grid": False,
+        "sigma_grid_governance": policy["sigma_grid_governance"],
         "singleton_408_statistic": geometry["singleton_408_statistic"],
         "confirmed_setup_kish": geometry["confirmed_setup_kish"],
         "attained_power": None,
@@ -422,6 +531,8 @@ def readiness() -> dict:
         "accepted_s1_report_sha256": ACCEPTED_JOBS[3][2],
         "resolved_decisions": [row["id"] for row in policy["decision_ledger"]],
         "design_diagnostic": design_diagnostic(policy),
+        "cost_grid_governance": policy["cost_grid_governance"],
+        "sigma_grid_governance": policy["sigma_grid_governance"],
         "exploratory_only": True,
         "promotion_eligible": False,
         "promotion_permanently_prohibited": True,

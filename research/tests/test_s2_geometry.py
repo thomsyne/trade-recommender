@@ -233,15 +233,27 @@ class CommittedProjectionTests(unittest.TestCase):
         self.assertFalse(artifact["report"]["recommendation"]["effective"])
         self.assertEqual(
             g.PROJECTION_FILE_SHA256,
-            "34a89d96143066b7bcbdf16af031687e1284d694af759d4719bf0d097b12cba1",
+            "4749633ac8c3f28e977e7697ba9f1b9d32425de84afde183a2d0fd98e4c7b27b",
         )
         self.assertEqual(
             g.PROJECTION_SHA256,
-            "01f91963bd3972038ba33cc801bc21ab57247747f406381dbd5b62d6bbdb41fb",
+            "af2f0d6e2e865dcdc8d9825c039d5df650059e717cd09fad92b0f41ff72a8fb7",
         )
         reason = artifact["report"]["recommendation"]["reason"]
         self.assertIn("unconditionally immutable", reason)
         self.assertNotIn("merely", reason)
+        self.assertNotIn("preregistered dispersion", reason)
+        self.assertEqual(
+            artifact["report"]["sigma_grid_governance"],
+            {
+                "interchangeable_with_s2_03": False,
+                "observed_return_selection_or_reinterpretation": "PROHIBITED",
+                "overrides_s2_03": False,
+                "promotion_authority": False,
+                "purpose": "RETURN_BLIND_GEOMETRY_MDE_DIAGNOSTIC",
+                "sigma_R": ["0.5", "1.0", "1.5"],
+            },
+        )
 
     def test_actual_entry_clusters_pinned_not_confirmed_setup_or_book_counts(self):
         artifact = g.verify_committed()

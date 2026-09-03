@@ -77,11 +77,11 @@ class ArtifactTests(unittest.TestCase):
         )
         self.assertEqual(
             s2.POLICY_SHA256,
-            "f5d1a762d065271f5565a27450f6f8585e26cd976ac414084bd17257cc3cfeb8",
+            "c30896d2fcd943f647f93f53077e7d7d9163c455cca20aad91df8fbcd667e26f",
         )
         self.assertEqual(
             s2.ARTIFACT_SHA256,
-            "2907ef566b08bc042ba81ef3ffc192af760b85e168f97e63aa8743ba9564e429",
+            "4f70ea3c86569de5b54ad3f18d7c1021b6067532ba9fb42b62faf1a0b2676e8c",
         )
         self.assertEqual(
             hashlib.sha256(s2.ARTIFACT_PATH.read_bytes()).hexdigest(), s2.ARTIFACT_SHA256
@@ -148,6 +148,16 @@ class ArtifactTests(unittest.TestCase):
         with patch.dict("os.environ", {"S2_PROMOTION_ELIGIBLE": "true"}):
             with self.assertRaisesRegex(s2.PolicyRefusal, "permanently prohibited"):
                 s2.require_strategy_promotion()
+        for override in (
+            {"future_return": "ADEQUATE"},
+            {"successful_outcome": True},
+            {"practical_effect_target_R": "0.40"},
+        ):
+            with (
+                self.subTest(override=override),
+                self.assertRaisesRegex(s2.PolicyRefusal, "permanently prohibited"),
+            ):
+                s2.require_strategy_promotion(**override)
 
     def test_return_execution_remains_separately_unauthorized(self):
         for override in ({}, {"owner": True}, {"database": True}, {"data_only": True}):
@@ -194,6 +204,8 @@ class ArtifactTests(unittest.TestCase):
     def test_loader_refuses_rehashed_boundary_changes_and_override_grants(self):
         mutations = {
             "missing_exploratory": lambda body: body.pop("exploratory_only"),
+            "exploratory_false": lambda body: body.__setitem__("exploratory_only", False),
+            "missing_permanent": lambda body: body.pop("promotion_permanently_prohibited"),
             "promotion_eligible": lambda body: body.__setitem__("promotion_eligible", True),
             "not_permanent": lambda body: body.__setitem__(
                 "promotion_permanently_prohibited", False
@@ -204,6 +216,31 @@ class ArtifactTests(unittest.TestCase):
             "owner_override": lambda body: body["exploratory_boundary"][
                 "promotion_override_channels"
             ].__setitem__("owner", "ALLOWED"),
+            "practical_effect_target_reinterpretation": lambda body: body[
+                "exploratory_boundary"
+            ].__setitem__("practical_effect_target_after_geometry", "REINTERPRETED_0.40R"),
+            "s2_03_grid_substituted_by_geometry": lambda body: body["sigma_grid_governance"][
+                "s2_03_statistical_sensitivity"
+            ].__setitem__("sigma_R", list(s2.GEOMETRY_MDE_SIGMA_GRID)),
+            "geometry_grid_substituted_by_s2_03": lambda body: body["sigma_grid_governance"][
+                "geometry_mde_diagnostic"
+            ].__setitem__("sigma_R", list(s2.S2_03_SIGMA_GRID)),
+            "geometry_treated_as_s2_03": lambda body: body["sigma_grid_governance"][
+                "geometry_mde_diagnostic"
+            ].__setitem__("purpose", "HYPOTHETICAL_STATISTICAL_SENSITIVITY_SIMULATION"),
+            "cost_grid_treated_as_slippage": lambda body: body["cost_grid_governance"][
+                "sensitivity_grid"
+            ].__setitem__("classification", "ADVERSE_SLIPPAGE_GRID"),
+            "slippage_axis_without_new_policy_version": lambda body: body["cost_grid_governance"][
+                "sensitivity_grid"
+            ].__setitem__(
+                "axes",
+                [
+                    "round_turn_commission_pips",
+                    "annual_notional_financing_rates",
+                    "additional_slippage_pips",
+                ],
+            ),
         }
         original = Path.read_bytes
         for name, mutate in mutations.items():
@@ -260,7 +297,7 @@ class ArtifactTests(unittest.TestCase):
                 "sigma_1_5_R": "NOT_ADEQUATE",
             },
         )
-        self.assertFalse(diagnostic["confirmatory_adequacy_across_preregistered_scenarios"])
+        self.assertFalse(diagnostic["confirmatory_adequacy_across_geometry_mde_diagnostic_grid"])
         self.assertEqual(
             diagnostic["singleton_408_statistic"],
             "NON_AUTHORITATIVE_NOT_INDEPENDENCE_EVIDENCE",
@@ -270,6 +307,60 @@ class ArtifactTests(unittest.TestCase):
             "PROHIBITED_SUBSTITUTE_FOR_TRADE_LEVEL_EFFECTIVE_SAMPLE_SIZE",
         )
         self.assertIsNone(diagnostic["attained_power"])
+
+    def test_sigma_grids_have_distinct_exact_non_interchangeable_purposes(self):
+        governance = s2.readiness()["sigma_grid_governance"]
+        self.assertEqual(
+            governance["s2_03_statistical_sensitivity"],
+            {
+                "hypothetical": True,
+                "observed_return_selection_or_estimation": "PROHIBITED",
+                "purpose": "HYPOTHETICAL_STATISTICAL_SENSITIVITY_SIMULATION",
+                "sigma_R": ["0.5", "1.0", "2.0"],
+            },
+        )
+        self.assertEqual(governance["geometry_mde_diagnostic"]["sigma_R"], ["0.5", "1.0", "1.5"])
+        self.assertEqual(
+            governance["geometry_mde_diagnostic"]["purpose"],
+            "RETURN_BLIND_GEOMETRY_MDE_DIAGNOSTIC",
+        )
+        self.assertFalse(governance["geometry_mde_diagnostic"]["promotion_authority"])
+        self.assertEqual(
+            governance["relationship"],
+            {
+                "interchangeable": False,
+                "observed_return_may_select_replace_or_reinterpret": False,
+                "override": "NEITHER_GRID_OVERRIDES_THE_OTHER",
+            },
+        )
+
+    def test_cost_grid_is_exact_commission_by_financing_with_no_slippage_axis(self):
+        governance = s2.readiness()["cost_grid_governance"]
+        self.assertEqual(governance["additional_slippage_pips"], "0")
+        self.assertEqual(governance["additional_slippage_model"], "NONE")
+        self.assertEqual(
+            governance["observed_bid_ask_spread"],
+            "APPLIED_UNDER_GOVERNED_EXECUTION_CONVENTION",
+        )
+        grid = governance["sensitivity_grid"]
+        self.assertEqual(grid["cell_count"], 15)
+        self.assertEqual(grid["classification"], "COMMISSION_X_FINANCING_NOT_SLIPPAGE")
+        self.assertEqual(
+            grid["axes"],
+            ["round_turn_commission_pips", "annual_notional_financing_rates"],
+        )
+        self.assertIs(grid["slippage_axis"], False)
+        self.assertEqual(governance["limitation"]["assessment"], "OPTIMISTIC_LIMITATION")
+        self.assertIs(
+            governance["limitation"][
+                "exploratory_results_cannot_authorize_promotion_or_live_trading"
+            ],
+            True,
+        )
+        self.assertEqual(
+            governance["limitation"]["future_slippage_model_requires"],
+            ["NEW_STRATEGY_POLICY_VERSION", "GENUINELY_UNTOUCHED_CONFIRMATORY_EVIDENCE"],
+        )
 
     def test_bad_cluster_histogram_refused(self):
         with self.assertRaises(s2.PolicyRefusal):

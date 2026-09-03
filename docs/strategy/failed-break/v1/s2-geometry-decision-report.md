@@ -106,9 +106,12 @@ unknowable; no S2 concentration acceptance gate is declared passed.
 
 Using the candidate's 95% two-sided confidence and 80% target power:
 `MDE = (z_0.975 + z_0.80) × assumed_sigma / sqrt(n_eff)`.
-The newly requested dispersion grid is **0.5R, 1.0R, 1.5R**; the prior candidate
-artifact is not changed. These are normal-design sensitivities with assumed
-dispersion and cluster independence, not measured power or return estimates.
+The **0.5R, 1.0R, 1.5R** grid is the return-blind geometry/MDE diagnostic grid.
+Its purpose is distinct from S2-03's hypothetical statistical-sensitivity
+simulation grid of **0.5R, 1.0R, 2.0R**, and neither replaces nor overrides the
+other. No observed return may select, replace or reinterpret either grid. These
+are normal-design sensitivities with assumed dispersion and cluster
+independence, not measured power or return estimates.
 
 | Combined sample basis | n / Kish | σ=0.5R | σ=1.0R | σ=1.5R |
 |---|---:|---:|---:|---:|
@@ -116,9 +119,11 @@ dispersion and cluster independence, not measured power or return estimates.
 | Actual eligible entry-week geometry | 59.5588 | 0.1815R | 0.3630R | 0.5445R |
 | Actual eligible shared-factor geometry | 60.4478 | 0.1802R | 0.3603R | 0.5405R |
 
-At the proposed practical effect **0.20R**, adequacy is not established across
-the preregistered dispersion scenarios: σ=1.0R and 1.5R require much larger
-effects even before actual allocation/resolution uncertainty. Residual serial
+At the proposed practical effect **0.20R**, the geometry/MDE diagnostic is
+adequate at σ=0.5R and inadequate at σ=1.0R and 1.5R. Confirmatory adequacy is
+therefore not established across this diagnostic grid. The diagnostic has no
+promotion authority. Larger effects are required at the two inadequate points
+even before actual allocation/resolution uncertainty. Residual serial
 dependence can further reduce information. All per-book and separately labelled
 capacity-diagnostic MDEs are included; none is a claim about resolved-trade n_eff.
 
