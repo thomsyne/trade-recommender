@@ -90,7 +90,9 @@ class EvidenceAdapter(Protocol):
 
     def verify_return_blind_lineage(self) -> dict: ...
 
-    def load_normalized_events(self, expected_keys: tuple[str, ...]) -> list[dict]: ...
+    def load_normalized_events(
+        self, expected_keys: tuple[str, ...], *, progress=None
+    ) -> list[dict]: ...
 
 
 class _MigrationCheckedAdapter:
@@ -112,8 +114,8 @@ class _MigrationCheckedAdapter:
         require(observed == EXPECTED_MIGRATIONS, "research migration state changed")
         return self.wrapped.verify_return_blind_lineage()
 
-    def load_normalized_events(self, expected_keys):
-        return self.wrapped.load_normalized_events(expected_keys)
+    def load_normalized_events(self, expected_keys, *, progress=None):
+        return self.wrapped.load_normalized_events(expected_keys, progress=progress)
 
 
 class ResultStore(Protocol):
@@ -277,15 +279,16 @@ def _run_atomic_operation(
     _validate_lineage(lineage)
     store.ensure_absent(IDEMPOTENCY_KEY)
     if progress:
-        progress("lineage", 0, EXPECTED_EVENTS)
+        progress("upstream_evidence", 1, 1)
     clock = perf_counter()
-    events = adapter.load_normalized_events(expected_keys)
+    events = adapter.load_normalized_events(expected_keys, progress=progress)
     if timings is not None:
         timings["sealed_evidence_loading_seconds"] = perf_counter() - clock
     actual_keys = tuple(sorted(row.get("physical_event_key") for row in events))
     require(actual_keys == tuple(sorted(expected_keys)), "missing or extra physical event")
     if progress:
         progress("normalized", len(events), EXPECTED_EVENTS)
+        progress("calculation", 0, EXPECTED_EVENTS)
     clock = perf_counter()
     try:
         report = calculator.calculate_synthetic_cohort(
@@ -298,6 +301,8 @@ def _run_atomic_operation(
         raise RunnerRefusal(str(error)) from error
     if timings is not None:
         timings["pure_calculator_seconds"] = perf_counter() - clock
+    if progress:
+        progress("calculation", EXPECTED_EVENTS, EXPECTED_EVENTS)
     require(
         all(row["terminal"] != "UNRESOLVED_DATA" for row in report["event_results"]),
         "unresolved outcome aborts the complete operation",
@@ -314,11 +319,13 @@ def _run_atomic_operation(
     if inject_failure_after == "calculation":
         raise RunnerRefusal("injected failure after calculation")
     clock = perf_counter()
+    if progress:
+        progress("commit", 0, 1)
     store.persist(payload, inject_failure_after=inject_failure_after)
     if timings is not None:
         timings["atomic_persistence_seconds"] = perf_counter() - clock
     if progress:
-        progress("committed", EXPECTED_EVENTS, EXPECTED_EVENTS)
+        progress("commit", 1, 1)
     return payload
 
 
@@ -422,12 +429,21 @@ class SyntheticEvidenceAdapter:
         self.query_counts["return_blind_lineage"] = 1
         return copy.deepcopy(self.lineage)
 
-    def load_normalized_events(self, expected_keys: tuple[str, ...]) -> list[dict]:
+    def load_normalized_events(
+        self, expected_keys: tuple[str, ...], *, progress=None
+    ) -> list[dict]:
         self.query_counts["sealed_outcome_preload"] = 1
         require(
             set(expected_keys) == {row.get("physical_event_key") for row in self.events},
             "synthetic event set drift",
         )
+        if progress:
+            progress("cohort_reconstruction", len(self.events), len(self.events))
+            progress("entry_evidence", len(self.events), len(self.events))
+            progress("sealed_inventory", len(self.events), len(self.events))
+            progress("evidence_plan", len(self.events), len(self.events))
+            progress("sealed_candles", len(self.events), len(self.events))
+            progress("normalization", len(self.events), len(self.events))
         return copy.deepcopy(self.events)
 
 

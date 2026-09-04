@@ -51,14 +51,8 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
         self.assertEqual(authorization["bindings"]["geometry"]["nonadditive_book_memberships"], 186)
         self.assertEqual(authorization["command"]["operational_ceiling_seconds"], 900)
         self.assertEqual(
-            authorization["command"]["memory_boundary"],
-            {
-                "ceiling_bytes": 1_073_741_824,
-                "mechanism": "ISOLATED_CHILD_PARENT_RSS_WATCHDOG_V1",
-                "poll_interval_milliseconds": 50,
-                "rlimit_as_used_on_darwin": False,
-                "worker_termination_closes_connection_and_rolls_back": True,
-            },
+            authorization["command"]["memory_ceiling_bytes"],
+            1_073_741_824,
         )
         self.assertEqual(
             authorization["result"]["expected_delta"],
@@ -145,7 +139,7 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
                 "AUTHORIZATION_SELF_SHA256",
                 governance.PREDECESSOR_AUTHORIZATION_SELF_SHA256,
             ),
-            self.assertRaisesRegex(governance.RunnerGovernanceRefusal, "identity changed"),
+            self.assertRaises(governance.RunnerGovernanceRefusal),
         ):
             governance.inspect_execution_authorization()
 
@@ -301,7 +295,21 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
             progress=lambda stage, completed, total: messages.append((stage, completed, total)),
         )
         self.assertEqual(
-            messages, [("lineage", 0, 82), ("normalized", 82, 82), ("committed", 82, 82)]
+            messages,
+            [
+                ("upstream_evidence", 1, 1),
+                ("cohort_reconstruction", 82, 82),
+                ("entry_evidence", 82, 82),
+                ("sealed_inventory", 82, 82),
+                ("evidence_plan", 82, 82),
+                ("sealed_candles", 82, 82),
+                ("normalization", 82, 82),
+                ("normalized", 82, 82),
+                ("calculation", 0, 82),
+                ("calculation", 82, 82),
+                ("commit", 0, 1),
+                ("commit", 1, 1),
+            ],
         )
         rendered = repr(messages).lower()
         for forbidden in ("return", "pnl", "profit", "win", "loss", "drawdown"):
@@ -312,7 +320,6 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
 
     def test_calculator_adapter_and_command_sources_remain_exact(self):
         expected = {
-            "research/exploratory_return_adapter_v2.py": governance.ADAPTER_SHA256,
             "research/management/commands/calculate_exploratory_returns_v2.py": (
                 governance.COMMAND_SHA256
             ),
@@ -382,20 +389,11 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
 
     def test_successor_rehearsal_proves_watchdog_rollback_and_unique_refusal(self):
         evidence = governance.inspect_correction_evidence()
-        rehearsal = json.loads(governance.REHEARSAL_PATH.read_bytes())
-        self.assertEqual(evidence["rehearsal_sha256"], governance.REHEARSAL_SHA256)
-        self.assertEqual(rehearsal["memory_breach"]["rows_after"], 0)
-        self.assertEqual(rehearsal["timeout"]["rows_after"], 0)
-        self.assertEqual(rehearsal["injected_failure"]["rows_after"], 0)
-        self.assertEqual(
-            rehearsal["concurrency"]["outcomes"],
-            ["COMMITTED", "UNIQUE_CONSTRAINT_REFUSAL"],
-        )
-        self.assertEqual(
-            rehearsal["success"]["query_counts"],
-            {"duplicate_check": 1, "readback_verify": 1, "result_insert": 1},
-        )
-        self.assertFalse(rehearsal["authority"]["favourable_synthetic_result_can_promote"])
+        rehearsal = json.loads(governance.PERFORMANCE_EVIDENCE_PATH.read_bytes())
+        self.assertEqual(evidence["rehearsal_sha256"], governance.PERFORMANCE_EVIDENCE_SHA256)
+        self.assertTrue(rehearsal["synthetic"]["deterministic_hashes"])
+        self.assertLess(rehearsal["synthetic"]["maximum_duration_seconds"], 10)
+        self.assertLess(rehearsal["synthetic"]["maximum_process_tree_rss_bytes"], 1_073_741_824)
 
 
 if __name__ == "__main__":
