@@ -1,0 +1,84 @@
+{
+  "authorization": {
+    "persistent_v2_s1_execution": false,
+    "returns_or_backtesting": false
+  },
+  "batch_runs": [
+    {
+      "batch_size": 500,
+      "database": "failed_break_v2_s1_benchmark_a",
+      "timings_seconds": {
+        "canonical_evidence_construction": 0.001064,
+        "detector_computation": 0.997601,
+        "h1_d_w_and_conversion_preload": 2.075361,
+        "persistence_and_commit": 0.334191,
+        "reference_equivalence_verification": 1.022356,
+        "registration_and_lineage_validation": 0.374964,
+        "s0_acceptance_verification": 18.268625,
+        "total": 23.282494
+      }
+    },
+    {
+      "batch_size": 2000,
+      "database": "failed_break_v2_s1_benchmark_b",
+      "timings_seconds": {
+        "canonical_evidence_construction": 0.001034,
+        "detector_computation": 1.003352,
+        "h1_d_w_and_conversion_preload": 2.062506,
+        "persistence_and_commit": 0.333740,
+        "reference_equivalence_verification": 1.028357,
+        "registration_and_lineage_validation": 0.381021,
+        "s0_acceptance_verification": 18.221851,
+        "total": 23.222050
+      }
+    }
+  ],
+  "determinism": {
+    "batch_size_invariant": true,
+    "job_configuration_sha256": "cff541256f9d2138260e2b7ebe04d44ff3e2ddaa0ddeafd5f0058c69af13f08b",
+    "job_report_sha256": "05aa6d17af02a6bf1188eeb08d5f60dc5aa11347b79d3c923bd70a6e505f7b9a",
+    "projection_sha256": "e475a78ed5eb357e97d7aa62b58fa4b512fc9ae9eda4f521e2162944d4f374e2",
+    "two_restore_invariant": true
+  },
+  "environment": {
+    "django": "5.2.17",
+    "harness_sha256": "50220560994df705b4754757714fb5797131b012c8168657e4405af12b1859c9",
+    "machine": "arm64",
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "python": "3.11.4",
+    "repository_baseline": "ea0c5d5d403c36661d18b049a6d2f0e532d7f189"
+  },
+  "fixture": {
+    "conversion_instrument": "USD_CAD",
+    "measurement_end_exclusive": "2019-01-01T00:00:00+00:00",
+    "measurement_instrument": "AUD_USD",
+    "measurement_start": "2018-01-01T00:00:00+00:00",
+    "warmup_start": "2017-01-01T00:00:00+00:00"
+  },
+  "inventory_counts": {
+    "AUD_USD": {"D": 519, "H1": 12409, "W": 103},
+    "USD_CAD": {"D": 521, "H1": 12411, "W": 103}
+  },
+  "projected_complete_runtime_minutes": {
+    "high": 6,
+    "low": 2
+  },
+  "row_counts": {
+    "analysis_runs": 6216,
+    "attributions": 20,
+    "entry_eligibility": 17,
+    "job_runs": 1,
+    "levels": 584,
+    "lifecycle_events": 577,
+    "setups": 11,
+    "transitions": 28
+  },
+  "safety": {
+    "duplicate_refusal": true,
+    "injected_failure_rollback_exact": true,
+    "post_entry_outcomes_read": false,
+    "reference_equivalence": true,
+    "v1_evidence_unchanged": true
+  },
+  "schema": "failed-break-v2-s1-disposable-benchmark-results-v1"
+}
