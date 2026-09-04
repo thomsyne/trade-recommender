@@ -48,29 +48,36 @@ class RunnerGovernanceTests(unittest.TestCase):
         self.assertEqual((artifact["expected"]["physical_event_count"], len(set(keys))), (82, 82))
         self.assertNotIn(governance.BOUNDARY_PURGED_EVENT_KEY, keys)
 
-    def test_default_command_is_return_blind_and_not_authorized(self):
+    def test_default_command_reports_return_blind_authorized_readiness(self):
         output = io.StringIO()
         with mock.patch.object(
-            governance,
-            "require_execution_authorization",
-            side_effect=AssertionError("default readiness asked for execution authority"),
+            runner,
+            "readiness",
+            return_value={
+                "status": "AUTHORIZED_NOT_EXECUTED",
+                "governed_physical_events": 82,
+                "outcome_query_count": 0,
+                "persistent_write_count": 0,
+            },
         ):
             call_command("calculate_exploratory_returns_v2", stdout=output)
-        self.assertIn("status=IMPLEMENTED_NOT_AUTHORIZED", output.getvalue())
+        self.assertIn("status=AUTHORIZED_NOT_EXECUTED", output.getvalue())
         self.assertIn("outcome_queries=0 writes=0", output.getvalue())
 
-    def test_execute_refuses_before_django_adapter_import_or_query(self):
+    def test_execute_environment_refusal_precedes_django_adapter_import(self):
         sys.modules.pop("research.exploratory_return_adapter_v2", None)
-        with self.assertRaisesRegex(CommandError, "unauthorized"):
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            self.assertRaisesRegex(CommandError, "venv/bin/python|required"),
+        ):
             call_command("calculate_exploratory_returns_v2", "--execute", stderr=io.StringIO())
         self.assertNotIn("research.exploratory_return_adapter_v2", sys.modules)
 
-    def test_fixed_path_authorization_absent_and_no_override_api(self):
+    def test_fixed_path_authorization_is_exact_and_has_no_override_api(self):
         state = governance.inspect_execution_authorization()
-        self.assertEqual(state["status"], "SEPARATELY_UNAUTHORIZED")
-        self.assertFalse(state["present"])
-        with self.assertRaisesRegex(governance.RunnerGovernanceRefusal, "unauthorized"):
-            governance.require_execution_authorization()
+        self.assertEqual(state["status"], "AUTHORIZED_NOT_EXECUTED")
+        self.assertTrue(state["present"])
+        self.assertEqual(state["artifact_sha256"], governance.AUTHORIZATION_ARTIFACT_SHA256)
         self.assertNotIn("path", governance.require_execution_authorization.__code__.co_varnames)
 
     def test_forged_authority_and_promotion_fail_closed(self):

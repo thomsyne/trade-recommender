@@ -1,13 +1,10 @@
-"""Governed orchestration for one future v2 exploratory-return execution.
-
-The committed state is intentionally not executable: a separate fixed-path
-authorization artifact must be added and verified before the Django adapter is
-constructed or any outcome-bearing query can run.
-"""
+"""Governed orchestration for one exactly-once v2 exploratory-return execution."""
 
 from __future__ import annotations
 
 import copy
+import resource
+import signal
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -19,6 +16,12 @@ JOB_IDENTITY = "failed-break-exploratory-returns-v2"
 IDEMPOTENCY_KEY = "failed-break-exploratory-returns-v2|phase-2b1r-v2|development-2010-2018"
 EXPECTED_EVENTS = 82
 BOUNDARY_PURGED_EVENT_KEY = "cbecf84cceff3e391963280179633853ea8f74b2dafe3ba93910f71aac002e77"
+OPERATIONAL_CEILING_SECONDS = 900
+MEMORY_CEILING_BYTES = 1_073_741_824
+EXPECTED_MIGRATIONS = {
+    "market": ("0027_gate8i_final_dataset_acceptance", 27),
+    "research": ("0015_pre_s1_inventory_entry_boundary", 15),
+}
 
 
 class RunnerRefusal(ValueError):
@@ -30,12 +33,105 @@ def require(condition, message):
         raise RunnerRefusal(message)
 
 
+@contextmanager
+def _operational_limits():
+    """Apply the governed wall-clock and address-space ceilings to execution."""
+    require(hasattr(signal, "setitimer"), "platform cannot enforce execution timeout")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_limit = resource.getrlimit(resource.RLIMIT_AS)
+    hard = previous_limit[1]
+    soft = (
+        MEMORY_CEILING_BYTES if hard == resource.RLIM_INFINITY else min(hard, MEMORY_CEILING_BYTES)
+    )
+
+    def expired(_signum, _frame):
+        raise RunnerRefusal("exploratory return execution exceeded 15-minute ceiling")
+
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, OPERATIONAL_CEILING_SECONDS)
+        yield
+    except MemoryError as error:
+        raise RunnerRefusal("exploratory return execution exceeded memory ceiling") from error
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        resource.setrlimit(resource.RLIMIT_AS, previous_limit)
+
+
+class _ReadOnlyQueryAudit:
+    """Reject outcome-bearing or mutating SQL in the default readiness path."""
+
+    FORBIDDEN_PRICE_FIELDS = (
+        "bid_open",
+        "bid_high",
+        "bid_low",
+        "bid_close",
+        "ask_open",
+        "ask_high",
+        "ask_low",
+        "ask_close",
+        "entry_price",
+        "stop_price",
+        "target_price",
+        "risk_per_unit_cad",
+    )
+    MUTATIONS = ("INSERT ", "UPDATE ", "DELETE ", "ALTER ", "DROP ", "CREATE ", "TRUNCATE ")
+    OUTCOME_TABLES = (
+        "forecasts_backtest",
+        "forecasts_papertraderesult",
+        "forecasts_recommendationresolution",
+        "forecasts_forecastresolution",
+    )
+
+    def __init__(self):
+        self.query_count = 0
+
+    def __call__(self, execute, sql, params, many, context):
+        normalized = " ".join(sql.upper().split())
+        require(not normalized.startswith(self.MUTATIONS), "readiness attempted a database write")
+        lower = normalized.lower()
+        require(
+            not any(field in lower for field in self.FORBIDDEN_PRICE_FIELDS),
+            "readiness attempted price or entry-geometry access",
+        )
+        for table in self.OUTCOME_TABLES:
+            if table in lower:
+                require("COUNT(" in normalized, "readiness attempted outcome-row access")
+        self.query_count += 1
+        return execute(sql, params, many, context)
+
+
 class EvidenceAdapter(Protocol):
     query_counts: dict[str, int]
 
     def verify_return_blind_lineage(self) -> dict: ...
 
     def load_normalized_events(self, expected_keys: tuple[str, ...]) -> list[dict]: ...
+
+
+class _MigrationCheckedAdapter:
+    """Add exact migration verification without changing outcome-adapter semantics."""
+
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+        self.query_counts = wrapped.query_counts
+
+    def verify_return_blind_lineage(self):
+        from django.db import connection
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT app,max(name),count(*) FROM django_migrations "
+                "WHERE app IN ('market','research') GROUP BY app ORDER BY app"
+            )
+            observed = {app: (latest, count) for app, latest, count in cursor.fetchall()}
+        require(observed == EXPECTED_MIGRATIONS, "research migration state changed")
+        return self.wrapped.verify_return_blind_lineage()
+
+    def load_normalized_events(self, expected_keys):
+        return self.wrapped.load_normalized_events(expected_keys)
 
 
 class ResultStore(Protocol):
@@ -245,41 +341,67 @@ def _run_atomic_operation(
 
 
 def readiness() -> dict:
-    """Return fixed-path code readiness without constructing a DB adapter."""
+    """Verify authorization and persistent pre-state without reading outcomes."""
     from research import exploratory_return_runner_v2_governance as governance
 
     artifact = governance.load_preregistration()
-    authorization = governance.inspect_execution_authorization()
-    return {
-        "code_only_implementation": "READY",
-        "execution_authorization": authorization["status"],
-        "governed_physical_events": artifact["expected"]["physical_event_count"],
-        "outcome_query_count": 0,
-        "persistent_write_count": 0,
-        "promotion_permanently_prohibited": True,
-        "status": "IMPLEMENTED_NOT_AUTHORIZED",
-    }
-
-
-def execute_persistent(*, progress=None) -> dict:
-    """Future entry point; authorization is checked before Django/ORM imports."""
-    from research import exploratory_return_runner_v2_governance as governance
-
-    governance.load_preregistration()
     authorization = governance.require_execution_authorization()
-    # These imports are deliberately unreachable in the committed unauthorized state.
-    from research.exploratory_return_adapter_v2 import (  # pragma: no cover
+    from django.db import connection, transaction
+
+    from research.exploratory_return_adapter_v2 import (
         DjangoResultStore,
         DjangoSealedEvidenceAdapter,
     )
 
-    return run_authorized(
-        authorization=authorization,
-        expected_keys=governance.governed_event_keys(),
-        adapter=DjangoSealedEvidenceAdapter(),
-        store=DjangoResultStore(),
-        progress=progress,
+    audit = _ReadOnlyQueryAudit()
+    adapter = _MigrationCheckedAdapter(DjangoSealedEvidenceAdapter())
+    store = DjangoResultStore()
+    with connection.execute_wrapper(audit), transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION READ ONLY")
+        lineage = adapter.verify_return_blind_lineage()
+        _validate_lineage(lineage)
+        store.ensure_absent(IDEMPOTENCY_KEY)
+        require(len(governance.governed_event_keys()) == EXPECTED_EVENTS, "event set changed")
+    return {
+        "code_only_implementation": "READY",
+        "execution_authorization": "AUTHORIZED_EXACTLY_ONCE_NOT_EXECUTED",
+        "governed_physical_events": artifact["expected"]["physical_event_count"],
+        "outcome_query_count": 0,
+        "persistent_write_count": 0,
+        "promotion_permanently_prohibited": True,
+        "readiness_query_count": audit.query_count,
+        "readiness_query_purposes": [
+            "DATABASE_IDENTITY",
+            "ACCEPTED_DATASET_REGISTRATION_STRATEGY_S0_S1_IDENTITIES",
+            "APPLICATION_TABLE_COUNTS",
+            "ATTEMPT1_SUCCESS_COUNTS",
+            "RETURN_RESULT_IDEMPOTENCY_ABSENCE",
+        ],
+        "status": "AUTHORIZED_NOT_EXECUTED",
+        "authorization_sha256": authorization["artifact_sha256"],
+    }
+
+
+def execute_persistent(*, progress=None) -> dict:
+    """Single execution entry point; authorization precedes Django/ORM imports."""
+    from research import exploratory_return_runner_v2_governance as governance
+
+    governance.load_preregistration()
+    authorization = governance.require_execution_authorization()
+    from research.exploratory_return_adapter_v2 import (
+        DjangoResultStore,
+        DjangoSealedEvidenceAdapter,
     )
+
+    with _operational_limits():
+        return run_authorized(
+            authorization=authorization,
+            expected_keys=governance.governed_event_keys(),
+            adapter=_MigrationCheckedAdapter(DjangoSealedEvidenceAdapter()),
+            store=DjangoResultStore(),
+            progress=progress,
+        )
 
 
 @dataclass
