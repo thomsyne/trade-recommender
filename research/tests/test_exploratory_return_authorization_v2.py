@@ -389,11 +389,48 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
 
     def test_successor_rehearsal_proves_watchdog_rollback_and_unique_refusal(self):
         evidence = governance.inspect_correction_evidence()
-        rehearsal = json.loads(governance.PERFORMANCE_EVIDENCE_PATH.read_bytes())
-        self.assertEqual(evidence["rehearsal_sha256"], governance.PERFORMANCE_EVIDENCE_SHA256)
-        self.assertTrue(rehearsal["synthetic"]["deterministic_hashes"])
-        self.assertLess(rehearsal["synthetic"]["maximum_duration_seconds"], 10)
-        self.assertLess(rehearsal["synthetic"]["maximum_process_tree_rss_bytes"], 1_073_741_824)
+        rehearsal = json.loads(governance.ROLLOVER_REHEARSAL_PATH.read_bytes())
+        self.assertEqual(
+            evidence["rehearsal_sha256"], governance.ROLLOVER_REHEARSAL_ARTIFACT_SHA256
+        )
+        self.assertTrue(evidence["deterministic_complete_result"])
+        self.assertEqual(rehearsal["diagnosis"]["mismatch_events"], 78)
+        self.assertTrue(rehearsal["diagnosis"]["all_82_events_checked"])
+        self.assertEqual(rehearsal["real_data_runs"]["resolved_terminal_count"], 82)
+        self.assertTrue(rehearsal["real_data_runs"]["readback_equal"])
+
+    def test_rollover_failure_consumes_prior_authority_and_cannot_be_forged(self):
+        consumed = governance.inspect_consumed_rollover_authorization_history()
+        failure = governance.inspect_rollover_failure()
+        self.assertTrue(consumed["consumed"])
+        self.assertEqual(failure["persistent_state"]["application_table_delta"], 0)
+        with self.assertRaisesRegex(governance.RunnerGovernanceRefusal, "consumed"):
+            governance.require_consumed_rollover_execution_authorization()
+
+        forged = json.loads(governance.ROLLOVER_FAILURE_PATH.read_bytes())
+        forged["persistent_state"]["result_rows"] = 1
+        body = copy.deepcopy(forged)
+        body.pop("failure_sha256")
+        forged["failure_sha256"] = governance.digest(body)
+        raw = governance.canonical_bytes(forged) + b"\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "forged-rollover-failure.json"
+            path.write_bytes(raw)
+            with (
+                mock.patch.object(governance, "ROLLOVER_FAILURE_PATH", path),
+                mock.patch.object(
+                    governance,
+                    "ROLLOVER_FAILURE_ARTIFACT_SHA256",
+                    hashlib.sha256(raw).hexdigest(),
+                ),
+                mock.patch.object(
+                    governance,
+                    "ROLLOVER_FAILURE_SELF_SHA256",
+                    forged["failure_sha256"],
+                ),
+                self.assertRaisesRegex(governance.RunnerGovernanceRefusal, "persistent state"),
+            ):
+                governance.inspect_execution_authorization()
 
 
 if __name__ == "__main__":

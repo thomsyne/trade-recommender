@@ -11,16 +11,24 @@ from research import s2_policy_v2
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs/strategy/failed-break/v2"
-ARTIFACT_PATH = DOCS / "exploratory-return-calculator-preregistration-v2.json"
-REPORT_PATH = DOCS / "exploratory-return-calculator-architecture.md"
+HISTORICAL_ARTIFACT_PATH = DOCS / "exploratory-return-calculator-preregistration-v2.json"
+HISTORICAL_REPORT_PATH = DOCS / "exploratory-return-calculator-architecture.md"
+ARTIFACT_PATH = DOCS / "exploratory-return-rollover-correction-v2.json"
+REPORT_PATH = DOCS / "exploratory-return-rollover-correction-v2.md"
 
-REPOSITORY_BASELINE = "139dff6a0dd07fda413476ec6d9b0bc5cfa24287"
-SCHEMA = "failed-break-v2-exploratory-return-calculator-preregistration-v1"
-IDENTITY = "failed-break-v2-exploratory-return-calculator-v1"
-ARTIFACT_SHA256 = "92acc23cc194e530f525c92243466aa87adc1933b8e659b560ccf9dae3a3ec1a"
-SELF_SHA256 = "7fd25e8b1a660c6b0b087c4b40eca43588b0018d659c281374f5213a31400d77"
-REPORT_SHA256 = "ad5cb19100bb31910f08f47283281f09dbb92d725ff28b37034a1c409115ae3e"
-CALCULATOR_SHA256 = "3a115b3d8f162f5a95262d03860bc1cde1581302193de320286563c0f533b514"
+REPOSITORY_BASELINE = "71260ab4a3797ecc0f7420da2f159b5a14381877"
+SCHEMA = "failed-break-v2-exploratory-return-rollover-selection-correction-v1"
+IDENTITY = "failed-break-v2-exploratory-return-rollover-selection-correction-v1"
+ARTIFACT_SHA256 = "61896776164b05822dd6ccc45a0d3b61cd1995938742390732eeea066cf05d8b"
+SELF_SHA256 = "6e51fb260def75344c335f7c1e3c40fd254fc5e34677073b99aa9565b20117e8"
+REPORT_SHA256 = "9fec559a810eabfdb2c7cde6b6140b4bbd08f87c7791752a271bf1b5521d678d"
+CALCULATOR_SHA256 = "9daa42e36d16d781a620ce643fbba63223f49576e5b3e162eeddb055def82721"
+ADAPTER_SHA256 = "c67b2d1449bbe0b8416f26593cd27481c83e4eb392c48df2581058995f1cdfab"
+BENCHMARK_SHA256 = "404c6cf996c13d54338fc61191416e00b57de6bf6fadf43af004121234cb2862"
+HISTORICAL_ARTIFACT_SHA256 = "92acc23cc194e530f525c92243466aa87adc1933b8e659b560ccf9dae3a3ec1a"
+HISTORICAL_SELF_SHA256 = "7fd25e8b1a660c6b0b087c4b40eca43588b0018d659c281374f5213a31400d77"
+HISTORICAL_CALCULATOR_SHA256 = "3a115b3d8f162f5a95262d03860bc1cde1581302193de320286563c0f533b514"
+HISTORICAL_REPORT_SHA256 = "ad5cb19100bb31910f08f47283281f09dbb92d725ff28b37034a1c409115ae3e"
 S2_ARTIFACT_SHA256 = "1d4b1f451a60d7c2ac37a2fe91849d463254b7751529324e52198003de1ae8dc"
 S2_SELF_SHA256 = "e2d2a4880e0d900a150a6e801d940b32b09b8cd1435f283a87fe16555e059d72"
 S1_ACCEPTANCE_SHA256 = "5760dd2dd60a2d6a6087b5116b085a8a3774db1512962af0622bc0e3eeed93d5"
@@ -58,17 +66,20 @@ def governed_event_keys() -> tuple[str, ...]:
     return keys
 
 
-def load_preregistration() -> dict:
-    """Load the one committed artifact; caller paths and overrides do not exist."""
+def inspect_historical_preregistration() -> dict:
+    """Verify the original code-only calculator freeze as immutable history."""
     try:
-        raw = ARTIFACT_PATH.read_bytes()
-        require(hashlib.sha256(raw).hexdigest() == ARTIFACT_SHA256, "artifact file digest mismatch")
+        raw = HISTORICAL_ARTIFACT_PATH.read_bytes()
+        require(
+            hashlib.sha256(raw).hexdigest() == HISTORICAL_ARTIFACT_SHA256,
+            "historical artifact file digest mismatch",
+        )
         artifact = json.loads(raw)
         require(canonical_bytes(artifact) + b"\n" == raw, "artifact bytes are not canonical")
         body = dict(artifact)
         require(
-            body.pop("implementation_sha256", None) == SELF_SHA256 == digest(body),
-            "self-hash mismatch",
+            body.pop("implementation_sha256", None) == HISTORICAL_SELF_SHA256 == digest(body),
+            "historical self-hash mismatch",
         )
         policy = s2_policy_v2.load_policy()
         require(
@@ -77,10 +88,10 @@ def load_preregistration() -> dict:
             "effective S2 policy drift",
         )
         require(
-            artifact["schema"] == SCHEMA
-            and artifact["identity"] == IDENTITY
-            and artifact["repository_baseline"] == REPOSITORY_BASELINE,
-            "calculator identity changed",
+            artifact["schema"] == "failed-break-v2-exploratory-return-calculator-preregistration-v1"
+            and artifact["identity"] == "failed-break-v2-exploratory-return-calculator-v1"
+            and artifact["repository_baseline"] == "139dff6a0dd07fda413476ec6d9b0bc5cfa24287",
+            "historical calculator identity changed",
         )
         require(
             artifact["authority"]
@@ -128,11 +139,13 @@ def load_preregistration() -> dict:
         )
         require(
             sources["source_files"]["research/exploratory_returns_v2.py"]
-            == CALCULATOR_SHA256
-            == _source_hash(ROOT / "research/exploratory_returns_v2.py"),
-            "calculator source drift",
+            == HISTORICAL_CALCULATOR_SHA256,
+            "historical calculator source identity changed",
         )
-        require(_source_hash(REPORT_PATH) == REPORT_SHA256, "architecture report drift")
+        require(
+            _source_hash(HISTORICAL_REPORT_PATH) == HISTORICAL_REPORT_SHA256,
+            "historical architecture report drift",
+        )
         semantics = artifact["calculation_semantics"]
         require(semantics["physical_event_count"] == 82, "event count changed")
         require(
@@ -160,12 +173,99 @@ def load_preregistration() -> dict:
         raise GovernanceRefusal("incomplete calculator preregistration") from error
 
 
+def load_preregistration() -> dict:
+    """Load the forward-only rollover correction; no caller-selected path exists."""
+    try:
+        historical = inspect_historical_preregistration()
+        raw = ARTIFACT_PATH.read_bytes()
+        require(hashlib.sha256(raw).hexdigest() == ARTIFACT_SHA256, "artifact file digest mismatch")
+        artifact = json.loads(raw)
+        require(canonical_bytes(artifact) + b"\n" == raw, "artifact bytes are not canonical")
+        body = dict(artifact)
+        require(
+            body.pop("implementation_sha256", None) == SELF_SHA256 == digest(body),
+            "self-hash mismatch",
+        )
+        require(
+            artifact["schema"] == SCHEMA
+            and artifact["identity"] == IDENTITY
+            and artifact["repository_baseline"] == REPOSITORY_BASELINE,
+            "calculator correction identity changed",
+        )
+        require(
+            artifact["authority"]
+            == {
+                "code_only_correction": True,
+                "disposable_real_data_validation": True,
+                "persistent_return_execution": False,
+                "promotion_or_live_trading": False,
+                "provider_or_production_access": False,
+                "strategy_or_financial_policy_change": False,
+            },
+            "calculator correction authority changed",
+        )
+        bindings = artifact["bindings"]
+        require(
+            bindings["historical_calculator"]
+            == {
+                "artifact_sha256": HISTORICAL_ARTIFACT_SHA256,
+                "self_sha256": HISTORICAL_SELF_SHA256,
+                "source_sha256": HISTORICAL_CALCULATOR_SHA256,
+            }
+            and historical["implementation_sha256"] == HISTORICAL_SELF_SHA256,
+            "historical calculator binding changed",
+        )
+        require(
+            bindings["effective_s2_policy"]
+            == {
+                "artifact_sha256": S2_ARTIFACT_SHA256,
+                "self_sha256": S2_SELF_SHA256,
+            }
+            and bindings["geometry"]
+            == {
+                "event_set_sha256": EVENT_SET_SHA256,
+                "nonadditive_memberships": 186,
+                "physical_events": 82,
+            }
+            and bindings["v2_s1_acceptance_sha256"] == S1_ACCEPTANCE_SHA256,
+            "upstream correction binding changed",
+        )
+        expected_sources = {
+            "research/benchmarks/benchmark_exploratory_returns_v2.py": BENCHMARK_SHA256,
+            "research/exploratory_return_adapter_v2.py": ADAPTER_SHA256,
+            "research/exploratory_returns_v2.py": CALCULATOR_SHA256,
+        }
+        require(bindings["source_files"] == expected_sources, "correction source map changed")
+        for relative, expected in expected_sources.items():
+            require(_source_hash(ROOT / relative) == expected, f"source drift: {relative}")
+        correction = artifact["correction"]
+        require(
+            correction["actual_financing_selection"]
+            == "ONLY_VALIDATED_ROLLOVERS_WITH_TIMESTAMP_LESS_THAN_OR_EQUAL_TO_RESOLVED_EXIT"
+            and correction["horizon_input_contract"]
+            == "EXACT_GOVERNED_17_NEW_YORK_WEEKDAY_SEQUENCE_THROUGH_MAXIMUM_HORIZON"
+            and correction["rollover_boundary"] == "EXIT_EQUALITY_INCLUDED"
+            and correction["rollover_timezone"] == "America/New_York"
+            and correction["rollover_wall_hour"] == 17,
+            "rollover selection semantics changed",
+        )
+        require(
+            artifact["status"]
+            == "CORRECTED_DISPOSABLE_REAL_DATA_VALIDATED_PERSISTENT_NOT_EXECUTED",
+            "calculator correction status changed",
+        )
+        require(_source_hash(REPORT_PATH) == REPORT_SHA256, "correction report drift")
+        return artifact
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as error:
+        raise GovernanceRefusal("incomplete calculator correction") from error
+
+
 def readiness() -> dict:
     artifact = load_preregistration()
     return {
         "artifact_sha256": ARTIFACT_SHA256,
         "code_only_implementation": "READY",
-        "governed_physical_events": artifact["calculation_semantics"]["physical_event_count"],
+        "governed_physical_events": artifact["bindings"]["geometry"]["physical_events"],
         "persistent_return_execution_authorized": False,
         "post_entry_real_outcome_access_authorized": False,
         "promotion_permanently_prohibited": True,

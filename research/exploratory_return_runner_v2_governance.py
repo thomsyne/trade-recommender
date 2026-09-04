@@ -15,8 +15,10 @@ from research import s2_policy_v2
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs/strategy/failed-break/v2"
 HISTORICAL_ARTIFACT_PATH = DOCS / "exploratory-return-runner-preregistration-v2.json"
-ARTIFACT_PATH = DOCS / "exploratory-return-lineage-performance-preregistration-v2.json"
-REPORT_PATH = DOCS / "exploratory-return-lineage-performance-correction-v2.md"
+LINEAGE_ARTIFACT_PATH = DOCS / "exploratory-return-lineage-performance-preregistration-v2.json"
+LINEAGE_REPORT_PATH = DOCS / "exploratory-return-lineage-performance-correction-v2.md"
+ARTIFACT_PATH = DOCS / "exploratory-return-rollover-preregistration-v2.json"
+REPORT_PATH = DOCS / "exploratory-return-rollover-correction-v2.md"
 PREDECESSOR_AUTHORIZATION_PATH = DOCS / "exploratory-return-execution-authorization-v2.json"
 FAILURE_PATH = DOCS / "exploratory-return-execution-failure-v2.json"
 CONSUMED_SUCCESSOR_AUTHORIZATION_PATH = (
@@ -24,20 +26,32 @@ CONSUMED_SUCCESSOR_AUTHORIZATION_PATH = (
 )
 SECOND_FAILURE_PATH = DOCS / "exploratory-return-lineage-timeout-failure-v2.json"
 PERFORMANCE_EVIDENCE_PATH = DOCS / "exploratory-return-lineage-performance-rehearsal-v2.json"
-AUTHORIZATION_PATH = DOCS / "exploratory-return-lineage-performance-authorization-v2.json"
+CONSUMED_ROLLOVER_AUTHORIZATION_PATH = (
+    DOCS / "exploratory-return-lineage-performance-authorization-v2.json"
+)
+ROLLOVER_FAILURE_PATH = DOCS / "exploratory-return-rollover-execution-failure-v2.json"
+ROLLOVER_REHEARSAL_PATH = DOCS / "exploratory-return-rollover-rehearsal-v2.json"
+AUTHORIZATION_PATH = DOCS / "exploratory-return-rollover-authorization-v2.json"
 CORRECTION_REPORT_PATH = DOCS / "exploratory-return-rlimit-correction-v2.md"
 REHEARSAL_PATH = DOCS / "exploratory-return-rlimit-rehearsal-v2.json"
 
-REPOSITORY_BASELINE = "d9a1c09df96649bc82c6259e5952adf613286be3"
-SCHEMA = "failed-break-v2-exploratory-return-lineage-performance-preregistration-v1"
-IDENTITY = "failed-break-v2-exploratory-return-lineage-performance-correction-v1"
-ARTIFACT_SHA256 = "786f727719c962948de1d6c330f6aa6e67af7ca22276ef80f6b6dc6b9b9d26b8"
-SELF_SHA256 = "00dc9e580d3680fe3a7227b78b43d04908c2f51c97a0b68e31115cf69289f2bf"
-REPORT_SHA256 = "b85fa0edc48ac3cecc71abe7da2af3c0efeaf0d92569d68ba45f2a5c2b124917"
+LINEAGE_REPOSITORY_BASELINE = "d9a1c09df96649bc82c6259e5952adf613286be3"
+LINEAGE_SCHEMA = "failed-break-v2-exploratory-return-lineage-performance-preregistration-v1"
+LINEAGE_IDENTITY = "failed-break-v2-exploratory-return-lineage-performance-correction-v1"
+LINEAGE_ARTIFACT_SHA256 = "786f727719c962948de1d6c330f6aa6e67af7ca22276ef80f6b6dc6b9b9d26b8"
+LINEAGE_SELF_SHA256 = "00dc9e580d3680fe3a7227b78b43d04908c2f51c97a0b68e31115cf69289f2bf"
+LINEAGE_REPORT_SHA256 = "b85fa0edc48ac3cecc71abe7da2af3c0efeaf0d92569d68ba45f2a5c2b124917"
+REPOSITORY_BASELINE = "71260ab4a3797ecc0f7420da2f159b5a14381877"
+SCHEMA = "failed-break-v2-exploratory-return-rollover-runner-correction-v1"
+IDENTITY = "failed-break-v2-exploratory-return-rollover-runner-correction-v1"
+ARTIFACT_SHA256 = "fa041f60701d089649fc4da57b35bdd38794e27b30d94166dca9442c548e0b32"
+SELF_SHA256 = "bcd1f67b6e11c7fd5d8791058cdb1dfbe82b053a3828dd68dc0400d11c747157"
+REPORT_SHA256 = "9fec559a810eabfdb2c7cde6b6140b4bbd08f87c7791752a271bf1b5521d678d"
 RUNNER_SHA256 = "bdad1fd3e0c41bd43645d09d9aeccb4c8f4b8115c72a5ac30b7f3a37a9a052eb"
 MEMORY_BOUNDARY_SHA256 = "7e39e860419e677a811ad7fe755747c81d1ba4d8be329a1cbdfdf09f2bb8a182"
-ADAPTER_SHA256 = "a515909321aea59316c72289183dc2c94872643ddc4621317c5d8ff8e6ca7359"
+ADAPTER_SHA256 = "c67b2d1449bbe0b8416f26593cd27481c83e4eb392c48df2581058995f1cdfab"
 COMMAND_SHA256 = "4d41b1021837c59f71fde4ce6edd20c30c9064334f35548801233e9b05913d52"
+BENCHMARK_SHA256 = "404c6cf996c13d54338fc61191416e00b57de6bf6fadf43af004121234cb2862"
 PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256 = (
     "21c2a3ce7a8ae7eb46ca07a551160a1830f58b4938215491ab40d026f96c349c"
 )
@@ -62,10 +76,24 @@ PERFORMANCE_EVIDENCE_SHA256 = "a0c40fa8140ae2bb95f7df99f1f11f8e1ac17d0bfbdb28c6a
 PERFORMANCE_EVIDENCE_SELF_SHA256 = (
     "87f77badb6c465ffcb3a877c593ba8ad14e0334e3d9a32ad1b0ba87c05bcae34"
 )
-AUTHORIZATION_ARTIFACT_SHA256 = "d3c05c54a6fd0ec9af65f88489e30948f9ace072835756dd5c4b999f91de0b85"
-AUTHORIZATION_SELF_SHA256 = "0e61b6bb07810dc579ef770d39a8144ae5e7f01ff6c1cc6dee9e24a4871c036a"
-AUTHORIZATION_SCHEMA = "failed-break-v2-exploratory-return-lineage-performance-authorization-v1"
-AUTHORIZATION_IDENTITY = "failed-break-v2-exploratory-return-single-successor-v1"
+CONSUMED_ROLLOVER_AUTHORIZATION_ARTIFACT_SHA256 = (
+    "d3c05c54a6fd0ec9af65f88489e30948f9ace072835756dd5c4b999f91de0b85"
+)
+CONSUMED_ROLLOVER_AUTHORIZATION_SELF_SHA256 = (
+    "0e61b6bb07810dc579ef770d39a8144ae5e7f01ff6c1cc6dee9e24a4871c036a"
+)
+ROLLOVER_FAILURE_ARTIFACT_SHA256 = (
+    "425a75912ba991fb01f96d1eb88778c60e2c2a5c6874d954c2838d4f1c1b379b"
+)
+ROLLOVER_FAILURE_SELF_SHA256 = "c4de8dd992fb31e199b2015df49952fc116f0fee364ea64827062292a1d25732"
+ROLLOVER_REHEARSAL_ARTIFACT_SHA256 = (
+    "1b1e3c23641c99a26d18e3bdde3ab87fa0e338196385749517ab5cd3ab0acef1"
+)
+ROLLOVER_REHEARSAL_SELF_SHA256 = "51749b0daa69bf39bb2626c0f09e52c73f99bbe813deb1228645297d3096771f"
+AUTHORIZATION_ARTIFACT_SHA256 = "d77c1b5d69061a7bc80a99aacf82e92ed65287fc4a3029bc61f3853590ddb31a"
+AUTHORIZATION_SELF_SHA256 = "6daed2315f2353ab62a3b00dd531a6566f9597b5933e1e819e412aa4314f7180"
+AUTHORIZATION_SCHEMA = "failed-break-v2-exploratory-return-rollover-successor-authorization-v1"
+AUTHORIZATION_IDENTITY = "failed-break-v2-exploratory-return-single-rollover-successor-v1"
 AUTHORIZED_BASELINE = REPOSITORY_BASELINE
 CORRECTION_REPORT_SHA256 = "8bb06ab0456e99c0d2dcb19a75722957086fd6278dfd02933c0cce32aab5e11f"
 REHEARSAL_SHA256 = "8b1e433337856f2b85d2ff26dc9f2d943879a126272599298cdff43ce11796a7"
@@ -119,22 +147,26 @@ def governed_event_keys() -> tuple[str, ...]:
     return keys
 
 
-def load_preregistration() -> dict:
+def inspect_lineage_preregistration_history() -> dict:
+    """Verify the preceding lineage-performance correction as immutable history."""
     try:
-        raw = ARTIFACT_PATH.read_bytes()
-        require(hashlib.sha256(raw).hexdigest() == ARTIFACT_SHA256, "artifact digest mismatch")
+        raw = LINEAGE_ARTIFACT_PATH.read_bytes()
+        require(
+            hashlib.sha256(raw).hexdigest() == LINEAGE_ARTIFACT_SHA256,
+            "lineage artifact digest mismatch",
+        )
         artifact = json.loads(raw)
         require(canonical_bytes(artifact) + b"\n" == raw, "artifact bytes are not canonical")
         body = dict(artifact)
         require(
-            body.pop("implementation_sha256", None) == SELF_SHA256 == digest(body),
-            "artifact self-hash mismatch",
+            body.pop("implementation_sha256", None) == LINEAGE_SELF_SHA256 == digest(body),
+            "lineage artifact self-hash mismatch",
         )
         require(
-            artifact["schema"] == SCHEMA
-            and artifact["identity"] == IDENTITY
-            and artifact["repository_baseline"] == REPOSITORY_BASELINE,
-            "runner identity changed",
+            artifact["schema"] == LINEAGE_SCHEMA
+            and artifact["identity"] == LINEAGE_IDENTITY
+            and artifact["repository_baseline"] == LINEAGE_REPOSITORY_BASELINE,
+            "lineage runner identity changed",
         )
         require(
             artifact["authority"]
@@ -167,8 +199,8 @@ def load_preregistration() -> dict:
         require(
             bindings["calculator"]
             == {
-                "artifact_sha256": CALCULATOR_ARTIFACT_SHA256,
-                "self_sha256": CALCULATOR_SELF_SHA256,
+                "artifact_sha256": calculator_governance.HISTORICAL_ARTIFACT_SHA256,
+                "self_sha256": calculator_governance.HISTORICAL_SELF_SHA256,
             }
             and bindings["effective_s2_policy"]
             == {
@@ -188,16 +220,19 @@ def load_preregistration() -> dict:
         )
         source_files = bindings["source_files"]
         expected_sources = {
-            "research/exploratory_return_adapter_v2.py": ADAPTER_SHA256,
+            "research/exploratory_return_adapter_v2.py": (
+                "a515909321aea59316c72289183dc2c94872643ddc4621317c5d8ff8e6ca7359"
+            ),
             "research/exploratory_return_memory_v2.py": MEMORY_BOUNDARY_SHA256,
             "research/exploratory_return_runner_v2.py": RUNNER_SHA256,
             "research/management/commands/calculate_exploratory_returns_v2.py": COMMAND_SHA256,
         }
-        require(source_files == expected_sources, "governed source map changed")
-        for relative, expected in expected_sources.items():
-            require(_source_hash(ROOT / relative) == expected, f"source drift: {relative}")
-        require(_source_hash(REPORT_PATH) == REPORT_SHA256, "architecture report drift")
-        calculator_governance.load_preregistration()
+        require(source_files == expected_sources, "historical governed source map changed")
+        require(
+            _source_hash(LINEAGE_REPORT_PATH) == LINEAGE_REPORT_SHA256,
+            "lineage report drift",
+        )
+        calculator_governance.inspect_historical_preregistration()
         policy = s2_policy_v2.load_policy()
         require(
             policy["status"] == "EFFECTIVE_EXPLORATORY_ONLY"
@@ -211,7 +246,114 @@ def load_preregistration() -> dict:
         )
         return artifact
     except (KeyError, OSError, TypeError, json.JSONDecodeError) as error:
-        raise RunnerGovernanceRefusal("incomplete runner preregistration") from error
+        raise RunnerGovernanceRefusal("incomplete lineage runner history") from error
+
+
+def load_preregistration() -> dict:
+    """Verify the forward-only rollover runner correction."""
+    try:
+        history = inspect_lineage_preregistration_history()
+        raw = ARTIFACT_PATH.read_bytes()
+        require(hashlib.sha256(raw).hexdigest() == ARTIFACT_SHA256, "artifact digest mismatch")
+        artifact = json.loads(raw)
+        require(canonical_bytes(artifact) + b"\n" == raw, "artifact bytes are not canonical")
+        body = dict(artifact)
+        require(
+            body.pop("implementation_sha256", None) == SELF_SHA256 == digest(body),
+            "artifact self-hash mismatch",
+        )
+        require(
+            artifact["schema"] == SCHEMA
+            and artifact["identity"] == IDENTITY
+            and artifact["repository_baseline"] == REPOSITORY_BASELINE,
+            "runner correction identity changed",
+        )
+        require(
+            artifact["authority"]
+            == {
+                "code_only_correction": True,
+                "disposable_real_data_validation": True,
+                "persistent_execution": False,
+                "post_entry_real_outcome_access": "DISPOSABLE_RESTORE_ONLY",
+                "promotion_or_live_trading": False,
+                "provider_production_or_deployment": False,
+            },
+            "runner correction authority changed",
+        )
+        bindings = artifact["bindings"]
+        require(
+            bindings["historical_runner_preregistration"]
+            == {
+                "artifact_sha256": LINEAGE_ARTIFACT_SHA256,
+                "self_sha256": LINEAGE_SELF_SHA256,
+            }
+            and history["implementation_sha256"] == LINEAGE_SELF_SHA256,
+            "historical runner binding changed",
+        )
+        require(
+            bindings["calculator"]
+            == {
+                "artifact_sha256": CALCULATOR_ARTIFACT_SHA256,
+                "self_sha256": CALCULATOR_SELF_SHA256,
+                "source_sha256": calculator_governance.CALCULATOR_SHA256,
+            }
+            and bindings["effective_s2_policy"]
+            == {
+                "artifact_sha256": S2_ARTIFACT_SHA256,
+                "self_sha256": S2_POLICY_SHA256,
+            }
+            and bindings["v2_s1_acceptance_sha256"] == S1_ACCEPTANCE_SHA256,
+            "current calculator or upstream binding changed",
+        )
+        require(
+            bindings["geometry"]
+            == {
+                "event_set_sha256": GEOMETRY_EVENT_SET_SHA256,
+                "nonadditive_book_memberships": 186,
+                "physical_events": 82,
+            },
+            "geometry binding changed",
+        )
+        expected_sources = {
+            "research/benchmarks/benchmark_exploratory_returns_v2.py": BENCHMARK_SHA256,
+            "research/exploratory_return_adapter_v2.py": ADAPTER_SHA256,
+            "research/exploratory_return_memory_v2.py": MEMORY_BOUNDARY_SHA256,
+            "research/exploratory_return_runner_v2.py": RUNNER_SHA256,
+            "research/exploratory_returns_v2.py": calculator_governance.CALCULATOR_SHA256,
+            "research/management/commands/calculate_exploratory_returns_v2.py": COMMAND_SHA256,
+        }
+        require(bindings["source_files"] == expected_sources, "governed source map changed")
+        for relative, expected in expected_sources.items():
+            require(_source_hash(ROOT / relative) == expected, f"source drift: {relative}")
+        require(
+            bindings["failure"]
+            == {
+                "artifact_sha256": ROLLOVER_FAILURE_ARTIFACT_SHA256,
+                "self_sha256": ROLLOVER_FAILURE_SELF_SHA256,
+            }
+            and bindings["rehearsal"]
+            == {
+                "artifact_sha256": ROLLOVER_REHEARSAL_ARTIFACT_SHA256,
+                "evidence_sha256": ROLLOVER_REHEARSAL_SELF_SHA256,
+                "report_sha256": REPORT_SHA256,
+            },
+            "failure or rehearsal binding changed",
+        )
+        require(
+            artifact["expected"]
+            == {
+                "nonadditive_book_memberships": 186,
+                "one_complete_result": True,
+                "physical_event_count": 82,
+            }
+            and artifact["status"] == "CORRECTED_DISPOSABLE_VALIDATED_AUTHORIZATION_SEPARATE",
+            "runner correction expected boundary changed",
+        )
+        require(_source_hash(REPORT_PATH) == REPORT_SHA256, "correction report drift")
+        calculator_governance.load_preregistration()
+        return artifact
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as error:
+        raise RunnerGovernanceRefusal("incomplete runner rollover correction") from error
 
 
 def _all_keys(value) -> set[str]:
@@ -602,8 +744,8 @@ def inspect_performance_evidence() -> dict:
     return evidence
 
 
-def inspect_execution_authorization() -> dict:
-    """Verify only the newest successor authorization without database access."""
+def _inspect_lineage_performance_authorization_legacy() -> dict:
+    """Retained source history; current authority is verified below."""
 
     try:
         authorization = _load_canonical(
@@ -818,19 +960,362 @@ def inspect_execution_authorization() -> dict:
         raise RunnerGovernanceRefusal("missing or invalid execution authorization") from error
 
 
+def inspect_consumed_rollover_authorization_history() -> dict:
+    """Verify the third authorization as consumed by the rollover refusal."""
+    authorization = _load_canonical(
+        CONSUMED_ROLLOVER_AUTHORIZATION_PATH,
+        CONSUMED_ROLLOVER_AUTHORIZATION_ARTIFACT_SHA256,
+        "authorization_sha256",
+        CONSUMED_ROLLOVER_AUTHORIZATION_SELF_SHA256,
+    )
+    require(
+        authorization["identity"] == "failed-break-v2-exploratory-return-single-successor-v1"
+        and authorization["repository_baseline"] == "d9a1c09df96649bc82c6259e5952adf613286be3"
+        and authorization["command"]["operational_ceiling_seconds"] == 900
+        and authorization["result"]["idempotency_key"]
+        == "failed-break-exploratory-returns-v2|phase-2b1r-v2|development-2010-2018",
+        "consumed rollover authorization changed",
+    )
+    return {
+        **authorization,
+        "artifact_sha256": CONSUMED_ROLLOVER_AUTHORIZATION_ARTIFACT_SHA256,
+        "consumed": True,
+        "status": "CONSUMED_ROLLOVER_FAILURE_RETRY_PROHIBITED",
+    }
+
+
+def inspect_rollover_failure() -> dict:
+    """Verify the atomic no-result failure that exposed the rollover defect."""
+    failure = _load_canonical(
+        ROLLOVER_FAILURE_PATH,
+        ROLLOVER_FAILURE_ARTIFACT_SHA256,
+        "failure_sha256",
+        ROLLOVER_FAILURE_SELF_SHA256,
+    )
+    consumed = inspect_consumed_rollover_authorization_history()
+    require(
+        failure["identity"] == "failed-break-v2-exploratory-return-rollover-validation-failure-v1"
+        and failure["repository_baseline"] == REPOSITORY_BASELINE
+        and failure["consumed_authorization"]
+        == {
+            "artifact_sha256": CONSUMED_ROLLOVER_AUTHORIZATION_ARTIFACT_SHA256,
+            "identity": "failed-break-v2-exploratory-return-single-successor-v1",
+            "self_sha256": CONSUMED_ROLLOVER_AUTHORIZATION_SELF_SHA256,
+        }
+        and consumed["consumed"] is True,
+        "rollover failure does not consume the preceding authorization",
+    )
+    require(
+        failure["attempt"]
+        == {
+            "argv": [
+                ".venv/bin/python",
+                "manage.py",
+                "calculate_exploratory_returns_v2",
+                "--execute",
+            ],
+            "duration_seconds": "5.629354",
+            "error": "worker failed closed: RunnerRefusal: missing or extra governed rollover",
+            "exit_code": 1,
+            "invocations": 1,
+            "last_progress": "stage=calculation completed=0 total=82",
+            "normalized_events": 82,
+            "result_constructed": False,
+        },
+        "rollover failure attempt changed",
+    )
+    require(
+        failure["persistent_state"]
+        == {
+            "application_count_sha256_after": (
+                "5b10daadf1f394681c3da0897bef1132bfb7fbf47bc7c5e8efca95758fce8097"
+            ),
+            "application_count_sha256_before": (
+                "5b10daadf1f394681c3da0897bef1132bfb7fbf47bc7c5e8efca95758fce8097"
+            ),
+            "application_table_delta": 0,
+            "idempotency_rows": 0,
+            "job_runs": 5,
+            "result_rows": 0,
+        },
+        "rollover failure persistent state changed",
+    )
+    return {**failure, "artifact_sha256": ROLLOVER_FAILURE_ARTIFACT_SHA256, "status": "ACCEPTED"}
+
+
+def inspect_rollover_rehearsal() -> dict:
+    """Verify the two deterministic complete disposable calculations."""
+    rehearsal = _load_canonical(
+        ROLLOVER_REHEARSAL_PATH,
+        ROLLOVER_REHEARSAL_ARTIFACT_SHA256,
+        "evidence_sha256",
+        ROLLOVER_REHEARSAL_SELF_SHA256,
+    )
+    require(
+        rehearsal["diagnosis"]
+        == {
+            "all_82_events_checked": True,
+            "all_provided_rollovers_match_governed_horizon": True,
+            "exact_without_selection_correction": 4,
+            "extra_rollover_histogram": {
+                "0": 4,
+                "2": 1,
+                "3": 4,
+                "4": 1,
+                "5": 6,
+                "6": 12,
+                "7": 17,
+                "8": 6,
+                "9": 21,
+                "10": 8,
+                "11": 2,
+            },
+            "failure_class": "HORIZON_PRELOAD_COMPARED_TO_EARLY_RESOLVED_EXIT",
+            "mismatch_events": 78,
+            "physical_events": 82,
+        },
+        "rollover diagnosis changed",
+    )
+    proof = rehearsal["real_data_runs"]
+    require(
+        proof["runs"] == 2
+        and proof["deterministic"] is True
+        and proof["event_count"] == proof["resolved_terminal_count"] == 82
+        and proof["complete_cost_cells"] == 3_690
+        and proof["job_rows_each"] == 1
+        and proof["partial_rows"] == 0
+        and proof["readback_equal"] is True
+        and max(map(float, proof["durations_seconds"])) < 15,
+        "complete disposable rehearsal changed",
+    )
+    return rehearsal
+
+
+def inspect_execution_authorization() -> dict:
+    """Verify only the newest forward authorization without database access."""
+    try:
+        authorization = _load_canonical(
+            AUTHORIZATION_PATH,
+            AUTHORIZATION_ARTIFACT_SHA256,
+            "authorization_sha256",
+            AUTHORIZATION_SELF_SHA256,
+        )
+        require(
+            authorization["schema"] == AUTHORIZATION_SCHEMA
+            and authorization["identity"] == AUTHORIZATION_IDENTITY
+            and authorization["repository_baseline"] == AUTHORIZED_BASELINE,
+            "execution authorization identity changed",
+        )
+        require(
+            authorization["authority"]
+            == {
+                "exploratory_return_execution": "EXACTLY_ONE_NEW_REPLACEMENT",
+                "further_retry_or_replacement": False,
+                "live_trading": "PERMANENTLY_PROHIBITED",
+                "post_entry_real_outcome_access": "ONLY_INSIDE_SINGLE_EXECUTION",
+                "post_result_policy_tuning": False,
+                "promotion": "PERMANENTLY_PROHIBITED",
+                "provider_production_or_deployment": False,
+                "result_replacement": False,
+                "retry_or_resume": False,
+            },
+            "execution authority changed",
+        )
+        require(
+            authorization["command"]
+            == {
+                "alternate_arguments": False,
+                "argv": [
+                    ".venv/bin/python",
+                    "manage.py",
+                    "calculate_exploratory_returns_v2",
+                    "--execute",
+                ],
+                "atomic_transaction": True,
+                "memory_ceiling_bytes": 1_073_741_824,
+                "operational_ceiling_seconds": 900,
+                "requires_fresh_verified_backup": True,
+            },
+            "execution command changed",
+        )
+        first = inspect_predecessor_authorization_history()
+        first_failure = inspect_failed_execution()
+        second = inspect_consumed_successor_authorization_history()
+        second_failure = inspect_second_failed_execution()
+        third = inspect_consumed_rollover_authorization_history()
+        third_failure = inspect_rollover_failure()
+        rehearsal = inspect_rollover_rehearsal()
+        preregistration = load_preregistration()
+        bindings = authorization["bindings"]
+        require(
+            bindings["consumed_authorizations"]
+            == [
+                PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256,
+                CONSUMED_SUCCESSOR_AUTHORIZATION_ARTIFACT_SHA256,
+                CONSUMED_ROLLOVER_AUTHORIZATION_ARTIFACT_SHA256,
+            ]
+            and bindings["failure_artifacts"]
+            == [
+                FAILURE_ARTIFACT_SHA256,
+                SECOND_FAILURE_ARTIFACT_SHA256,
+                ROLLOVER_FAILURE_ARTIFACT_SHA256,
+            ]
+            and first["consumed"]
+            and first_failure["status"] == "ACCEPTED"
+            and second["consumed"]
+            and second_failure["status"] == "ACCEPTED"
+            and third["consumed"]
+            and third_failure["status"] == "ACCEPTED"
+            and rehearsal["real_data_runs"]["deterministic"] is True,
+            "forward-only failure lineage changed",
+        )
+        require(
+            bindings["correction"]
+            == {
+                "artifact_sha256": ARTIFACT_SHA256,
+                "failure_artifact_sha256": ROLLOVER_FAILURE_ARTIFACT_SHA256,
+                "failure_self_sha256": ROLLOVER_FAILURE_SELF_SHA256,
+                "rehearsal_artifact_sha256": ROLLOVER_REHEARSAL_ARTIFACT_SHA256,
+                "rehearsal_self_sha256": ROLLOVER_REHEARSAL_SELF_SHA256,
+                "report_sha256": REPORT_SHA256,
+                "self_sha256": SELF_SHA256,
+            }
+            and preregistration["implementation_sha256"] == SELF_SHA256,
+            "rollover correction binding changed",
+        )
+        require(
+            bindings["calculator"]
+            == {
+                "artifact_sha256": CALCULATOR_ARTIFACT_SHA256,
+                "self_sha256": CALCULATOR_SELF_SHA256,
+                "source_sha256": calculator_governance.CALCULATOR_SHA256,
+            }
+            and bindings["runner_sources"]
+            == {
+                "adapter_sha256": ADAPTER_SHA256,
+                "command_sha256": COMMAND_SHA256,
+                "memory_boundary_sha256": MEMORY_BOUNDARY_SHA256,
+                "runner_sha256": RUNNER_SHA256,
+            },
+            "corrected source binding changed",
+        )
+        require(
+            bindings["effective_s2_policy"]
+            == {
+                "artifact_sha256": S2_ARTIFACT_SHA256,
+                "self_sha256": S2_POLICY_SHA256,
+            }
+            and bindings["geometry"]
+            == {
+                "artifact_sha256": s2_policy_v2.GEOMETRY_ARTIFACT_SHA256,
+                "event_set_sha256": s2_policy_v2.EVENT_SET_SHA256,
+                "memberships_sha256": s2_policy_v2.MEMBERSHIPS_SHA256,
+                "nonadditive_book_memberships": 186,
+                "physical_events": 82,
+                "self_sha256": s2_policy_v2.GEOMETRY_SELF_SHA256,
+            },
+            "policy or geometry binding changed",
+        )
+        require(
+            bindings["lineage"]
+            == {
+                "dataset_contract_sha256": (
+                    "d630cc100cd06abdaa5d08d88353542999d625dd0c80f43eecbb5f649109f11c"
+                ),
+                "dataset_identity": "oanda-ba-ny17-friday-provider-observed-v2",
+                "dataset_manifest_sha256": (
+                    "11da094fc7ca6a30e946be33523757d7ab559a9ad1951c9142e8969539930014"
+                ),
+                "dataset_version": "phase-2b1r-v2",
+                "s0_acceptance_sha256": (
+                    "7c438598d6ad8f9b94aa1d264eaa57040f1d91bc1e4f758b1231dda5a9801548"
+                ),
+                "s1_acceptance_sha256": s2_policy_v2.S1_ARTIFACT_SHA256,
+                "strategy_content_sha256": (
+                    "3b9188749c10581d7518e25838a2cb65704d1329e7ebe3061cd7fe4b82115861"
+                ),
+                "strategy_identity": "failed-break-phase-1-admission-correction-v2",
+            },
+            "dataset or strategy lineage changed",
+        )
+        require(
+            authorization["result"]
+            == {
+                "expected_delta": {
+                    "every_other_application_table": 0,
+                    "research_jobrun": 1,
+                },
+                "idempotency_key": (
+                    "failed-break-exploratory-returns-v2|phase-2b1r-v2|development-2010-2018"
+                ),
+                "job_identity": "failed-break-exploratory-returns-v2",
+                "one_complete_canonical_json_result": True,
+            }
+            and authorization["expected_pristine_state"]
+            == {
+                "application_counts_sha256": (
+                    "5b10daadf1f394681c3da0897bef1132bfb7fbf47bc7c5e8efca95758fce8097"
+                ),
+                "idempotency_rows": 0,
+                "job_runs": 5,
+                "result_rows": 0,
+            },
+            "result or pristine-state authority changed",
+        )
+        require(authorization["environment"] == _expected_environment(), "environment changed")
+        require(
+            authorization["override_prohibition"]
+            == [
+                "ALTERNATE_ARTIFACT_PATH",
+                "CLI",
+                "DATABASE",
+                "DATA_ONLY",
+                "ENVIRONMENT",
+                "FAVOURABLE_RESULT",
+                "OWNER",
+                "SUCCESSFUL_OUTCOME",
+                "THRESHOLD_REINTERPRETATION",
+            ],
+            "override prohibition changed",
+        )
+        forbidden = {
+            "drawdown",
+            "equity",
+            "expected_output_hash",
+            "expected_pnl",
+            "expected_return",
+            "losses",
+            "profit_factor",
+            "terminal_counts",
+            "wins",
+        }
+        require(
+            not forbidden.intersection(_all_keys(authorization)),
+            "authorization contains return-bearing expected output",
+        )
+        return {
+            **authorization,
+            "artifact_sha256": AUTHORIZATION_ARTIFACT_SHA256,
+            "present": True,
+            "status": "AUTHORIZED_NOT_EXECUTED",
+        }
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as error:
+        raise RunnerGovernanceRefusal("missing or invalid execution authorization") from error
+
+
 def inspect_correction_evidence() -> dict:
-    """Verify the current lineage correction and its measured evidence."""
+    """Verify the current rollover correction and its real-data rehearsal."""
 
     require(
         _source_hash(REPORT_PATH) == REPORT_SHA256,
         "correction report drift",
     )
-    evidence = inspect_performance_evidence()
+    evidence = inspect_rollover_rehearsal()
     return {
         "correction_report_sha256": REPORT_SHA256,
-        "rehearsal_sha256": PERFORMANCE_EVIDENCE_SHA256,
-        "rehearsal_self_sha256": PERFORMANCE_EVIDENCE_SELF_SHA256,
-        "synthetic_evidence_sha256": evidence["synthetic"]["evidence_sha256"],
+        "rehearsal_sha256": ROLLOVER_REHEARSAL_ARTIFACT_SHA256,
+        "rehearsal_self_sha256": ROLLOVER_REHEARSAL_SELF_SHA256,
+        "deterministic_complete_result": evidence["real_data_runs"]["deterministic"],
     }
 
 
@@ -868,6 +1353,14 @@ def require_consumed_successor_execution_authorization(*_args, **_kwargs):
     inspect_second_failed_execution()
     raise RunnerGovernanceRefusal(
         "successor authorization was consumed by the accepted timeout failure"
+    )
+
+
+def require_consumed_rollover_execution_authorization(*_args, **_kwargs):
+    inspect_consumed_rollover_authorization_history()
+    inspect_rollover_failure()
+    raise RunnerGovernanceRefusal(
+        "rollover-era authorization was consumed by the accepted atomic refusal"
     )
 
 

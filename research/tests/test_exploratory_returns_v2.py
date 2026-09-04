@@ -5,7 +5,7 @@ import copy
 import hashlib
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -157,6 +157,69 @@ class ResolutionTests(unittest.TestCase):
 
 
 class CostAndAccountingTests(unittest.TestCase):
+    def test_horizon_rollover_preload_is_validated_then_truncated_at_early_exit(self):
+        event = synthetic_event(0)
+        resolution = calc.resolve_event(event)
+        self.assertLess(
+            calc.timestamp(resolution["exit_at"]),
+            calc.timestamp(event["rollovers"][0]["at"]),
+        )
+        self.assertEqual(
+            calc._governed_rollovers_through(event, calc.timestamp(resolution["exit_at"])),
+            [],
+        )
+        cells = calc.cost_grid(event, resolution, Decimal("25"))
+        self.assertTrue(all(row["financing_R"] == "0" for row in cells))
+
+    def test_missing_extra_or_changed_horizon_rollover_fails_closed(self):
+        event = synthetic_event(0)
+        resolution = calc.resolve_event(event)
+        mutations = []
+        missing = copy.deepcopy(event)
+        missing["rollovers"].pop()
+        mutations.append(missing)
+        extra = copy.deepcopy(event)
+        extra["rollovers"].append(copy.deepcopy(extra["rollovers"][-1]))
+        mutations.append(extra)
+        changed = copy.deepcopy(event)
+        changed["rollovers"][0]["multiplier"] = 99
+        mutations.append(changed)
+        for mutated in mutations:
+            with self.subTest(count=len(mutated["rollovers"])):
+                with self.assertRaisesRegex(
+                    calc.ReturnRefusal, "missing or extra|timestamp or multiplier"
+                ):
+                    calc.cost_grid(mutated, resolution, Decimal("25"))
+
+    def test_rollover_calendar_preserves_dst_weekends_closures_and_exit_equality(self):
+        start = datetime(2014, 3, 7, 20, tzinfo=UTC)
+        end = datetime(2014, 3, 10, 21, tzinfo=UTC)
+        rows = calc._rollover_times(start, end)
+        self.assertEqual(
+            rows,
+            [
+                (datetime(2014, 3, 7, 22, tzinfo=UTC), 1),
+                (datetime(2014, 3, 10, 21, tzinfo=UTC), 1),
+            ],
+        )
+        self.assertTrue(all(when.astimezone(calc.NY).hour == 17 for when, _ in rows))
+        self.assertTrue(all(when.astimezone(calc.NY).weekday() < 5 for when, _ in rows))
+
+        # A provider-observed closure does not synthesize a bar or remove the
+        # frozen weekday financing instant; its latest prior sealed midpoint is
+        # carried by the adapter as evidence for that instant.
+        holiday = calc._rollover_times(
+            datetime(2014, 12, 24, 16, tzinfo=UTC),
+            datetime(2014, 12, 26, 22, tzinfo=UTC),
+        )
+        self.assertEqual([multiplier for _, multiplier in holiday], [3, 1, 1])
+
+        event = synthetic_event(0)
+        first_at = calc.timestamp(event["rollovers"][0]["at"])
+        selected = calc._governed_rollovers_through(event, first_at)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["at"], calc.stamp(first_at))
+
     def test_cost_grid_is_exact_commission_times_financing_without_slippage(self):
         event = synthetic_event(0)
         event["h1"][0].update(bid_high="1.0210", bid_low="1.0193")

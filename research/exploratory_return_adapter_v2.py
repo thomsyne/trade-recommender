@@ -58,14 +58,18 @@ class DjangoSealedEvidenceAdapter:
     def _observe(self, phase, before):
         self.query_counts[phase] = len(connection.queries) - before
 
-    def verify_return_blind_lineage(self) -> dict:
-        before = len(connection.queries)
+    def _require_database_identity(self):
+        """Keep the persistent adapter fixed to the local research database."""
         with connection.cursor() as cursor:
             cursor.execute("SELECT current_database(), inet_server_addr()")
             require(
                 cursor.fetchone() == ("trade_recommender_research", None),
                 "exact local research database required",
             )
+
+    def verify_return_blind_lineage(self) -> dict:
+        before = len(connection.queries)
+        self._require_database_identity()
         s1 = s1_outcome.load_v2_s1_outcome_acceptance()
         policy = s2_policy_v2.load_policy()
         self._geometry = s2_geometry_v2.verify_committed()
