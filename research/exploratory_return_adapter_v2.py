@@ -14,7 +14,6 @@ from datetime import UTC, timedelta
 from decimal import Decimal
 
 from django.db import connection, transaction
-from django.db.models import Q
 
 from market.models import (
     Candle,
@@ -141,13 +140,14 @@ class DjangoSealedEvidenceAdapter:
         }
 
     @staticmethod
-    def _prior_start(starts, when):
-        completions = [registered_candle_completion(value, "H1") for value in starts]
+    def _prior_start(starts, completions, when):
         index = bisect_left(completions, when) - 1
         require(index >= 0, "no strictly prior sealed H1 conversion member")
         return starts[index]
 
-    def load_normalized_events(self, expected_keys: tuple[str, ...]) -> list[dict]:
+    def load_normalized_events(
+        self, expected_keys: tuple[str, ...], *, progress=None
+    ) -> list[dict]:
         require(self._dataset is not None and self._geometry is not None, "lineage not verified")
         before = len(connection.queries)
         geometry_events = self._geometry["events"]
@@ -156,6 +156,8 @@ class DjangoSealedEvidenceAdapter:
             == tuple(sorted(expected_keys)),
             "geometry event set changed",
         )
+        if progress:
+            progress("cohort_reconstruction", len(geometry_events), 82)
         setup_ids = [row["setup_id"] for row in geometry_events]
         evaluations = list(
             EntryEligibilityEvaluation.objects.select_related("setup", "setup__instrument")
@@ -194,6 +196,8 @@ class DjangoSealedEvidenceAdapter:
         for row in evaluations:
             by_setup.setdefault(row["setup_id"], []).append(row)
         require(len(by_setup) == 82 and len(evaluations) == 186, "entry evidence set changed")
+        if progress:
+            progress("entry_evidence", len(evaluations), 186)
 
         inventory_rows = HistoricalTimestampObservation.objects.filter(
             inventory__chunk__plan__registration__data_contract__identity=(
@@ -210,6 +214,12 @@ class DjangoSealedEvidenceAdapter:
             inventory.setdefault((code, granularity), []).append(timestamp)
         inventory = {key: tuple(sorted(set(values))) for key, values in inventory.items()}
         require(len(inventory) == 12, "sealed D/H1 inventory incomplete")
+        completion_inventory = {
+            key: tuple(registered_candle_completion(value, key[1]) for value in starts)
+            for key, starts in inventory.items()
+        }
+        if progress:
+            progress("sealed_inventory", sum(map(len, inventory.values())), 362_229)
 
         needed = {}
         event_specs = []
@@ -246,19 +256,14 @@ class DjangoSealedEvidenceAdapter:
             h1_all, d_all = inventory[(code, "H1")], inventory[(code, "D")]
             left, right = bisect_left(h1_all, entry), bisect_right(h1_all, horizon)
             h1_starts = h1_all[left:right]
-            d_completions = tuple(
-                registered_candle_completion(value, "D")
-                for value in d_all
-                if entry < registered_candle_completion(value, "D") <= horizon
-            )
+            d_all_completions = completion_inventory[(code, "D")]
+            d_left = bisect_right(d_all_completions, entry)
+            d_right = bisect_right(d_all_completions, horizon)
+            d_completions = d_all_completions[d_left:d_right]
             require(
                 len(d_completions) >= 10 and h1_starts[-1] == horizon, "horizon inventory drift"
             )
-            d_starts = tuple(
-                value
-                for value in d_all
-                if entry < registered_candle_completion(value, "D") <= horizon
-            )
+            d_starts = d_all[d_left:d_right]
             needed.setdefault((code, "H1"), set()).update(h1_starts)
             needed.setdefault((code, "D"), set()).update(d_starts)
             confirmation = confirmations.get(geometry["setup_id"])
@@ -278,48 +283,32 @@ class DjangoSealedEvidenceAdapter:
                 if when >= entry:
                     decision_times.add(when)
                     start = self._prior_start(
-                        inventory[(code, "H1")], when + timedelta(microseconds=1)
+                        inventory[(code, "H1")],
+                        completion_inventory[(code, "H1")],
+                        when + timedelta(microseconds=1),
                     )
                     needed.setdefault((code, "H1"), set()).add(start)
                 mark += timedelta(days=1)
             quote = code.split("_")[1]
             for when in decision_times:
                 for pair, _direction in calculator.CAD_ROUTES[quote]:
-                    start = self._prior_start(inventory[(pair, "H1")], when)
+                    start = self._prior_start(
+                        inventory[(pair, "H1")],
+                        completion_inventory[(pair, "H1")],
+                        when,
+                    )
                     needed.setdefault((pair, "H1"), set()).add(start)
 
-        predicate = Q(pk__in=[])
-        for (code, granularity), timestamps in sorted(needed.items()):
-            predicate |= Q(
-                instrument__code=code,
-                granularity=granularity,
-                timestamp__in=tuple(sorted(timestamps)),
-            )
-        candle_rows = list(
-            Candle.objects.filter(dataset_version=self._dataset)
-            .filter(predicate)
-            .select_related("instrument")
-            .values(
-                "id",
-                "instrument__code",
-                "granularity",
-                "timestamp",
-                "complete",
-                "bid_open",
-                "bid_high",
-                "bid_low",
-                "bid_close",
-                "ask_open",
-                "ask_high",
-                "ask_low",
-                "ask_close",
-            )
-        )
+        expected_candles = sum(len(values) for values in needed.values())
+        if progress:
+            progress("evidence_plan", expected_candles, expected_candles)
+        candle_rows = self._load_candle_rows(needed, progress=progress)
         candle_map = {
             (row["instrument__code"], row["granularity"], row["timestamp"]): row
             for row in candle_rows
             if row["timestamp"] in needed.get((row["instrument__code"], row["granularity"]), ())
         }
+        require(len(candle_map) == expected_candles, "missing sealed candle evidence")
         conflicts = set(
             CandleConflict.objects.filter(
                 dataset_version=self._dataset,
@@ -327,19 +316,60 @@ class DjangoSealedEvidenceAdapter:
             ).values_list("existing_candle_id", flat=True)
         )
         require(not conflicts, "conflicting registered candle evidence")
-        events = [self._normalize_event(spec, inventory, candle_map) for spec in event_specs]
+        events = []
+        for ordinal, spec in enumerate(event_specs, start=1):
+            events.append(self._normalize_event(spec, inventory, completion_inventory, candle_map))
+            if progress and (ordinal % 10 == 0 or ordinal == len(event_specs)):
+                progress("normalization", ordinal, len(event_specs))
         self._observe("sealed_outcome_preload", before)
         return events
+
+    def _load_candle_rows(self, needed, *, progress=None):
+        """Load each governed instrument/granularity group in one indexed query."""
+
+        candle_rows = []
+        for ordinal, ((code, granularity), timestamps) in enumerate(
+            sorted(needed.items()), start=1
+        ):
+            candle_rows.extend(
+                Candle.objects.filter(
+                    dataset_version=self._dataset,
+                    instrument__code=code,
+                    granularity=granularity,
+                    timestamp__in=tuple(sorted(timestamps)),
+                )
+                .select_related("instrument")
+                .values(
+                    "id",
+                    "instrument__code",
+                    "granularity",
+                    "timestamp",
+                    "complete",
+                    "bid_open",
+                    "bid_high",
+                    "bid_low",
+                    "bid_close",
+                    "ask_open",
+                    "ask_high",
+                    "ask_low",
+                    "ask_close",
+                )
+            )
+            if progress:
+                progress("sealed_candles", ordinal, len(needed))
+        return candle_rows
 
     def _candle(self, candle_map, code, granularity, start):
         row = candle_map.get((code, granularity, start))
         require(row is not None and row["complete"] is True, "missing sealed candle evidence")
         return row
 
-    def _conversion(self, currency, when, inventory, candles):
+    def _conversion(self, currency, when, inventory, completion_inventory, candles):
         legs = []
         for pair, direction in calculator.CAD_ROUTES[currency]:
-            start = self._prior_start(inventory[(pair, "H1")], when)
+            start = self._prior_start(
+                inventory[(pair, "H1")], completion_inventory[(pair, "H1")], when
+            )
             row = self._candle(candles, pair, "H1", start)
             legs.append(
                 {
@@ -354,7 +384,7 @@ class DjangoSealedEvidenceAdapter:
             )
         return {"currency": currency, "as_of": _stamp(when), "legs": legs}
 
-    def _normalize_event(self, spec, inventory, candles):
+    def _normalize_event(self, spec, inventory, completion_inventory, candles):
         geometry, evaluation, h1_starts, d_completions, d_starts, confirmation = spec
         code = geometry["instrument"]
         direction = geometry["direction"]
@@ -406,7 +436,11 @@ class DjangoSealedEvidenceAdapter:
         while mark.astimezone(UTC) <= horizon:
             when = mark.astimezone(UTC)
             if when >= entry:
-                start = self._prior_start(inventory[(code, "H1")], when + timedelta(microseconds=1))
+                start = self._prior_start(
+                    inventory[(code, "H1")],
+                    completion_inventory[(code, "H1")],
+                    when + timedelta(microseconds=1),
+                )
                 row = self._candle(candles, code, "H1", start)
                 marks.append(
                     {
@@ -414,21 +448,29 @@ class DjangoSealedEvidenceAdapter:
                         "side_close": str(
                             row["bid_close"] if direction == "long" else row["ask_close"]
                         ),
-                        "conversion": self._conversion(quote, when, inventory, candles),
+                        "conversion": self._conversion(
+                            quote, when, inventory, completion_inventory, candles
+                        ),
                     }
                 )
                 possible.add(when)
             mark += timedelta(days=1)
         rollovers = []
         for when, multiplier in rollover_times:
-            start = self._prior_start(inventory[(code, "H1")], when + timedelta(microseconds=1))
+            start = self._prior_start(
+                inventory[(code, "H1")],
+                completion_inventory[(code, "H1")],
+                when + timedelta(microseconds=1),
+            )
             row = self._candle(candles, code, "H1", start)
             rollovers.append(
                 {
                     "at": _stamp(when),
                     "multiplier": multiplier,
                     "midpoint": _midpoint(row["bid_close"], row["ask_close"]),
-                    "conversion": self._conversion(quote, when, inventory, candles),
+                    "conversion": self._conversion(
+                        quote, when, inventory, completion_inventory, candles
+                    ),
                 }
             )
         first = h1[0]
@@ -449,7 +491,7 @@ class DjangoSealedEvidenceAdapter:
         supporting = confirmation["evidence"].get("supporting_swing")
         require(supporting is not None, "supporting swing evidence missing")
         conversions = {
-            _stamp(when): self._conversion(quote, when, inventory, candles)
+            _stamp(when): self._conversion(quote, when, inventory, completion_inventory, candles)
             for when in sorted(possible)
         }
         return {
