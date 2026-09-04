@@ -16,22 +16,42 @@ ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs/strategy/failed-break/v2"
 ARTIFACT_PATH = DOCS / "exploratory-return-runner-preregistration-v2.json"
 REPORT_PATH = DOCS / "exploratory-return-runner-architecture.md"
-AUTHORIZATION_PATH = DOCS / "exploratory-return-execution-authorization-v2.json"
+PREDECESSOR_AUTHORIZATION_PATH = DOCS / "exploratory-return-execution-authorization-v2.json"
+FAILURE_PATH = DOCS / "exploratory-return-execution-failure-v2.json"
+AUTHORIZATION_PATH = DOCS / "exploratory-return-replacement-authorization-v2.json"
+CORRECTION_REPORT_PATH = DOCS / "exploratory-return-rlimit-correction-v2.md"
+REHEARSAL_PATH = DOCS / "exploratory-return-rlimit-rehearsal-v2.json"
 
 REPOSITORY_BASELINE = "efd125f1a5c6fe9778cfdc966c36b1a33f918c07"
 SCHEMA = "failed-break-v2-exploratory-return-runner-preregistration-v1"
 IDENTITY = "failed-break-v2-exploratory-return-runner-v1"
-ARTIFACT_SHA256 = "f2247b3faf86424be56a1f80203c5d59cb9e3bc6c2f7c095d766785178ba0d51"
-SELF_SHA256 = "61dfa8c938878e14ce801c420c58cb0f9759cb89d2dd362de8896f880c83ca58"
+ARTIFACT_SHA256 = "3e465e56af7eb0bc5eef175618dc8c38d0e8fafcc7a867d6b31e70946de3a93a"
+SELF_SHA256 = "b8877148c25b8982867e3df77314142b4b0d18924d820ea7777275292de4fca7"
 REPORT_SHA256 = "cb4fa82a1a4d8e7a2f358e56589d12492b866a33a54a4fb9636b0a90bf25cb37"
-RUNNER_SHA256 = "a16b8326942baa53856090b0dab3d96502794ce268c0cf076ddf2f5c8c8c60cf"
+RUNNER_SHA256 = "11f8d31684f7306b2ba4aed2715eb404e982c1e63875f0dc8cb2fc6d487eeeb2"
+MEMORY_BOUNDARY_SHA256 = "7e39e860419e677a811ad7fe755747c81d1ba4d8be329a1cbdfdf09f2bb8a182"
 ADAPTER_SHA256 = "6ec419cd8d6d250aeef54fa98a867aeaa89f91b5092ff3614b6d8888e6f142d0"
 COMMAND_SHA256 = "4d41b1021837c59f71fde4ce6edd20c30c9064334f35548801233e9b05913d52"
-AUTHORIZATION_ARTIFACT_SHA256 = "21c2a3ce7a8ae7eb46ca07a551160a1830f58b4938215491ab40d026f96c349c"
-AUTHORIZATION_SELF_SHA256 = "e0904ae6885d55da3ad10d500018b35d6b48631334a98e342155e7eac859df9a"
-AUTHORIZATION_SCHEMA = "failed-break-v2-exploratory-return-execution-authorization-v1"
-AUTHORIZATION_IDENTITY = "failed-break-v2-exploratory-return-single-execution-v1"
-AUTHORIZED_BASELINE = "b38a8918b18e461900cb773d679bc14cca03ee12"
+PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256 = (
+    "21c2a3ce7a8ae7eb46ca07a551160a1830f58b4938215491ab40d026f96c349c"
+)
+PREDECESSOR_AUTHORIZATION_SELF_SHA256 = (
+    "e0904ae6885d55da3ad10d500018b35d6b48631334a98e342155e7eac859df9a"
+)
+PREDECESSOR_AUTHORIZATION_SCHEMA = "failed-break-v2-exploratory-return-execution-authorization-v1"
+PREDECESSOR_AUTHORIZATION_IDENTITY = "failed-break-v2-exploratory-return-single-execution-v1"
+FAILURE_ARTIFACT_SHA256 = "47f76090cd933002067d3f48594c8fcd68fdb6e48d2f121089212b20ebd910b0"
+FAILURE_SELF_SHA256 = "7a76a6c0249f9f5d5eece84f90175880d712624ed1c79eb7a4821ab1b4d8030e"
+FAILURE_SCHEMA = "failed-break-v2-exploratory-return-pre-outcome-failure-v1"
+FAILURE_IDENTITY = "failed-break-v2-exploratory-return-first-authorization-consumed-v1"
+AUTHORIZATION_ARTIFACT_SHA256 = "e84b1b4b4a8b6b6c25ff4eefca21ab649b4a460a0b3db04b09c0433888407868"
+AUTHORIZATION_SELF_SHA256 = "d6b3e312f80a8395418726e95e384463c29feb11352e0306e46f9398c5f833a5"
+AUTHORIZATION_SCHEMA = "failed-break-v2-exploratory-return-replacement-authorization-v1"
+AUTHORIZATION_IDENTITY = "failed-break-v2-exploratory-return-single-replacement-v1"
+AUTHORIZED_BASELINE = "9a391a711669984eb9c705aae5076d233d362478"
+CORRECTION_REPORT_SHA256 = "8bb06ab0456e99c0d2dcb19a75722957086fd6278dfd02933c0cce32aab5e11f"
+REHEARSAL_SHA256 = "8b1e433337856f2b85d2ff26dc9f2d943879a126272599298cdff43ce11796a7"
+REHEARSAL_SELF_SHA256 = "97351aa03080b7903cbb152ee250a1d945f0963979298f85f69ef2d199f2f10b"
 REQUIRED_DATABASE = "trade_recommender_research"
 REQUIRED_DATABASE_HOST = "/tmp"
 REQUIRED_NETWORK_POLICY = "LOCAL_POSTGRES_UNIX_SOCKET_ONLY_V1"
@@ -143,6 +163,7 @@ def load_preregistration() -> dict:
         source_files = bindings["source_files"]
         expected_sources = {
             "research/exploratory_return_adapter_v2.py": ADAPTER_SHA256,
+            "research/exploratory_return_memory_v2.py": MEMORY_BOUNDARY_SHA256,
             "research/exploratory_return_runner_v2.py": RUNNER_SHA256,
             "research/management/commands/calculate_exploratory_returns_v2.py": COMMAND_SHA256,
         }
@@ -261,6 +282,147 @@ def _expected_backup_and_verification() -> dict:
     }
 
 
+def _load_canonical(path: Path, expected_sha256: str, self_field: str, expected_self: str):
+    raw = path.read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == expected_sha256, f"{path.name} digest mismatch")
+    document = json.loads(raw)
+    require(canonical_bytes(document) + b"\n" == raw, f"{path.name} bytes not canonical")
+    body = dict(document)
+    claimed = body.pop(self_field, None)
+    require(claimed == expected_self == digest(body), f"{path.name} self-hash mismatch")
+    return document
+
+
+def inspect_predecessor_authorization_history() -> dict:
+    """Verify the immutable first authorization as consumed history only."""
+
+    try:
+        authorization = _load_canonical(
+            PREDECESSOR_AUTHORIZATION_PATH,
+            PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256,
+            "authorization_sha256",
+            PREDECESSOR_AUTHORIZATION_SELF_SHA256,
+        )
+        require(
+            authorization["schema"] == PREDECESSOR_AUTHORIZATION_SCHEMA
+            and authorization["identity"] == PREDECESSOR_AUTHORIZATION_IDENTITY
+            and authorization["repository_baseline"] == "b38a8918b18e461900cb773d679bc14cca03ee12",
+            "predecessor authorization identity changed",
+        )
+        require(
+            authorization["command"]["argv"]
+            == [
+                ".venv/bin/python",
+                "manage.py",
+                "calculate_exploratory_returns_v2",
+                "--execute",
+            ]
+            and authorization["result"]["idempotency_key"]
+            == "failed-break-exploratory-returns-v2|phase-2b1r-v2|development-2010-2018",
+            "predecessor execution identity changed",
+        )
+        return {
+            **authorization,
+            "artifact_sha256": PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256,
+            "consumed": True,
+            "status": "CONSUMED_PRE_OUTCOME_FAILURE_RETRY_PROHIBITED",
+        }
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as error:
+        raise RunnerGovernanceRefusal("missing or invalid predecessor authorization") from error
+
+
+def inspect_failed_execution() -> dict:
+    """Verify the immutable no-result failure that consumed the first authority."""
+
+    try:
+        failure = _load_canonical(
+            FAILURE_PATH,
+            FAILURE_ARTIFACT_SHA256,
+            "failure_sha256",
+            FAILURE_SELF_SHA256,
+        )
+        predecessor = inspect_predecessor_authorization_history()
+        require(
+            failure["schema"] == FAILURE_SCHEMA
+            and failure["identity"] == FAILURE_IDENTITY
+            and failure["repository_baseline"] == AUTHORIZED_BASELINE,
+            "failed-execution identity changed",
+        )
+        require(
+            failure["predecessor_authorization"]
+            == {
+                "artifact_sha256": PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256,
+                "identity": PREDECESSOR_AUTHORIZATION_IDENTITY,
+                "self_sha256": PREDECESSOR_AUTHORIZATION_SELF_SHA256,
+                "status": "CONSUMED_PRE_OUTCOME_FAILURE_RETRY_PROHIBITED",
+            }
+            and predecessor["consumed"] is True,
+            "failed execution does not consume the predecessor authority",
+        )
+        require(
+            failure["attempt"]
+            == {
+                "argv": [
+                    ".venv/bin/python",
+                    "manage.py",
+                    "calculate_exploratory_returns_v2",
+                    "--execute",
+                ],
+                "exit_code": 1,
+                "failure": (
+                    "_operational_limits() raised ValueError: current limit exceeds maximum "
+                    "limit while setting RLIMIT_AS"
+                ),
+                "peak_rss_bytes": 78_053_376,
+                "reached_calculation": False,
+                "reached_outcome_loading": False,
+                "reached_persistence": False,
+                "reached_transaction_entry": False,
+                "runtime_seconds": "1.09",
+                "total_sql_query_count": "UNKNOWN_NOT_INSTRUMENTED",
+            },
+            "accepted failure record changed",
+        )
+        require(
+            failure["persistent_state"]
+            == {
+                "application_count_sha256_after": (
+                    "5b10daadf1f394681c3da0897bef1132bfb7fbf47bc7c5e8efca95758fce8097"
+                ),
+                "application_count_sha256_before": (
+                    "5b10daadf1f394681c3da0897bef1132bfb7fbf47bc7c5e8efca95758fce8097"
+                ),
+                "idempotency_key_rows": 0,
+                "persistent_writes": 0,
+                "result_rows": 0,
+            }
+            and failure["operational_evidence"]
+            == {
+                "failure_log_sha256": (
+                    "ca04236cd5b6eb1dee7532bf1e9fd08c69bb291d92ba021fa8d8e34eccf6abfd"
+                ),
+                "pre_operation_backup_sha256": (
+                    "8bf35a644315592d05361e488ffdd390fe2fc78c5135ed755a5c777ce373450c"
+                ),
+                "pre_operation_backup_size_bytes": 52_862_399,
+            },
+            "accepted persistent failure state changed",
+        )
+        require(
+            failure["authority"]
+            == {
+                "no_outcome_calculated": True,
+                "original_authorization_consumed": True,
+                "replacement_requires_new_forward_authorization": True,
+                "retry_under_original_authorization": False,
+            },
+            "failed-execution authority changed",
+        )
+        return {**failure, "artifact_sha256": FAILURE_ARTIFACT_SHA256, "status": "ACCEPTED"}
+    except (KeyError, OSError, TypeError, json.JSONDecodeError) as error:
+        raise RunnerGovernanceRefusal("missing or invalid failed-execution artifact") from error
+
+
 def validate_execution_environment() -> dict:
     """Validate non-secret runtime settings before any Django adapter import."""
     expected_python = ROOT / ".venv/bin/python"
@@ -291,7 +453,7 @@ def validate_execution_environment() -> dict:
 
 
 def inspect_execution_authorization() -> dict:
-    """Verify the one fixed-path authorization artifact without touching a database."""
+    """Verify only the successor replacement authorization without touching a database."""
     try:
         raw = AUTHORIZATION_PATH.read_bytes()
         require(
@@ -316,8 +478,10 @@ def inspect_execution_authorization() -> dict:
             authorization["authority"]
             == {
                 "code_only_runner_implementation": "ACCEPTED",
-                "persistent_exploratory_return_execution": "EXACTLY_ONCE",
+                "further_replacement_without_new_authorization": False,
                 "post_entry_real_outcome_access": "ONLY_INSIDE_SINGLE_EXECUTION",
+                "predecessor_authorization": "CONSUMED_PRE_OUTCOME_FAILURE",
+                "replacement_exploratory_return_execution": "EXACTLY_ONCE",
                 "retry_or_resume": False,
                 "result_replacement": False,
                 "post_result_policy_tuning": False,
@@ -338,12 +502,19 @@ def inspect_execution_authorization() -> dict:
                 ],
                 "alternate_arguments": False,
                 "atomic_transaction": True,
-                "memory_ceiling_bytes": 1_073_741_824,
+                "memory_boundary": {
+                    "ceiling_bytes": 1_073_741_824,
+                    "mechanism": "ISOLATED_CHILD_PARENT_RSS_WATCHDOG_V1",
+                    "poll_interval_milliseconds": 50,
+                    "rlimit_as_used_on_darwin": False,
+                    "worker_termination_closes_connection_and_rolls_back": True,
+                },
                 "operational_ceiling_seconds": 900,
             },
             "execution command changed",
         )
         bindings = authorization["bindings"]
+        failure = inspect_failed_execution()
         preregistration = load_preregistration()
         calculator = calculator_governance.load_preregistration()
         s2_policy_v2.load_policy()
@@ -353,7 +524,21 @@ def inspect_execution_authorization() -> dict:
 
         s0 = load_v2_s0_outcome_acceptance()
         require(
-            bindings["runner_preregistration"]
+            bindings["failure"]
+            == {
+                "artifact_sha256": FAILURE_ARTIFACT_SHA256,
+                "identity": FAILURE_IDENTITY,
+                "self_sha256": FAILURE_SELF_SHA256,
+            }
+            and failure["status"] == "ACCEPTED"
+            and bindings["predecessor_authorization"]
+            == {
+                "artifact_sha256": PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256,
+                "identity": PREDECESSOR_AUTHORIZATION_IDENTITY,
+                "self_sha256": PREDECESSOR_AUTHORIZATION_SELF_SHA256,
+                "status": "CONSUMED_PRE_OUTCOME_FAILURE_RETRY_PROHIBITED",
+            }
+            and bindings["runner_preregistration"]
             == {
                 "artifact_sha256": ARTIFACT_SHA256,
                 "self_sha256": SELF_SHA256,
@@ -362,6 +547,7 @@ def inspect_execution_authorization() -> dict:
             == {
                 "adapter_sha256": ADAPTER_SHA256,
                 "command_sha256": COMMAND_SHA256,
+                "memory_boundary_sha256": MEMORY_BOUNDARY_SHA256,
                 "runner_sha256": RUNNER_SHA256,
             }
             and bindings["calculator"]
@@ -453,6 +639,16 @@ def inspect_execution_authorization() -> dict:
             ],
             "override prohibition changed",
         )
+        require(
+            authorization["supersession"]
+            == {
+                "failure_artifact_required": True,
+                "original_authorization_available_for_reuse": False,
+                "replacement_invocations_authorized": 1,
+                "same_command_dataset_strategy_cohort_policy_and_financial_semantics": True,
+            },
+            "authorization supersession boundary changed",
+        )
         forbidden_output_keys = {
             "drawdown",
             "equity",
@@ -485,6 +681,33 @@ def inspect_execution_authorization() -> dict:
         raise RunnerGovernanceRefusal("missing or invalid execution authorization") from error
 
 
+def inspect_correction_evidence() -> dict:
+    require(
+        _source_hash(CORRECTION_REPORT_PATH) == CORRECTION_REPORT_SHA256,
+        "correction report drift",
+    )
+    rehearsal = _load_canonical(
+        REHEARSAL_PATH,
+        REHEARSAL_SHA256,
+        "rehearsal_sha256",
+        REHEARSAL_SELF_SHA256,
+    )
+    require(
+        rehearsal["authority"]["successor_authorization_sha256"] == AUTHORIZATION_ARTIFACT_SHA256
+        and rehearsal["authority"]["verified_failure_sha256"] == FAILURE_ARTIFACT_SHA256
+        and rehearsal["rows_written_by_table"]
+        == {"every_other_application_table": 0, "research_jobrun": 1}
+        and rehearsal["memory_breach"]["rows_after"] == 0
+        and rehearsal["timeout"]["rows_after"] == 0,
+        "successor rehearsal evidence changed",
+    )
+    return {
+        "correction_report_sha256": CORRECTION_REPORT_SHA256,
+        "rehearsal_sha256": REHEARSAL_SHA256,
+        "rehearsal_self_sha256": REHEARSAL_SELF_SHA256,
+    }
+
+
 def require_execution_authorization() -> dict:
     """Fail before any outcome adapter or Django model can be imported."""
     authorization = inspect_execution_authorization()
@@ -504,6 +727,14 @@ def require_execution_authorization() -> dict:
         "physical_event_count": authorization["bindings"]["geometry"]["physical_events"],
         "policy_sha256": authorization["bindings"]["effective_s2_policy"]["self_sha256"],
     }
+
+
+def require_predecessor_execution_authorization(*_args, **_kwargs):
+    inspect_predecessor_authorization_history()
+    inspect_failed_execution()
+    raise RunnerGovernanceRefusal(
+        "predecessor authorization was consumed by the accepted pre-outcome failure"
+    )
 
 
 def require_promotion(*_args, **_kwargs):

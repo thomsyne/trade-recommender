@@ -50,13 +50,64 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
         self.assertEqual(authorization["bindings"]["geometry"]["physical_events"], 82)
         self.assertEqual(authorization["bindings"]["geometry"]["nonadditive_book_memberships"], 186)
         self.assertEqual(authorization["command"]["operational_ceiling_seconds"], 900)
-        self.assertEqual(authorization["command"]["memory_ceiling_bytes"], 1_073_741_824)
+        self.assertEqual(
+            authorization["command"]["memory_boundary"],
+            {
+                "ceiling_bytes": 1_073_741_824,
+                "mechanism": "ISOLATED_CHILD_PARENT_RSS_WATCHDOG_V1",
+                "poll_interval_milliseconds": 50,
+                "rlimit_as_used_on_darwin": False,
+                "worker_termination_closes_connection_and_rolls_back": True,
+            },
+        )
         self.assertEqual(
             authorization["result"]["expected_delta"],
             {"research_jobrun": 1, "every_other_application_table": 0},
         )
         self.assertEqual(authorization["authority"]["promotion"], "PERMANENTLY_PROHIBITED")
         self.assertEqual(authorization["authority"]["live_trading"], "PERMANENTLY_PROHIBITED")
+
+    def test_predecessor_is_consumed_and_failure_query_count_is_unknown(self):
+        predecessor = governance.inspect_predecessor_authorization_history()
+        failure = governance.inspect_failed_execution()
+        self.assertEqual(predecessor["status"], "CONSUMED_PRE_OUTCOME_FAILURE_RETRY_PROHIBITED")
+        self.assertEqual(failure["attempt"]["total_sql_query_count"], "UNKNOWN_NOT_INSTRUMENTED")
+        self.assertFalse(failure["attempt"]["reached_outcome_loading"])
+        self.assertFalse(failure["attempt"]["reached_transaction_entry"])
+        self.assertEqual(failure["persistent_state"]["persistent_writes"], 0)
+        with self.assertRaisesRegex(governance.RunnerGovernanceRefusal, "consumed"):
+            governance.require_predecessor_execution_authorization()
+        self.assertEqual(
+            hashlib.sha256(governance.PREDECESSOR_AUTHORIZATION_PATH.read_bytes()).hexdigest(),
+            governance.PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256,
+        )
+
+    def test_missing_or_rehashed_forged_failure_refuses_successor(self):
+        failure = json.loads(governance.FAILURE_PATH.read_bytes())
+        failure["persistent_state"]["result_rows"] = 1
+        body = copy.deepcopy(failure)
+        body.pop("failure_sha256")
+        failure["failure_sha256"] = governance.digest(body)
+        raw = governance.canonical_bytes(failure) + b"\n"
+        with tempfile.TemporaryDirectory() as directory:
+            forged = Path(directory) / "failure.json"
+            forged.write_bytes(raw)
+            with (
+                mock.patch.object(governance, "FAILURE_PATH", Path(directory) / "missing.json"),
+                self.assertRaises(governance.RunnerGovernanceRefusal),
+            ):
+                governance.inspect_execution_authorization()
+            with (
+                mock.patch.object(governance, "FAILURE_PATH", forged),
+                mock.patch.object(
+                    governance, "FAILURE_ARTIFACT_SHA256", hashlib.sha256(raw).hexdigest()
+                ),
+                mock.patch.object(governance, "FAILURE_SELF_SHA256", failure["failure_sha256"]),
+                self.assertRaisesRegex(
+                    governance.RunnerGovernanceRefusal, "persistent failure state"
+                ),
+            ):
+                governance.inspect_execution_authorization()
 
     def test_missing_or_rehashed_forged_authority_refuses(self):
         document = json.loads(governance.AUTHORIZATION_PATH.read_bytes())
@@ -78,6 +129,25 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
                 self.assertRaisesRegex(governance.RunnerGovernanceRefusal, "authority changed"),
             ):
                 governance.inspect_execution_authorization()
+
+    def test_predecessor_artifact_cannot_substitute_for_successor(self):
+        with (
+            mock.patch.object(
+                governance, "AUTHORIZATION_PATH", governance.PREDECESSOR_AUTHORIZATION_PATH
+            ),
+            mock.patch.object(
+                governance,
+                "AUTHORIZATION_ARTIFACT_SHA256",
+                governance.PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256,
+            ),
+            mock.patch.object(
+                governance,
+                "AUTHORIZATION_SELF_SHA256",
+                governance.PREDECESSOR_AUTHORIZATION_SELF_SHA256,
+            ),
+            self.assertRaisesRegex(governance.RunnerGovernanceRefusal, "identity changed"),
+        ):
+            governance.inspect_execution_authorization()
 
     def test_every_upstream_hash_mutation_refuses_even_when_rehashed(self):
         original = json.loads(governance.AUTHORIZATION_PATH.read_bytes())
@@ -154,6 +224,30 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
         ):
             runner.execute_persistent()
         self.assertNotIn("research.exploratory_return_adapter_v2", sys.modules)
+
+    def test_limit_setup_failure_precedes_worker_outcomes_and_writes(self):
+        watchdog = mock.Mock()
+        with (
+            mock.patch.object(governance, "load_preregistration"),
+            mock.patch.object(
+                governance,
+                "require_execution_authorization",
+                return_value=runner.synthetic_authorization(
+                    artifact_sha256=governance.AUTHORIZATION_ARTIFACT_SHA256,
+                    policy_sha256=governance.S2_POLICY_SHA256,
+                ),
+            ),
+            mock.patch.object(governance, "governed_event_keys", return_value=tuple(range(82))),
+            mock.patch.object(
+                runner.memory_boundary,
+                "operational_boundary",
+                side_effect=runner.memory_boundary.MemoryBoundaryFailure("setup failed"),
+            ),
+            mock.patch.object(runner.memory_boundary, "run_isolated_worker", watchdog),
+            self.assertRaisesRegex(runner.RunnerRefusal, "setup failed"),
+        ):
+            runner.execute_persistent()
+        watchdog.assert_not_called()
         with (
             mock.patch.object(
                 governance,
@@ -272,7 +366,7 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
         rehearsal = json.loads(path.read_bytes())
         self.assertEqual(
             rehearsal["authorization_artifact_sha256"],
-            governance.AUTHORIZATION_ARTIFACT_SHA256,
+            governance.PREDECESSOR_AUTHORIZATION_ARTIFACT_SHA256,
         )
         self.assertEqual(
             rehearsal["concurrency"]["outcomes"],
@@ -285,6 +379,23 @@ class ExploratoryReturnExecutionAuthorizationTests(unittest.TestCase):
             rehearsal["rows_written_by_table"],
             {"research_jobrun": 1, "every_other_application_table": 0},
         )
+
+    def test_successor_rehearsal_proves_watchdog_rollback_and_unique_refusal(self):
+        evidence = governance.inspect_correction_evidence()
+        rehearsal = json.loads(governance.REHEARSAL_PATH.read_bytes())
+        self.assertEqual(evidence["rehearsal_sha256"], governance.REHEARSAL_SHA256)
+        self.assertEqual(rehearsal["memory_breach"]["rows_after"], 0)
+        self.assertEqual(rehearsal["timeout"]["rows_after"], 0)
+        self.assertEqual(rehearsal["injected_failure"]["rows_after"], 0)
+        self.assertEqual(
+            rehearsal["concurrency"]["outcomes"],
+            ["COMMITTED", "UNIQUE_CONSTRAINT_REFUSAL"],
+        )
+        self.assertEqual(
+            rehearsal["success"]["query_counts"],
+            {"duplicate_check": 1, "readback_verify": 1, "result_insert": 1},
+        )
+        self.assertFalse(rehearsal["authority"]["favourable_synthetic_result_can_promote"])
 
 
 if __name__ == "__main__":
