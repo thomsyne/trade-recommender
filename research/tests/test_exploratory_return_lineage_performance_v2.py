@@ -111,6 +111,21 @@ class LineagePerformanceTests(unittest.TestCase):
                 starts, completions, completions[0]
             )
 
+    def test_provider_closure_uses_latest_sealed_member_without_synthesis(self):
+        starts = (
+            datetime(2014, 12, 24, 20, tzinfo=UTC),
+            datetime(2014, 12, 26, 20, tzinfo=UTC),
+        )
+        completions = tuple(value + timedelta(hours=1) for value in starts)
+        christmas_rollover = datetime(2014, 12, 25, 22, tzinfo=UTC)
+        self.assertEqual(
+            adapter_module.DjangoSealedEvidenceAdapter._prior_start(
+                starts, completions, christmas_rollover + timedelta(microseconds=1)
+            ),
+            starts[0],
+        )
+        self.assertNotIn(christmas_rollover - timedelta(hours=1), starts)
+
     def test_candle_query_count_is_fixed_by_governed_groups_not_timestamp_count(self):
         adapter = adapter_module.DjangoSealedEvidenceAdapter()
         adapter._dataset = object()

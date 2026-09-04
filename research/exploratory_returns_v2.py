@@ -379,6 +379,27 @@ def _rollover_times(entry_at: datetime, exit_at: datetime) -> list[tuple[datetim
     return result
 
 
+def _governed_rollovers_through(event: dict, exit_at: datetime) -> list[dict]:
+    """Validate the horizon preload, then select only rollovers held through exit."""
+    entry_at = timestamp(event["entry_at"])
+    horizon_at = timestamp(event["horizon_at"])
+    require(entry_at < exit_at <= horizon_at, "rollover exit outside governed horizon")
+    expected = _rollover_times(entry_at, horizon_at)
+    require(len(event["rollovers"]) == len(expected), "missing or extra governed rollover")
+    selected = []
+    for row, (expected_at, expected_multiplier) in zip(event["rollovers"], expected, strict=True):
+        _exact_fields(row, ROLLOVER_FIELDS, "rollover")
+        when = timestamp(row["at"])
+        multiplier = int(row["multiplier"])
+        require(
+            when == expected_at and multiplier == expected_multiplier,
+            "rollover timestamp or multiplier changed",
+        )
+        if when <= exit_at:
+            selected.append(row)
+    return selected
+
+
 def _rollover_effect(
     event: dict,
     resolution: dict,
@@ -388,16 +409,10 @@ def _rollover_effect(
 ) -> Decimal:
     total = Decimal(0)
     quote = _pair_quote(event["instrument"])
-    expected = _rollover_times(timestamp(event["entry_at"]), timestamp(resolution["exit_at"]))
-    require(len(event["rollovers"]) == len(expected), "missing or extra governed rollover")
-    for row, (expected_at, expected_multiplier) in zip(event["rollovers"], expected, strict=True):
-        _exact_fields(row, ROLLOVER_FIELDS, "rollover")
+    exit_at = timestamp(resolution["exit_at"])
+    for row in _governed_rollovers_through(event, exit_at):
         when = timestamp(row["at"])
         multiplier = int(row["multiplier"])
-        require(
-            when == expected_at and multiplier == expected_multiplier,
-            "rollover timestamp or multiplier changed",
-        )
         rate = conversion_rate(row["conversion"], quote, when)
         total += abs(units) * decimal(row["midpoint"]) * annual_rate * multiplier / 365 * rate
     return total / initial_risk

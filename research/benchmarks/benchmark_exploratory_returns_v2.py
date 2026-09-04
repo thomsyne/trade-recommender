@@ -10,6 +10,7 @@ separately.
 
 from __future__ import annotations
 
+import copy
 import json
 import platform
 import sys
@@ -21,7 +22,13 @@ from time import perf_counter
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from research.exploratory_returns_v2 import cost_grid, digest, resolve_event  # noqa: E402
+from research.exploratory_returns_v2 import (  # noqa: E402
+    _rollover_times,
+    cost_grid,
+    digest,
+    resolve_event,
+    stamp,
+)
 
 
 def synthetic_event(index: int) -> dict:
@@ -59,7 +66,7 @@ def synthetic_event(index: int) -> dict:
         "sealed": True,
         "start": start_text,
     }
-    return {
+    event = {
         "books": ["failed-break-any-level-deduplicated-v1"],
         "conversion": {end_text: conversion},
         "daily": [
@@ -93,6 +100,18 @@ def synthetic_event(index: int) -> dict:
         "supporting_swing": "1.0100",
         "target": "1.0220",
     }
+    for rollover, multiplier in _rollover_times(start, datetime.fromisoformat(horizon)):
+        evidence = copy.deepcopy(conversion)
+        evidence["as_of"] = stamp(rollover)
+        event["rollovers"].append(
+            {
+                "at": stamp(rollover),
+                "conversion": evidence,
+                "midpoint": "1.02",
+                "multiplier": multiplier,
+            }
+        )
+    return event
 
 
 def run(size: int = 20_000) -> dict:
