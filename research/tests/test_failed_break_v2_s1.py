@@ -36,6 +36,7 @@ from research.failed_break_v2_s1_governance import (
     V2S1GovernanceRefusal,
     canonical_bytes,
     canonical_hash,
+    inspect_v2_s1_execution_authorization,
     load_v2_s1_execution_authorization,
     load_v2_s1_policy,
 )
@@ -58,7 +59,7 @@ AT = datetime(2018, 1, 2, 12, tzinfo=UTC)
 
 
 class V2S1GovernanceTests(SimpleTestCase):
-    def test_artifact_is_canonical_self_hashed_and_execution_is_closed(self):
+    def test_artifacts_are_canonical_and_direct_execution_stays_closed(self):
         policy = load_v2_s1_policy()
         raw = governance.ARTIFACT_PATH.read_bytes()
         body = dict(json.loads(raw))
@@ -71,7 +72,20 @@ class V2S1GovernanceTests(SimpleTestCase):
         self.assertFalse(policy["authorization"]["persistent_v2_s1_execution"])
         self.assertFalse(policy["authorization"]["returns_or_backtesting"])
         self.assertFalse(policy["authorization"]["promotion_or_live_trading"])
-        self.assertIsNone(load_v2_s1_execution_authorization())
+        authorization = inspect_v2_s1_execution_authorization()
+        authorization_raw = governance.EXECUTION_ARTIFACT_PATH.read_bytes()
+        authorization_body = dict(json.loads(authorization_raw))
+        authorization_claimed = authorization_body.pop("authorization_sha256")
+        self.assertEqual(canonical_bytes(json.loads(authorization_raw)) + b"\n", authorization_raw)
+        self.assertEqual(
+            hashlib.sha256(authorization_raw).hexdigest(),
+            governance.EXECUTION_ARTIFACT_SHA256,
+        )
+        self.assertEqual(authorization_claimed, governance.EXECUTION_POLICY_SHA256)
+        self.assertEqual(canonical_hash(authorization_body), authorization_claimed)
+        self.assertTrue(authorization["authorization"]["persistent_v2_s1_execution"])
+        with self.assertRaisesRegex(V2S1GovernanceRefusal, "direct v2 S1 execution"):
+            load_v2_s1_execution_authorization()
 
     def test_rehashed_authorization_mutation_fails_closed(self):
         policy = json.loads(governance.ARTIFACT_PATH.read_bytes())
@@ -96,14 +110,11 @@ class V2S1GovernanceTests(SimpleTestCase):
             {"returns_or_backtesting": True},
             {"promotion_or_live_trading": True},
         ):
-            authorization = {
-                "persistent_v2_s1_execution": True,
-                "promotion_or_live_trading": False,
-                "returns_or_backtesting": False,
-                "runner_artifact_sha256": governance.ARTIFACT_SHA256,
-                "schema": "failed-break-v2-s1-execution-authorization-v1",
-                **mutation,
-            }
+            authorization = json.loads(governance.EXECUTION_ARTIFACT_PATH.read_bytes())
+            authorization["authorization"].update(mutation)
+            body = dict(authorization)
+            body.pop("authorization_sha256")
+            authorization["authorization_sha256"] = canonical_hash(body)
             raw = canonical_bytes(authorization) + b"\n"
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "authorization.json"
@@ -115,23 +126,31 @@ class V2S1GovernanceTests(SimpleTestCase):
                         "EXECUTION_ARTIFACT_SHA256",
                         hashlib.sha256(raw).hexdigest(),
                     ),
-                    self.assertRaisesRegex(V2S1GovernanceRefusal, "authorization changed"),
+                    mock.patch.object(
+                        governance,
+                        "EXECUTION_POLICY_SHA256",
+                        authorization["authorization_sha256"],
+                    ),
+                    self.assertRaisesRegex(V2S1GovernanceRefusal, "authority changed"),
                 ):
-                    load_v2_s1_execution_authorization()
+                    inspect_v2_s1_execution_authorization()
 
-    def test_command_is_readiness_by_default_and_execute_refuses_before_projection(self):
+    def test_command_uses_only_the_authorized_readiness_and_execution_paths(self):
         with mock.patch(
-            "research.management.commands.signal_count_s1_v2.readiness_v2_s1",
-            return_value={"status": "READY_CODE_ONLY_EXECUTION_UNAUTHORIZED"},
+            "research.management.commands.signal_count_s1_v2.authorization_readiness_v2_s1",
+            return_value={"status": "AUTHORIZED_NOT_EXECUTED"},
         ) as readiness:
             call_command("signal_count_s1_v2")
         readiness.assert_called_once_with()
         with (
-            mock.patch("research.failed_break_v2_s1.project_v2_s1") as forbidden_projection,
-            self.assertRaises(CommandError),
+            mock.patch(
+                "research.management.commands.signal_count_s1_v2.execute_authorized_v2_s1",
+                side_effect=V2S1GovernanceRefusal("refused"),
+            ) as execute,
+            self.assertRaisesRegex(CommandError, "refused"),
         ):
             call_command("signal_count_s1_v2", "--execute")
-        forbidden_projection.assert_not_called()
+        execute.assert_called_once()
 
     def test_source_has_no_outcome_return_provider_or_production_path(self):
         source = (ROOT / "research/failed_break_v2_s1.py").read_text().lower()
