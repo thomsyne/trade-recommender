@@ -1,0 +1,75 @@
+{
+  "database_guard": {
+    "database_name": "detector_v2_benchmark_post_s1",
+    "required_prefix": "detector_v2_benchmark_",
+    "schema_removed_after_measurement": true
+  },
+  "environment": {
+    "django": "5.2.17",
+    "harness_sha256": "7716b25b9388077a2fab1ed942c7328efa5e901d021f0c9a671b09b41a68aa57",
+    "machine": "arm64",
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "postgresql": "15.5",
+    "python": "3.11.4",
+    "repository_commit": "270b7b388acc94060b0ba06558a1a034383a481a"
+  },
+  "identity": {
+    "contract_sha256": "d630cc100cd06abdaa5d08d88353542999d625dd0c80f43eecbb5f649109f11c",
+    "dataset": "failed-break-provider-observed-historical:phase-2b1r-v2",
+    "global_semantic_inventory_sha256": "f0285221956d4ec2d802eba1dc80f5a6d2a7be6697e62b1b3782705886b69427",
+    "manifest_sha256": "11da094fc7ca6a30e946be33523757d7ab559a9ad1951c9142e8969539930014",
+    "registration_configuration_sha256": "dc12d05ba149b01ec2f5ed4228d64622bc675b58c7d790fe676d2b46370d18e2",
+    "registration_report_sha256": "871ba55669da47577c6eb65c46bf8fb86ba6aef73fe7dd322ff37c67b3f280c2"
+  },
+  "report_sha256": "e920c8b1867622a9f1d59fbbaf5768660983d14ee89bd30e4c04aa09667ffc16",
+  "scope": {
+    "excludes": [
+      "persistent research-table writes",
+      "a production v2 S1 runner",
+      "full v2 level/setup/eligibility materialization",
+      "post-entry outcome, return, P&L or backtest work"
+    ],
+    "includes": [
+      "real successor registration validation",
+      "real sealed H1/D/W ORM preload",
+      "v2 admission projection and incremental H1 ATR/D EMA-ATR-pivot computation",
+      "return-blind v1 S1 row counts for persistence workload sizing",
+      "isolated-schema inserts with primary, unique, foreign-key, check and row-trigger work",
+      "transaction commit and canonical report hashing"
+    ]
+  },
+  "timings_seconds": {
+    "analysis_run_persistence": 0.02653716699933284,
+    "canonical_report_hash_generation": 0.004802958999789553,
+    "constraint_trigger_verification": 0.0011954580004385207,
+    "detector_computation": 0.05132750000120723,
+    "entry_eligibility_persistence": 0.0006077079997339752,
+    "h1_d_w_preload": 0.5002248330019938,
+    "isolated_schema_setup": 0.014775166997424094,
+    "levels_lifecycle_persistence": 0.004387417000543792,
+    "registered_dataset_validation": 1.6718311250006082,
+    "setups_transitions_attribution_persistence": 0.001783791998605011,
+    "source_row_count_queries": 0.01862299999993411,
+    "total": 2.3225436249995255,
+    "transaction_commit": 0.0016327090015693102
+  },
+  "workload": {
+    "dataset_id": 3,
+    "instrument": "AUD_USD",
+    "inventory_counts": {
+      "D": 259,
+      "H1": 6216,
+      "W": 51
+    },
+    "representative_persistence_rows": {
+      "analysis_runs": 6216,
+      "attributions": 20,
+      "entry_eligibility": 17,
+      "levels": 308,
+      "lifecycle_events": 310,
+      "setups": 11,
+      "transitions": 28
+    },
+    "year": 2018
+  }
+}
