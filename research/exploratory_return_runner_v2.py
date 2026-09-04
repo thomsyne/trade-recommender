@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import copy
-import resource
-import signal
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Protocol
 
+from research import exploratory_return_memory_v2 as memory_boundary
 from research import exploratory_returns_v2 as calculator
 
 JOB_IDENTITY = "failed-break-exploratory-returns-v2"
@@ -35,29 +34,12 @@ def require(condition, message):
 
 @contextmanager
 def _operational_limits():
-    """Apply the governed wall-clock and address-space ceilings to execution."""
-    require(hasattr(signal, "setitimer"), "platform cannot enforce execution timeout")
-    previous_handler = signal.getsignal(signal.SIGALRM)
-    previous_limit = resource.getrlimit(resource.RLIMIT_AS)
-    hard = previous_limit[1]
-    soft = (
-        MEMORY_CEILING_BYTES if hard == resource.RLIM_INFINITY else min(hard, MEMORY_CEILING_BYTES)
-    )
-
-    def expired(_signum, _frame):
-        raise RunnerRefusal("exploratory return execution exceeded 15-minute ceiling")
-
+    """Establish the portable parent-side RSS watchdog boundary."""
     try:
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
-        signal.signal(signal.SIGALRM, expired)
-        signal.setitimer(signal.ITIMER_REAL, OPERATIONAL_CEILING_SECONDS)
-        yield
-    except MemoryError as error:
-        raise RunnerRefusal("exploratory return execution exceeded memory ceiling") from error
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
-        resource.setrlimit(resource.RLIMIT_AS, previous_limit)
+        with memory_boundary.operational_boundary(MEMORY_CEILING_BYTES) as ceiling:
+            yield ceiling
+    except memory_boundary.MemoryBoundaryFailure as error:
+        raise RunnerRefusal(str(error)) from error
 
 
 class _ReadOnlyQueryAudit:
@@ -383,25 +365,49 @@ def readiness() -> dict:
     }
 
 
-def execute_persistent(*, progress=None) -> dict:
-    """Single execution entry point; authorization precedes Django/ORM imports."""
-    from research import exploratory_return_runner_v2_governance as governance
+def _persistent_worker(channel, authorization, expected_keys):
+    """Own the only outcome-loading connection and its atomic transaction."""
+    import django
 
-    governance.load_preregistration()
-    authorization = governance.require_execution_authorization()
+    django.setup()
+    from django.db import connections
+
+    connections.close_all()
     from research.exploratory_return_adapter_v2 import (
         DjangoResultStore,
         DjangoSealedEvidenceAdapter,
     )
 
-    with _operational_limits():
-        return run_authorized(
-            authorization=authorization,
-            expected_keys=governance.governed_event_keys(),
-            adapter=_MigrationCheckedAdapter(DjangoSealedEvidenceAdapter()),
-            store=DjangoResultStore(),
-            progress=progress,
-        )
+    return run_authorized(
+        authorization=authorization,
+        expected_keys=expected_keys,
+        adapter=_MigrationCheckedAdapter(DjangoSealedEvidenceAdapter()),
+        store=DjangoResultStore(),
+        progress=lambda stage, completed, total: channel.send(
+            ("PROGRESS", stage, completed, total)
+        ),
+    )
+
+
+def execute_persistent(*, progress=None) -> dict:
+    """Single execution entry point; outcome access occurs only in the worker."""
+    from research import exploratory_return_runner_v2_governance as governance
+
+    governance.load_preregistration()
+    authorization = governance.require_execution_authorization()
+    expected_keys = governance.governed_event_keys()
+    with _operational_limits() as ceiling:
+        try:
+            outcome = memory_boundary.run_isolated_worker(
+                _persistent_worker,
+                (authorization, expected_keys),
+                memory_ceiling_bytes=ceiling,
+                timeout_seconds=OPERATIONAL_CEILING_SECONDS,
+                progress=progress,
+            )
+        except memory_boundary.MemoryBoundaryFailure as error:
+            raise RunnerRefusal(str(error)) from error
+        return outcome.value
 
 
 @dataclass
