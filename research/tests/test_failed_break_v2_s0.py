@@ -504,7 +504,7 @@ class V2S0GovernanceTests(SimpleTestCase):
             )
         forbidden_reader.assert_not_called()
 
-    def test_return_blind_allowlist_and_no_s1_runner_or_authority(self):
+    def test_return_blind_allowlist_and_s1_execution_authority_remains_closed(self):
         self.assertEqual(
             V2_S0_PRICE_FIELDS,
             {"instrument__code", "timestamp", "bid_open", "ask_open"},
@@ -521,11 +521,18 @@ class V2S0GovernanceTests(SimpleTestCase):
             research_model_imports,
             {"JobRun", "StrategyDefinition", "StrategyParameterManifest", "StrategyVersion"},
         )
-        self.assertFalse(
+        self.assertTrue(
             (
                 Path(__file__).resolve().parents[1] / "management/commands/signal_count_s1_v2.py"
             ).exists()
         )
+        from research.failed_break_v2_s1_governance import (
+            load_v2_s1_execution_authorization,
+            load_v2_s1_policy,
+        )
+
+        self.assertFalse(load_v2_s1_policy()["authorization"]["persistent_v2_s1_execution"])
+        self.assertIsNone(load_v2_s1_execution_authorization())
         self.assertFalse(load_v2_policy()["detector"]["persistent_runner_exposed"])
         self.assertFalse(self.preregistration["methodology"]["post_entry_or_outcome_access"])
         self.assertFalse(self.preregistration["authorization"]["v2_s1_execution"])
