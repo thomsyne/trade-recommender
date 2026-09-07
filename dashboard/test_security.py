@@ -123,7 +123,12 @@ class ReadinessTests(TestCase):
             ):
                 response = self.client.get(reverse("ready"))
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok", "checks": []})
+        body = response.json()
+        self.assertEqual((body["status"], body["checks"]), ("ok", []))
+        self.assertEqual(body["revision"], "unknown")
+        self.assertEqual(body["backup"]["source"], "legacy_marker")
+        self.assertEqual(body["backup"]["state"], "fresh")
+        self.assertNotIn(directory, response.content.decode())
 
     @override_settings(READINESS_BACKUP_MARKER="/definitely/missing/backup-marker")
     def test_readiness_fails_when_backup_is_missing(self):
