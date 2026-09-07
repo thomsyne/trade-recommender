@@ -21,7 +21,9 @@ services:
     command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --access-logfile -
     volumes:
       - backup-state:/var/lib/trade-recommender
-      - /:/host-root:ro
+      # Disk-capacity signal only: an empty, dedicated host directory on the
+      # root filesystem, read-only. Never the host root, never a socket.
+      - /var/lib/trade-recommender/host-health:/host-health:ro
     depends_on:
       db:
         condition: service_healthy

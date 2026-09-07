@@ -5,11 +5,14 @@
 Slice 6 runs one ARM `t4g.small` in `us-east-1` with a 25 GB encrypted gp3
 root volume, an attached Elastic IP, and Docker Compose. Caddy terminates TLS
 for `fx-forecast.thomsyne.dev`; Terraform manages an A record in the owner's
-existing public Route 53 hosted zone. Only 80/443 and explicitly configured
-key-only SSH CIDRs enter the host. SSM Session Manager remains the emergency
-access path. PostgreSQL, web, worker, scheduler, backup, and Caddy containers
-all restart unless stopped. There is no load balancer, NAT gateway, RDS,
-Secrets Manager, a new hosted zone, Tailscale, extra EBS volume, or paid monitoring.
+existing public Route 53 hosted zone. Only 80/443 enter the host by default;
+port 22 exists only for explicitly configured narrow key-only SSH CIDRs, and
+Internet-wide SSH CIDRs are rejected by Terraform validation unless a
+documented break-glass flag is set. SSM Session Manager is the administration
+and recovery path. PostgreSQL, web, worker, scheduler, backup, and Caddy
+containers all restart unless stopped. There is no load balancer, NAT gateway,
+RDS, Secrets Manager, a new hosted zone, Tailscale, extra EBS volume, or paid
+monitoring.
 
 At typical us-east-1 on-demand rates, budget roughly US$18–22/month: about $12
 for compute, $2 for gp3, $3.65 for the public IPv4 address, and low single
@@ -51,11 +54,57 @@ Repository variables:
 - `ACME_EMAIL` (**required**): a non-secret owner email for Caddy certificate
   notices. It is appended to the host dotenv file by deployment and does not
   belong in `PRODUCTION_ENV`.
-- `SSH_PUBLIC_KEY`: the owner's **public** key. Omit to disable SSH entirely.
-- `SSH_CIDRS_JSON`: JSON such as `["203.0.113.10/32"]`. It defaults to `[]`.
-  During travel, `["0.0.0.0/0"]` is supported only as an explicit decision.
-  That exposes key-only SSH to the Internet; password, keyboard-interactive,
-  and root login remain disabled. Prefer updating narrow CIDRs or using SSM.
+- `SSH_PUBLIC_KEY`: the owner's **public** key. Omit on a *new* deployment to
+  create no key pair. On the existing instance keep it unchanged: `key_name`
+  is immutable on EC2, so changing it would force instance replacement, which
+  `prevent_destroy` blocks. Removing SSH *access* is done through the security
+  group (`SSH_CIDRS_JSON`), not the key.
+- `SSH_CIDRS_JSON`: JSON such as `["203.0.113.10/32"]`. It defaults to `[]`,
+  which creates no port-22 ingress at all. Internet-wide entries
+  (`0.0.0.0/0`, `::/0`, any `/0`) fail `terraform` variable validation and the
+  security-group precondition unless `SSH_PUBLIC_BREAK_GLASS` is also `true`.
+- `SSH_PUBLIC_BREAK_GLASS`: leave unset. Set to `true` only for a recorded
+  emergency in which SSM is unusable and a narrow CIDR cannot be determined;
+  revert immediately afterwards. Password, keyboard-interactive, and root SSH
+  login remain disabled by the host bootstrap regardless.
+
+#### Closing public SSH on the running host (operator action, not applied here)
+
+The audited host had port 22 reachable from the Internet. To close it without
+replacing the instance:
+
+1. Set the repository variable `SSH_CIDRS_JSON` to `[]` (SSM only) or to a
+   narrow current CIDR such as `["203.0.113.10/32"]`. Leave `SSH_PUBLIC_KEY`
+   as it is.
+2. Do not set `SSH_PUBLIC_BREAK_GLASS`.
+3. Run the deploy workflow (or `terraform apply` with the same tfvars). The
+   only planned change is the security-group ingress rule; the instance, EIP,
+   key pair, and IMDSv2 (`http_tokens = "required"`, hop limit 2 for the
+   containers) are untouched. Review the plan output before approving.
+4. Confirm afterwards with `aws ec2 describe-security-groups` that no rule
+   allows `0.0.0.0/0` or `::/0` on port 22, and open an SSM session to prove
+   the recovery path still works.
+
+If the CI variables still carry `["0.0.0.0/0"]` when this change lands, the
+next apply fails validation until the variable is corrected; that failure is
+the intended guard, not an outage (the running host is unchanged).
+
+#### Recovery without public SSH
+
+Every administrative task in this document already runs through SSM:
+
+```bash
+aws ssm start-session --target <instance-id> --region us-east-1
+sudo -i
+cd /opt/trade-recommender
+docker compose --env-file .env -f compose.production.yaml ps      # restart counts
+docker compose --env-file .env -f compose.production.yaml logs backup --tail 100
+```
+
+SSM needs only the instance role (`AmazonSSMManagedInstanceCore`), outbound
+443, and a running agent, all of which the bootstrap verifies. If the agent
+itself is broken, EC2 Serial Console or a stop/start with a corrected user-data
+script are the fallbacks; neither requires port 22.
 
 Protect `main` so the `checks` job is required. Pull requests only run checks;
 they cannot deploy. A successful push to `main` serializes deployment, builds
@@ -208,15 +257,83 @@ backup before restarting that image.
 
 ## Backups, health, and restore
 
-The backup container runs `pg_dump`, gzip-compresses it, and uploads it every six
-hours to `s3://<backup-bucket>/postgres/` using the instance role. S3 encryption,
-versioning, public access blocking, and 35-day lifecycle expiration are enabled.
-Readiness fails for an unavailable database, unapplied migration, stale running
-job heartbeat, less than 2 GB free disk, or a missing/older-than-eight-hour
-successful backup marker. Liveness deliberately checks only the web process so
-the orchestrator does not confuse dependency failure with process death.
+The backup container runs `deploy/scripts/backup.sh loop` every six hours
+(`BACKUP_INTERVAL_SECONDS`). Each attempt is a sequence of explicitly checked
+stages — `configure`, `dump`, `compress`, `validate`, `checksum`, `upload`,
+`verify_upload`, `record` — and any failure stops the attempt without touching
+the success state. The script is POSIX `/bin/sh`: `pg_dump`'s own exit status
+is captured through a status file written inside the pipeline (no reliance on
+`pipefail`), the compressed archive must pass `gzip -t`, exceed
+`BACKUP_MIN_BYTES` (default 1024, deliberately conservative), and carry both the
+pg_dump header and the `PostgreSQL database dump complete` trailer; the object
+is uploaded with `--sse AES256` and its size is verified with `head-object`
+before anything is recorded as successful. Dump and upload run as background
+jobs so `SIGTERM`/`SIGINT` interrupt promptly, record an `interrupted` failure,
+and remove the temporary archive (which lives under `BACKUP_WORK_DIR`, default
+`/tmp` inside the container, never on the state volume). `backup.sh once`, used
+before every migration by `remote-deploy.sh`, now exits non-zero on any failed
+stage, so a deployment cannot proceed past a failed pre-migration backup.
 
-List and restore a selected backup from an SSM session:
+State files under `BACKUP_STATE_DIR` (`/var/lib/trade-recommender`, the shared
+`backup-state` volume) are written atomically and never contain credentials,
+command bodies, or raw error output:
+
+| File | Written | Content |
+|---|---|---|
+| `backup-last-attempt` | every attempt | `attempted_at`, `object_key`, `outcome`, `stage`, `category` |
+| `backup-last-success` | genuine success only | `completed_at`, `attempted_at`, `object_key`, `sha256`, `size_bytes` |
+| `backup-last-failure` | failed attempts | `failed_at`, `attempted_at`, `object_key`, `stage`, `category`, `exit_status` |
+| `last-backup` | genuine success only | legacy marker (ISO timestamp) kept for compatibility |
+
+Failure categories are stable tokens (`configuration_missing`, `dump_failed`,
+`compression_failed`, `archive_unreadable`, `archive_too_small`,
+`archive_content_invalid`, `checksum_failed`, `upload_failed`,
+`upload_unverified`, `upload_size_mismatch`, `interrupted`, …). Bounded stderr
+excerpts go to the container log only.
+
+Readiness (`/health/ready/`) fails for an unavailable database, unapplied
+migration, stale running job heartbeat, less than 2 GB free disk, or when the
+**last genuine success** is missing or older than eight hours. A failed attempt
+after a fresh success keeps readiness green but is exposed as
+`backup.warning = last_attempt_failed` with the safe failure category. The
+response also carries the running source revision and a small `disk` block;
+it never exposes paths, keys, or checksums. Hosts that predate the state files
+are honoured through the legacy marker's modification time. The Operations
+page shows the full state (object key, checksum, size, last failure) to the
+owner. Liveness deliberately checks only the web process.
+
+### Isolated restore verification
+
+`deploy/scripts/restore-check.sh` restores one archive into an explicitly named
+**disposable** database and verifies it. It refuses any target whose name does
+not contain `restore_check`, refuses protected names, validates the archive
+(gzip integrity, optional expected SHA-256, header and completion trailer),
+restores in a single transaction with `ON_ERROR_STOP`, and then checks
+representative tables, constraints, triggers, the Django migration ledger, and
+— functionally — that the restored append-only audit trigger still rejects an
+update (inside a rolled-back transaction). It prints one `restore check
+PASSED … ` or `restore check FAILED at <stage>: <category>` line and exits 0/1.
+
+```bash
+# Local drill against a disposable Postgres (libpq env vars select the server).
+PGHOST=127.0.0.1 PGUSER=trade_recommender PGPASSWORD=… \
+RESTORE_CHECK_DB=phase1_restore_check_$(date +%Y%m%d) \
+  deploy/scripts/restore-check.sh --recreate --drop-after \
+    --expect-sha256 <sha256 from backup-last-success> \
+    s3://<backup-bucket>/postgres/20260907T120000Z.sql.gz
+```
+
+From the host, the same command runs inside the backup image (it has
+`psql`, `createdb`, `gzip`, and `aws`) against a throwaway PostgreSQL container
+on a private network; never point it at the production `db` service. Run the
+drill after every schema migration and at least monthly; record the PASSED line
+with the archive checksum. Limitations: the drill is not wired into CI because
+it needs a PostgreSQL server and a real archive; it is exercised locally with a
+disposable database copy (see the Phase 1 handoff), and the shell harness
+`deploy/scripts/test-backup.sh` covers the script logic with fake executables in
+CI.
+
+Production restore (unchanged procedure, run from an SSM session):
 
 ```bash
 sudo -i
@@ -228,7 +345,63 @@ curl --fail "https://$(sed -n 's/^PUBLIC_HOST=//p' .env)/health/ready/"
 ```
 
 Restore stops application writers, streams one dump into PostgreSQL in a single
-transaction, reapplies migrations, and restarts the stack. Test restore
-periodically before relying on retention. Continuous WAL archiving, point-in-
-time recovery, SNS, paid monitoring, and a separate restore environment are
-deferred at this pre-production budget level.
+transaction, reapplies migrations, and restarts the stack. Run
+`restore-check.sh` on the chosen archive first. Continuous WAL archiving,
+point-in-time recovery, SNS, paid monitoring, and a separate restore
+environment are deferred at this pre-production budget level.
+
+## Container isolation, capacity, and image provenance
+
+The web container no longer mounts the host root filesystem. Its only bind
+mount is the empty, read-only directory `/var/lib/trade-recommender/host-health`
+(created by the host bootstrap and by `remote-deploy.sh`) at `/host-health`,
+which sits on the single root filesystem and therefore yields the same
+`statvfs` signal for `READINESS_DISK_PATH=/host-health`. No service is
+privileged and none mounts the Docker socket; `test-production-compose.sh`
+asserts all of this on the rendered Compose configuration.
+
+The Operations page reports host capacity cheaply and without shelling out:
+disk free/total from one `statvfs`, memory from `/proc/meminfo` (visible from
+the container), swap total, the web process start time, and the container's
+PID 1 start time. Thresholds are conservative and configurable: disk warns
+below `CAPACITY_DISK_WARNING_FREE_GB` (5 GB) and readiness fails below
+`READINESS_MIN_FREE_GB` (2 GB); memory warns below
+`CAPACITY_MEMORY_WARNING_PERCENT` (20 %) and is critical below
+`CAPACITY_MEMORY_CRITICAL_PERCENT` (10 %). Memory pressure is visibility only —
+it never fails readiness, and no swap is added to hide it. Restart counts are
+not observable without the Docker socket; use `docker compose ps` over SSM.
+
+Stale images: `remote-deploy.sh` runs `docker image prune -f`, which removes
+only dangling layers. Tagged images stay available for rollback. To reclaim
+space safely, list images with `docker image ls`, keep the current
+`current-image` and the previous SHA you might roll back to, and remove older
+tags explicitly with `docker image rm <repository>:<sha>`; never run
+`docker system prune -a` on the host.
+
+Image provenance: the Dockerfile accepts `SOURCE_REVISION`, `BUILD_CREATED`,
+`SOURCE_URL`, and `IMAGE_VERSION` build args and writes them to the OCI labels
+`org.opencontainers.image.revision/created/source/version`, to the
+`APP_SOURCE_REVISION`/`APP_BUILD_CREATED` environment, and to `/app/build-info`.
+CI supplies the commit SHA and UTC build time and prints the immutable manifest
+digest after the push (`docker buildx imagetools inspect`); the digest is also
+visible in the ECR console or via `aws ecr describe-images`. On the host,
+`remote-deploy.sh` records `current-image`, `current-image-digest`, and
+`current-image-revision`. A build without the args produces an honest
+`unknown`, which the Operations page and `/health/ready/` show as such:
+
+```bash
+docker build --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" \
+  --build-arg BUILD_CREATED="$(date -u +%FT%TZ)" -t trade-recommender:local .
+docker image inspect trade-recommender:local \
+  --format '{{json .Config.Labels}}'
+```
+
+## Rollback note for Phase 1 schema changes
+
+Migrations `market.0028`, `operations.0006`, and `forecasts.0017` add nullable
+or defaulted columns and new tables, so the previous image starts against the
+new schema. One behaviour is intentionally not backward compatible: technical
+snapshots are append-only at the database level, so a rolled-back image's
+in-place `update_or_create` of a snapshot fails visibly during live ingestion
+until the Phase 1 image is redeployed (or `market.0028` is reversed while no
+observation rows exist). Nothing is corrupted by that failure.

@@ -33,6 +33,31 @@ if actual != expected:
         f"expected: {expected!r}\n"
         f"actual:   {actual!r}"
     )
+
+for name, service in config["services"].items():
+    if service.get("privileged"):
+        raise SystemExit(f"service {name} must not be privileged")
+    for volume in service.get("volumes", []):
+        source = volume.get("source", "")
+        target = volume.get("target", "")
+        if volume.get("type") == "bind":
+            if source in {"/", "/var/run/docker.sock"} or target == "/host-root":
+                raise SystemExit(f"service {name} must not mount {source} at {target}")
+            if "docker.sock" in source:
+                raise SystemExit(f"service {name} must not mount the Docker socket")
+
+web_binds = {
+    volume["source"]: volume
+    for volume in config["services"]["web"].get("volumes", [])
+    if volume.get("type") == "bind"
+}
+health = web_binds.get("/var/lib/trade-recommender/host-health")
+if health is None or health.get("target") != "/host-health" or not health.get("read_only"):
+    raise SystemExit(
+        "web must bind-mount /var/lib/trade-recommender/host-health read-only at /host-health"
+    )
+if len(web_binds) != 1:
+    raise SystemExit(f"web must have exactly one bind mount, found {sorted(web_binds)}")
 PY
 
 echo "production Compose healthcheck test passed"

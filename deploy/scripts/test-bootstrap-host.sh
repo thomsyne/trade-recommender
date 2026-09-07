@@ -129,7 +129,7 @@ run_case() {
     BOOTSTRAP_FROM_CLOUD_INIT=1 /bin/bash "$bootstrap" >"$CASE_ROOT/output" 2>"$CASE_ROOT/error"; then
     fail "bootstrap execution failed for $(basename "$CASE_ROOT")"
   fi
-  assert_contains 'host bootstrap 2026-08-22.1 ready' "$CASE_ROOT/output"
+  assert_contains 'host bootstrap 2026-09-07.1 ready' "$CASE_ROOT/output"
   assert_contains 'systemctl enable --now docker amazon-ssm-agent' "$CALLS"
   assert_contains 'docker info' "$CALLS"
 }
@@ -168,7 +168,7 @@ if ! PATH="$MOCK_BIN:$toolbox" BOOTSTRAP_ROOT="$CASE_ROOT" \
 fi
 assert_contains 'cloud-init did not complete cleanly' "$CASE_ROOT/error"
 assert_contains 'called journalctl --no-pager -u cloud-final.service -n 60' "$CALLS"
-assert_contains 'host bootstrap 2026-08-22.1 ready' "$CASE_ROOT/output"
+assert_contains 'host bootstrap 2026-09-07.1 ready' "$CASE_ROOT/output"
 
 prepare_case cloud-init-running
 write_stub cloud-init <<'EOF'

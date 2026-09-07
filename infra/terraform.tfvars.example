@@ -1,10 +1,16 @@
-# Optional. SSM Session Manager remains available even when SSH is disabled.
+# Optional. SSM Session Manager is the administration and recovery path even
+# when SSH is disabled; leave ssh_public_key empty to create no key pair.
+# Changing ssh_public_key on an existing instance forces replacement (key_name
+# is immutable on EC2) and is blocked by prevent_destroy, so keep it stable.
 ssh_public_key = "ssh-ed25519 AAAA... owner@example"
 
-# Prefer narrow current locations. Explicitly use 0.0.0.0/0 only if travel makes
-# it unavoidable; password and root SSH remain disabled, but Internet-wide SSH
-# still increases exposure.
+# Default [] = no port-22 ingress at all. Narrow current locations only.
+# Internet-wide CIDRs (0.0.0.0/0, ::/0) are rejected by validation unless
+# allow_public_ssh_break_glass is set to true for a documented emergency.
 ssh_cidrs = ["203.0.113.10/32"]
+
+# Leave false. Set true only for a recorded break-glass emergency, then revert.
+allow_public_ssh_break_glass = false
 
 # Required: use the ID of the existing public hosted zone for thomsyne.dev.
 route53_zone_id = "Z0123456789EXAMPLE"

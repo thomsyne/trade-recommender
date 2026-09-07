@@ -49,13 +49,28 @@
 
 1. Stored candles are completed bid/ask intervals with UTC interval-start
    timestamps.
-2. `(instrument, granularity, timestamp)` is unique.
+2. `(instrument, granularity, timestamp)` is unique. A live candle row is
+   frozen at its first accepted complete observation and carries
+   `content_sha256`, `observed_at`, and `provenance`; later provider content
+   for the same interval is appended to `CandleObservation` as a numbered
+   revision (or `conflict` when frozen downstream evidence references the row)
+   and never rewrites the candle. PostgreSQL triggers reject UPDATE/DELETE of
+   live candles, observations, and technical snapshots; only development
+   fixture rows may be deleted. Rows written before Phase 1 carry
+   `legacy_unknown` provenance with no fabricated hash.
+2a. Technical snapshots are append-only calculations bound to an exact ordered
+   source candle set (`source_candle_set_sha256`) and `algorithm_version`;
+   recalculation over changed evidence appends a row, and the authoritative
+   snapshot for an `as_of` is the most recently calculated one.
 3. A retrieval is idempotent by a canonical SHA-256 manifest.
 4. An invalid batch stores no candles and emits a rejection audit event.
 5. Audit events reject updates/deletes in both Django and PostgreSQL.
 6. Midpoints are display/feature values, never future execution prices.
 7. Fixture sources are quarantined, visibly labelled, and never forecasts.
 8. A scheduled occurrence has one durable idempotency key and one atomic claim.
+   Failed attempts append `TaskFailure` records with a stable code, category,
+   stage, attempt number, and terminal flag; exception text of unclassified
+   types is withheld and every persisted summary is redacted.
 9. Research payloads normalize only after a fail-closed parse; rejected payloads
    remain quarantined raw evidence.
 10. A changed macro value appends a vintage and discrepancy; it never rewrites

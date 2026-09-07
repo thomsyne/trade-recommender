@@ -1,7 +1,21 @@
 FROM python:3.11-slim-bookworm
 
+# Image provenance is supplied by the build (CI passes the commit SHA and UTC
+# build time; local builds may omit them and get an honest "unknown").
+ARG SOURCE_REVISION=unknown
+ARG BUILD_CREATED=unknown
+ARG SOURCE_URL=https://github.com/thomsyne/trade-recommender
+ARG IMAGE_VERSION=unknown
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_CREATED}" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.title="trade-recommender"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    APP_SOURCE_REVISION="${SOURCE_REVISION}" \
+    APP_BUILD_CREATED="${BUILD_CREATED}"
 
 WORKDIR /app
 RUN addgroup --system app && adduser --system --ingroup app app
@@ -19,7 +33,8 @@ RUN DJANGO_SETTINGS_MODULE=config.settings_production \
     PUBLIC_URL=https://build.invalid \
     POSTGRES_PASSWORD=build-only-database-password \
     python manage.py collectstatic --noinput
-RUN chown -R app:app /app
+RUN printf 'revision=%s\ncreated=%s\nversion=%s\n' "${SOURCE_REVISION}" "${BUILD_CREATED}" "${IMAGE_VERSION}" > /app/build-info \
+    && chown -R app:app /app
 USER app
 
 CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "2"]

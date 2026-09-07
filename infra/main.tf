@@ -120,8 +120,17 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_security_group" "instance" {
   name        = "${var.name_prefix}-instance"
-  description = "Public HTTPS and optional key-only owner SSH"
+  description = "Public HTTP/HTTPS; SSH only for explicit narrow CIDRs (SSM is the admin path)"
   vpc_id      = aws_vpc.main.id
+
+  lifecycle {
+    precondition {
+      condition = var.allow_public_ssh_break_glass || length([
+        for cidr in var.ssh_cidrs : cidr if endswith(cidr, "/0")
+      ]) == 0
+      error_message = "Refusing to open port 22 to the Internet without allow_public_ssh_break_glass."
+    }
+  }
 
   ingress {
     description = "HTTP for ACME redirect"

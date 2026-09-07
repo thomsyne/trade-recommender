@@ -31,9 +31,11 @@ POSTGRES_HOST=db
 BACKUP_BUCKET=${BACKUP_BUCKET}
 AWS_REGION=${AWS_REGION}
 READINESS_BACKUP_MARKER=/var/lib/trade-recommender/last-backup
-READINESS_DISK_PATH=/host-root
+READINESS_DISK_PATH=/host-health
+BACKUP_STATE_DIR=/var/lib/trade-recommender
 EOF
 mv .env.next .env
+install -d -m 755 /var/lib/trade-recommender/host-health
 
 registry="${IMAGE_URI%%/*}"
 registry_password="$(aws ecr get-login-password --region "$AWS_REGION")"
@@ -67,4 +69,6 @@ if [ "$healthy" != true ]; then
   exit 1
 fi
 printf '%s\n' "$IMAGE_URI" > current-image
+docker image inspect "$IMAGE_URI" --format '{{join .RepoDigests ","}}' > current-image-digest
+docker image inspect "$IMAGE_URI" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' > current-image-revision
 docker image prune -f >/dev/null

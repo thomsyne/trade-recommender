@@ -37,9 +37,27 @@ variable "ssh_public_key" {
 }
 
 variable "ssh_cidrs" {
-  description = "CIDRs allowed to use key-only SSH. Empty by default. Set [\"0.0.0.0/0\"] explicitly only when travel requires it; prefer narrow CIDRs and SSM."
+  description = "CIDRs allowed to use key-only SSH. Empty by default (SSM Session Manager is the administration path). Internet-wide CIDRs (0.0.0.0/0, ::/0 or any /0) are rejected unless allow_public_ssh_break_glass is explicitly true."
   type        = list(string)
   default     = []
+
+  validation {
+    condition     = alltrue([for cidr in var.ssh_cidrs : can(cidrhost(cidr, 0))])
+    error_message = "Every ssh_cidrs entry must be a valid IPv4 or IPv6 CIDR."
+  }
+
+  validation {
+    condition = var.allow_public_ssh_break_glass || length([
+      for cidr in var.ssh_cidrs : cidr if endswith(cidr, "/0")
+    ]) == 0
+    error_message = "ssh_cidrs must not contain an Internet-wide CIDR (0.0.0.0/0 or ::/0). Use narrow CIDRs or SSM; set allow_public_ssh_break_glass = true only as a documented emergency exception."
+  }
+}
+
+variable "allow_public_ssh_break_glass" {
+  description = "Emergency-only acknowledgement that ssh_cidrs may contain an Internet-wide CIDR. Leave false. Record the reason and revert to narrow CIDRs or [] afterwards."
+  type        = bool
+  default     = false
 }
 
 variable "backup_retention_days" {

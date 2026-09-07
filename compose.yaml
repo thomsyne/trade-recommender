@@ -14,7 +14,12 @@ services:
       retries: 20
 
   web:
-    build: .
+    build: &app-build
+      context: .
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
+        BUILD_CREATED: ${BUILD_CREATED:-unknown}
+        IMAGE_VERSION: ${IMAGE_VERSION:-unknown}
     command: sh -c "python manage.py migrate --noinput && python manage.py seed_demo && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2"
     environment: &app-environment
       DJANGO_DEBUG: "1"
@@ -30,7 +35,7 @@ services:
         condition: service_healthy
 
   worker:
-    build: .
+    build: *app-build
     command: python manage.py run_worker
     environment: *app-environment
     depends_on:
@@ -38,7 +43,7 @@ services:
         condition: service_healthy
 
   scheduler:
-    build: .
+    build: *app-build
     command: python manage.py run_scheduler
     environment: *app-environment
     depends_on:
