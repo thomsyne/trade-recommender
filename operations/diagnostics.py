@@ -11,6 +11,7 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+import httpx
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError
 
@@ -147,11 +148,7 @@ def classify_failure(error, *, stage=""):
             redact(message),
             failure_kind not in {"auth", "malformed"},
         )
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover - httpx is a hard dependency
-        httpx = None
-    if httpx is not None and isinstance(error, httpx.TimeoutException):
+    if isinstance(error, httpx.TimeoutException):
         return FailureDiagnostic(
             "provider_timeout",
             "network",
@@ -160,7 +157,7 @@ def classify_failure(error, *, stage=""):
             f"{exception_type}: provider request timed out",
             True,
         )
-    if httpx is not None and isinstance(error, httpx.HTTPError):
+    if isinstance(error, httpx.HTTPError):
         return FailureDiagnostic(
             "provider_network",
             "network",

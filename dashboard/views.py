@@ -1000,16 +1000,10 @@ def operations(request):
     backup_ok, backup_detail = backup_assessment(
         backup_state, now=now, max_age_hours=settings.READINESS_BACKUP_MAX_AGE_HOURS
     )
-    try:
-        experiment_era = (
-            ExperimentEra.objects.select_related("method").order_by("-starts_at", "-id").first()
-        )
-    except Exception:  # pragma: no cover - defensive against partial schemas
-        experiment_era = None
-    try:
-        migrations = migration_status()
-    except Exception:
-        migrations = {"up_to_date": None, "unapplied_count": None, "latest_applied": {}}
+    experiment_era = (
+        ExperimentEra.objects.select_related("method").order_by("-starts_at", "-id").first()
+    )
+    migrations = migration_status()
     from market.models import CandleObservation
 
     observation_counts = {
