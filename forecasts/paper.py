@@ -109,6 +109,8 @@ def resolve_paper_trade(recommendation):
                             target_hit and not stop_hit and not entry_at_open
                         ),
                         "hourly_bid_ask_evidence": True,
+                        "candle_content_sha256": candle.content_sha256,
+                        "candle_revision_policy": "first-complete-observation-v1",
                     },
                     entered_at=timezone.now(),
                 )
@@ -190,6 +192,8 @@ def resolve_paper_trade(recommendation):
                 "expiry_at": expires_at.isoformat(),
                 "hourly_coverage_verified": True,
                 "no_execution_assumed": True,
+                "horizon_candle_content_sha256": horizon.content_sha256,
+                "candle_revision_policy": "first-complete-observation-v1",
             },
         )
         _record_lifecycle(
@@ -291,6 +295,9 @@ def _create_result(
             "spread_aware_execution_sides": True,
             "financing_included": False,
             "commission_included": False,
+            "exit_candle_content_sha256": exit_candle.content_sha256,
+            "horizon_candle_content_sha256": horizon.content_sha256 if horizon else None,
+            "candle_revision_policy": "first-complete-observation-v1",
         },
     )
     _record_lifecycle(
