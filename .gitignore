@@ -1,5 +1,5 @@
 .amp/portals/*
-.env
+.env*
 .venv/
 __pycache__/
 *.py[cod]
@@ -13,3 +13,4 @@ staticfiles/
 *.tfstate.*
 *.auto.tfvars
 *.auto.tfvars.json
+*.bundle
