@@ -19,10 +19,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 RUN addgroup --system app && adduser --system --ingroup app app
-# util-linux is explicit, not assumed: deploy/scripts/backup.sh requires an
-# flock(1) that reports contention with a dedicated exit status (-E), and
-# fails closed without one.
-RUN apt-get update && apt-get install -y --no-install-recommends curl postgresql-client unzip util-linux \
+# Backup locking, compression and child ownership use Python's standard library.
+RUN apt-get update && apt-get install -y --no-install-recommends curl postgresql-client unzip \
     && case "$(dpkg --print-architecture)" in arm64) architecture=aarch64 ;; amd64) architecture=x86_64 ;; *) exit 1 ;; esac \
     && curl --fail --silent --show-error "https://awscli.amazonaws.com/awscli-exe-linux-${architecture}.zip" -o /tmp/awscliv2.zip \
     && unzip -q /tmp/awscliv2.zip -d /tmp \

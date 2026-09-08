@@ -264,24 +264,29 @@ The backup container runs `deploy/scripts/backup.sh loop` every six hours
 (`BACKUP_INTERVAL_SECONDS`). Each attempt is a sequence of explicitly checked
 stages — `configure`, `dump`, `compress`, `validate`, `checksum`, `upload`,
 `verify_upload`, `record` — and any failure stops the attempt without touching
-the success state. The script is POSIX `/bin/sh`: `pg_dump` streams into
-`gzip` through a FIFO; both are started in dedicated sessions (`setsid`, when
-available) and terminated as a supervised process group on interrupt, so an
-interrupt kills pg_dump and its whole pipeline (no orphaned dump) and the
-dump's own exit status needs no `pipefail`. The compressed archive must pass
-`gzip -t`, exceed `BACKUP_MIN_BYTES` (default 1024, deliberately
-conservative), and carry both the pg_dump header and the `PostgreSQL database
-dump complete` trailer; the object is uploaded with `--sse AES256` and its
-sha256 attached as user metadata, and `head-object` verifies BOTH the size and
-the checksum before anything is recorded as successful. Dump and upload run
-as background jobs so `SIGTERM`/`SIGINT` interrupt promptly (further signals
-are ignored while the handler runs), record an `interrupted` failure, and
-remove the temporary archive (which lives under `BACKUP_WORK_DIR`, default
-`/tmp` inside the container, never on the state volume). `backup.sh once`,
-used before every migration by `remote-deploy.sh`, exits non-zero on any
-failed stage, so a deployment cannot proceed past a failed pre-migration
-backup; an unwritable state directory or a missing `flock(1)` also aborts
-loudly instead of degrading.
+the success state. `backup.sh` execs the single-threaded Python 3.11 engine.
+It runs `pg_dump --file` as one directly owned subprocess in a new session,
+waits for success, then compresses and validates the archive with Python gzip.
+Temporary space must accommodate both the plain SQL and compressed archive.
+The archive must meet `BACKUP_MIN_BYTES` (default 1024), pass a full gzip read,
+and contain the pg_dump header and completion trailer. `s3api put-object`
+uses AES256 and SHA256, captures S3's VersionId and checksum, then verifies
+size, server checksum and metadata with an exact-version `head-object`.
+
+Every command uses the same child ownership path. INT/TERM are blocked across
+launch until the child is stored; the child's mask is restored before exec.
+On interruption, TERM is sent to its group, followed by KILL after
+`BACKUP_KILL_AFTER_SECONDS` (default 10, range 0–60). The direct child is waited
+and Linux subreaping drains orphaned grandchildren, including zombies. Commands
+must stay in their session; pg_dump and AWS CLI do. No watchdog or shell pipeline
+exists. Cleanup waits after KILL are bounded too; an uninterruptible kernel task
+is a supervision failure, not evidence of successful cleanup. Repeated signals
+only set a stop flag and cannot interrupt terminal publication. Compression is
+in-process with interruption checkpoints. Work is private under
+`BACKUP_WORK_DIR` (default system temporary directory), never on the state volume.
+`backup.sh once` exits 0 on success, 1 on attempt/publication failure, 2 on a
+precondition failure, 3 on lock contention, and 130/143 on INT/TERM. The loop
+retries ordinary failures and skips contention; INT/TERM ends the loop.
 
 State files under `BACKUP_STATE_DIR` (`/var/lib/trade-recommender`, the shared
 `backup-state` volume) are written atomically and never contain credentials,
@@ -290,12 +295,12 @@ command bodies, or raw error output:
 | File | Written | Content |
 |---|---|---|
 | `backup-in-progress` | while an attempt runs | `attempt_id`, `started_at`, `attempted_at`, `object_key`, `stage`; removed only after a terminal outcome is recorded |
-| `backup-last-attempt` | every terminal attempt | `attempt_id`, `attempted_at`, `object_key`, `outcome`, `stage`, `category` |
-| `backup-last-success` | genuine success only | `attempt_id`, `completed_at`, `attempted_at`, `object_key`, `sha256`, `size_bytes` |
-| `backup-last-failure` | failed attempts | `attempt_id`, `failed_at`, `attempted_at`, `object_key`, `stage`, `category`, `exit_status` |
+| `backup-last-attempt` | every terminal attempt | `attempt_id`, `attempted_at`, `object_key`, `outcome`, `stage`, `category`; success adds `completed_at`, `version_id`, `sha256`, `size_bytes`; failure adds `failed_at`, `exit_status` |
+| `backup-last-success` | genuine success only | complete copy of the committed successful terminal record |
+| `backup-last-failure` | failed attempts | complete copy of the committed failed terminal record |
 | `last-backup` | genuine success only | legacy marker (ISO timestamp) kept for compatibility |
 
-Attempts are serialized with `flock(1)` on a lock file (`.backup-lock` inside
+Attempts are serialized with Python `fcntl.flock` on a persistent lock file (`.backup-lock` inside
 `BACKUP_STATE_DIR`), so the scheduler's backup loop and a deploy-time
 `backup.sh once` — which run in different containers on the same state volume —
 never overlap. The flock is owned by the kernel, so a crashed holder
@@ -307,19 +312,35 @@ attempts can never share an id or overwrite each other's object. The
 dump work (its write is mandatory: an attempt that cannot record durable
 state aborts); it is removed only after a terminal outcome has been committed,
 so a stale in-progress file unambiguously means the previous attempt died
-without finishing (SIGKILL or host loss).
+without completing publication (SIGKILL, host loss or state-write failure).
+The lock file is never unlinked. Only `flock` EAGAIN/EWOULDBLOCK means contention;
+every other lock/open error fails closed. State replacements and their directory
+are fsynced. State is mode 0644 for the unprivileged web reader; it is non-secret.
 
-An attempt commits when `backup-last-attempt` reports `outcome=success`; the
-record stage runs only after the upload was verified, and the success file and
-legacy marker are best-effort publications made *after* that commit. A signal
-in the publish window therefore never produces contradictory records: the
-failure handler refuses to overwrite an attempt already committed as a success
-for the same `attempt_id`, and a committed-but-unpublished success is simply
-missing until the next run. Readiness compares identities by `attempt_id`
-(falling back to `attempted_at` only for pre-fix files that have no id) and
-distrusts a success file contradicted by a failure or non-success attempt of
-the same attempt, reporting `backup.state = contradicted` until the next
-successful run rewrites it.
+Each attempt makes exactly one checked terminal commitment, then publishes its
+identical success/failure projection. Both writes are mandatory. Publication
+failure retains in-progress evidence; subsequent attempts refuse to overwrite
+it. Only the legacy marker is best effort. SIGKILL cannot be handled: its lock
+is released but its evidence and temporary work may remain. Recovery requires
+operator inspection while the backup service is stopped: preserve the records,
+verify any committed object by exact version/checksum, resolve partial
+publication, and retire only the identified attempt's in-progress/work files.
+Never remove `.backup-lock`, and never clear an active attempt.
+
+Readiness validates all present modern files (including unreadable, empty and
+malformed files) and uses the legacy marker only when all four are absent.
+Modern records require UUID identities, timezone-aware timestamps, stage/category
+values and complete outcome-specific metadata. Completion cannot precede the
+attempt or be future-dated. A matching terminal must agree with the success in
+every field. A different terminal must be a coherent newer failure, with its
+matching detail record; only then may an older published committed success stay
+healthy with a warning. Unresolved publication is unhealthy. Old incomplete
+modern schemas fail closed: an upgrade needs a new successful backup, not a
+legacy marker or fabricated fields. Retained malformed failure/detail records
+also need operator review and preservation outside the active protocol files;
+a new success does not sanitize unrelated corrupt state. Use the production
+Docker named volume for shared state: Docker Desktop macOS bind mounts are not
+qualified for this lock protocol (the cross-container bind-mount probe failed).
 
 Failure categories are stable tokens (`configuration_missing`, `dump_failed`,
 `compression_failed`, `archive_unreadable`, `archive_too_small`,

@@ -9,9 +9,11 @@ state files live on a shared volume written by the backup container.
 import os
 import re
 import shutil
+import stat
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 from django.utils import timezone
 
@@ -22,8 +24,7 @@ STATE_FILES = {
     "in_progress": "backup-in-progress",
 }
 LEGACY_MARKER = "last-backup"
-_SAFE_KEY = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
-_SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:/+\-]{0,200}$")
+_SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:/+=\-]{0,1024}$")
 _ALLOWED_KEYS = {
     "attempt_id",
     "attempted_at",
@@ -44,19 +45,35 @@ PROCESS_STARTED_AT = timezone.now()
 
 
 def _parse_state_file(path):
-    """Parse ``key=value`` lines; unknown keys and unsafe values are dropped."""
+    """None means genuinely absent; {} means present but unusable.
+
+    Inspect existence independently of reading. Reject links/non-regular files,
+    including dangling links, and mode-000 files even when the reader is root.
+    Never let an inaccessible directory or malformed record enable fallback.
+    """
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        metadata = Path(path).lstat()
+    except FileNotFoundError:
         return None
+    except OSError:
+        return {}
+    if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & 0o444:
+        return {}
+    try:
+        with Path(path).open(encoding="utf-8") as stream:
+            text = stream.read(16385)
+    except (OSError, UnicodeError):
+        return {}
+    if len(text) > 16384:
+        return {}
     values = {}
-    for line in text.splitlines()[:40]:
+    for line in text.splitlines():
         if "=" not in line:
-            continue
+            return {}
         key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if key in _ALLOWED_KEYS and _SAFE_KEY.match(key) and _SAFE_VALUE.match(value):
-            values[key] = value
+        if key in values or key not in _ALLOWED_KEYS or not _SAFE_VALUE.fullmatch(value):
+            return {}
+        values[key] = value
     return values
 
 
@@ -65,11 +82,9 @@ def _parse_timestamp(value):
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 @dataclass(frozen=True)
@@ -138,7 +153,9 @@ def read_backup_state(state_dir, marker_path=""):
         if marker_path
         else (directory / LEGACY_MARKER if directory is not None else None)
     )
-    if marker is not None:
+    if marker is not None and all(
+        record is None for record in (last_attempt, last_success, last_failure, in_progress)
+    ):
         try:
             legacy_at = datetime.fromtimestamp(marker.stat().st_mtime, UTC)
         except OSError:
@@ -159,10 +176,7 @@ def _published_success_is_contradicted(state):
     Pre-fix backup.sh could publish backup-last-success and then have an
     interrupt overwrite the attempt record with outcome=failure for the same
     attempt. A success file contradicted by the commit record (the attempt
-    file) or by a failure record of the same attempt is not genuine. Records
-    written since the fix carry an attempt_id, so identities are compared by
-    that id; pre-fix records (no attempt_id) fall back to the attempted_at key
-    they shared.
+    file) or by a failure record of the same attempt is not genuine.
     """
     success = state.last_success
     if not success:
@@ -184,21 +198,13 @@ def _success_is_uncommitted(state):
 
 
 def _same_attempt(first, second):
-    """True when two state records describe the same backup attempt.
-
-    Identity is the attempt_id carried by every record the current backup.sh
-    writes. Only when neither record has an id (pre-fix state files) is the
-    second-resolution attempted_at they shared used, so a same-second pair of
-    distinct attempts can never be conflated.
-    """
-    if not second:
-        return False
-    first_id = first.get("attempt_id")
-    second_id = second.get("attempt_id")
-    if first_id or second_id:
-        return bool(first_id and second_id and first_id == second_id)
-    attempted_at = first.get("attempted_at")
-    return bool(attempted_at and attempted_at == second.get("attempted_at"))
+    """Modern identity is always UUID-based, never a second-resolution time."""
+    return bool(
+        first
+        and second
+        and first.get("attempt_id")
+        and first["attempt_id"] == second.get("attempt_id")
+    )
 
 
 def _modern_state_present(state):
@@ -214,45 +220,93 @@ def _modern_state_present(state):
     )
 
 
-def _attempt_record_is_valid(attempt):
-    """Whether the authoritative terminal record is schema-valid."""
-    if not attempt:
-        return False
-    if not attempt.get("attempt_id"):
-        return False
-    return attempt.get("outcome") in {"success", "failure"}
+_STAGES = {
+    "configure",
+    "dump",
+    "compress",
+    "validate",
+    "checksum",
+    "upload",
+    "verify_upload",
+    "record",
+}
+_CATEGORIES = {
+    "configuration_missing": "configure",
+    "configuration_invalid": "configure",
+    "workdir_unwritable": "configure",
+    "dump_failed": "dump",
+    "compression_failed": "compress",
+    "archive_unreadable": "validate",
+    "archive_too_small": "validate",
+    "archive_content_invalid": "validate",
+    "checksum_failed": "checksum",
+    "upload_failed": "upload",
+    "upload_unversioned": "upload",
+    "upload_unverified": "verify_upload",
+    "state_failed": "record",
+}
 
 
-def _success_is_self_consistent(success, *, now):
-    """Whether a published success stands up on its own terms."""
-    completed_at = _parse_timestamp(success.get("completed_at"))
-    if completed_at is None:
-        return "success_malformed"
-    if completed_at > now:
+def _record_problem(record, kind, now):
+    """Explicit schemas produced by backup.py (terminal projections are identical)."""
+    malformed = "success_partial" if kind == "success" else f"{kind}_malformed"
+    if not record:
+        return malformed
+    try:
+        if str(UUID(record.get("attempt_id", ""))) != record["attempt_id"]:
+            return malformed
+    except (ValueError, KeyError):
+        return malformed
+    if not record.get("object_key", "").startswith("postgres/") or not record[
+        "object_key"
+    ].endswith(".sql.gz"):
+        return malformed
+    if record.get("stage") not in _STAGES:
+        return malformed
+    outcome = record.get("outcome")
+    if kind != "progress" and outcome not in {"success", "failure"}:
+        return malformed
+    if kind in {"success", "failure"} and outcome != kind:
+        return malformed
+    finish = (
+        "started_at"
+        if kind == "progress"
+        else ("completed_at" if outcome == "success" else "failed_at")
+    )
+    start, end = (_parse_timestamp(record.get(key)) for key in ("attempted_at", finish))
+    if start is None or end is None:
+        return "success_malformed" if kind == "success" else malformed
+    if start > now or end > now:
         return "future_dated"
-    for field in ("object_key", "version_id", "sha256"):
-        if not success.get(field):
-            return "success_partial"
-    # A backup cannot finish before it started.
-    attempted_at = _parse_timestamp(success.get("attempted_at"))
-    if attempted_at is not None and completed_at < attempted_at:
-        return "success_incoherent"
-    return None
-
-
-def _success_matches_commitment(success, attempt):
-    """Whether a success agrees with the authoritative record of its own attempt.
-
-    Only applied when both records describe the same attempt. A later attempt
-    does not re-open an older success: that success was corroborated when it
-    committed, and an attempt that never committed is caught by its retained
-    in-progress evidence instead.
-    """
-    if attempt.get("outcome") != "success":
-        return "contradicted"
-    if success.get("object_key") != attempt.get("object_key"):
-        return "success_contradicted"
-    return None
+    if end < start:
+        return "success_incoherent" if kind == "success" else malformed
+    fields = {"attempt_id", "attempted_at", "object_key", "stage", finish}
+    if kind == "progress":
+        return None if set(record) == fields else malformed
+    fields |= {"outcome", "category"}
+    if outcome == "success":
+        fields |= {"version_id", "sha256", "size_bytes"}
+        if record.get("stage") != "record" or record.get("category") != "none":
+            return malformed
+        if not re.fullmatch(r"[0-9a-f]{64}", record.get("sha256", "")):
+            return malformed
+        if not re.fullmatch(r"[1-9][0-9]*", record.get("size_bytes", "")):
+            return malformed
+        if not record.get("version_id") or record["version_id"] in {"None", "null"}:
+            return malformed
+    else:
+        fields.add("exit_status")
+        category, stage = record.get("category"), record["stage"]
+        if category == "upload_checksum_mismatch":
+            valid = stage in {"upload", "verify_upload"}
+        else:
+            valid = (
+                category in {"interrupted", "supervision_failed", "command_output_invalid"}
+                or _CATEGORIES.get(category) == stage
+            )
+        if not valid or not re.fullmatch(r"-?[1-9][0-9]*", record.get("exit_status", "")):
+            return malformed
+    return None if set(record) == fields else malformed
 
 
 def backup_assessment(state, *, now, max_age_hours):
@@ -276,7 +330,7 @@ def backup_assessment(state, *, now, max_age_hours):
         "last_attempt_outcome": state.last_attempt_outcome,
         "last_failure_category": (state.last_failure or {}).get("category"),
         "last_failure_stage": (state.last_failure or {}).get("stage"),
-        "attempt_in_progress": in_progress_at is not None,
+        "attempt_in_progress": state.in_progress is not None,
         "state": "missing",
     }
 
@@ -284,12 +338,25 @@ def backup_assessment(state, *, now, max_age_hours):
         detail["state"] = name
         return False, detail
 
-    if state.in_progress is not None and in_progress_at is None:
-        # The file exists but carries no usable start: a partial or corrupted
-        # record. It is not the same as having no record at all, and it cannot
-        # be read as "no attempt is running".
-        detail["attempt_in_progress"] = True
-        return unhealthy("attempt_malformed")
+    # Keep the specific contradiction/unresolved diagnostics, but never use
+    # these checks to skip validation of another present record.
+    if _success_is_uncommitted(state):
+        return unhealthy("uncommitted")
+    if _published_success_is_contradicted(state):
+        return unhealthy("contradicted")
+    for kind, record in (
+        ("success", state.last_success),
+        ("attempt", state.last_attempt),
+        ("failure", state.last_failure),
+        ("progress", state.in_progress),
+    ):
+        if record is not None:
+            problem = _record_problem(record, kind, now)
+            if problem:
+                return unhealthy(
+                    "attempt_malformed" if problem == "progress_malformed" else problem
+                )
+
     if in_progress_at is not None:
         attempt_age = (now - in_progress_at).total_seconds()
         detail["attempt_started_at"] = in_progress_at
@@ -319,36 +386,49 @@ def backup_assessment(state, *, now, max_age_hours):
     # the current protocol must be judged by the protocol's own records, or a
     # stale marker beside a broken producer would read as healthy.
     if success is not None:
-        # A published success is only a success if the protocol committed it.
-        if _success_is_uncommitted(state):
-            # backup.sh publishes the detail before committing the
-            # authoritative record and retains its in-progress evidence when
-            # that commit fails, so a success belonging to the attempt still in
-            # progress has not committed.
-            return unhealthy("uncommitted")
-        if _published_success_is_contradicted(state):
-            return unhealthy("contradicted")
-        problem = _success_is_self_consistent(success, now=now)
-        if problem:
-            return unhealthy(problem)
         if attempt is None:
             # Absence of the commitment, not corruption of it.
             return unhealthy("success_uncommitted")
-        if not _attempt_record_is_valid(attempt):
-            return unhealthy("attempt_malformed")
         if _same_attempt(success, attempt):
-            problem = _success_matches_commitment(success, attempt)
-            if problem:
-                return unhealthy(problem)
+            if success != attempt:
+                return unhealthy("success_contradicted")
+        elif attempt["outcome"] != "failure" or _parse_timestamp(
+            attempt["attempted_at"]
+        ) < _parse_timestamp(success["completed_at"]):
+            return unhealthy("success_uncommitted")
     else:
         if attempt is None:
             return unhealthy("attempt_record_missing")
-        if not _attempt_record_is_valid(attempt):
-            return unhealthy("attempt_malformed")
         if attempt.get("outcome") == "success":
             # Committed as successful with nothing published to corroborate it.
             return unhealthy("success_missing")
 
+    failure, progress = state.last_failure, state.in_progress
+    records = [record for record in (success, attempt, failure, progress) if record]
+    for index, first in enumerate(records):
+        for second in records[index + 1 :]:
+            if not _same_attempt(first, second) and first["object_key"] == second["object_key"]:
+                return unhealthy("attempt_incoherent")
+    if failure:
+        if attempt is None:
+            return unhealthy("attempt_record_missing")
+        if _same_attempt(failure, attempt):
+            if failure != attempt:
+                return unhealthy("failure_contradicted")
+        elif _parse_timestamp(failure["failed_at"]) > _parse_timestamp(attempt["attempted_at"]):
+            return unhealthy("failure_contradicted")
+    if attempt and attempt["outcome"] == "failure" and not _same_attempt(attempt, failure):
+        return unhealthy("failure_missing")
+    if progress:
+        if _same_attempt(progress, attempt):
+            return unhealthy("uncommitted")
+        terminal_at = (
+            _parse_timestamp(attempt.get("completed_at") or attempt.get("failed_at"))
+            if attempt
+            else None
+        )
+        if terminal_at and _parse_timestamp(progress["attempted_at"]) < terminal_at:
+            return unhealthy("attempt_incoherent")
     # The published success record, never the legacy marker.
     success_at = _parse_timestamp(success.get("completed_at")) if success else None
     if success_at is None:
@@ -360,6 +440,8 @@ def backup_assessment(state, *, now, max_age_hours):
     detail["state"] = "fresh"
     if state.last_failure_at is not None and state.last_failure_at > success_at:
         detail["warning"] = "last_attempt_failed"
+    elif progress:
+        detail["warning"] = "attempt_in_progress"
     return True, detail
 
 

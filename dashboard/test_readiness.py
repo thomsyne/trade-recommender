@@ -4,6 +4,7 @@ import os
 import tempfile
 from datetime import UTC, timedelta
 from pathlib import Path
+from uuid import NAMESPACE_OID, uuid5
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -15,6 +16,43 @@ from operations.models import JobOccurrence, ScheduledJob, TaskFailure
 
 
 def write_state(directory, name, **values):
+    # Complete producer fixtures. Deliberately malformed/missing-field cases
+    # live in the independent filesystem matrix, without this fixture helper.
+    identity = values.get("attempt_id")
+    if identity:
+        values.setdefault("object_key", f"postgres/{identity}.sql.gz")
+        values["object_key"] = values["object_key"].replace(
+            "20260907T120000Z.sql.gz", f"{identity}.sql.gz"
+        )
+        if name == "backup-in-progress":
+            values.setdefault("attempted_at", values.get("started_at"))
+        else:
+            outcome = (
+                "failure" if name == "backup-last-failure" else values.get("outcome", "success")
+            )
+            related = "backup-last-success" if outcome == "success" else "backup-last-attempt"
+            path = Path(directory, related)
+            defaults = {}
+            if path.exists():
+                defaults = dict(line.split("=", 1) for line in path.read_text().splitlines())
+                if defaults.get("attempt_id") != identity:
+                    defaults = {}
+            values = {**defaults, **values}
+            values.setdefault("outcome", outcome)
+            values.setdefault(
+                "attempted_at",
+                values.get("completed_at") or values.get("failed_at") or iso(timedelta(hours=1)),
+            )
+            if outcome == "success":
+                values.setdefault("completed_at", values["attempted_at"])
+                values.setdefault("stage", "record")
+                values.setdefault("category", "none")
+                values.setdefault("version_id", "v-fixture-1")
+                values.setdefault("sha256", "a" * 64)
+                values.setdefault("size_bytes", 1234)
+            else:
+                values.setdefault("failed_at", values["attempted_at"])
+                values.setdefault("exit_status", 1)
     with open(os.path.join(directory, name), "w") as stream:
         for key, value in values.items():
             stream.write(f"{key}={value}\n")
@@ -22,7 +60,7 @@ def write_state(directory, name, **values):
 
 def attempt_id(seed):
     """A stable attempt identity; every record of one attempt shares it."""
-    return f"101-{seed}-20260907T120000Z"
+    return str(uuid5(NAMESPACE_OID, str(seed)))
 
 
 def iso(delta):
@@ -31,7 +69,9 @@ def iso(delta):
 
 class ReadinessBackupStateTests(TestCase):
     def setUp(self):
-        self.directory = tempfile.mkdtemp(prefix="phase1-readiness-")
+        temporary = tempfile.TemporaryDirectory(prefix="phase1-readiness-")
+        self.addCleanup(temporary.cleanup)
+        self.directory = temporary.name
 
     def ready(self):
         with override_settings(
@@ -415,7 +455,7 @@ class ReadinessBackupStateTests(TestCase):
         response = self.ready()
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["backup"]["state"], "missing")
+        self.assertEqual(response.json()["backup"]["state"], "failure_missing")
 
     def test_modern_state_without_a_terminal_record_is_not_healthy(self):
         Path(os.path.join(self.directory, "last-backup")).write_text(
