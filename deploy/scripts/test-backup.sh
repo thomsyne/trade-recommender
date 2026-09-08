@@ -178,6 +178,23 @@ exit 0
 EOF
 }
 
+good_setsid() {
+  # setsid(1) for hosts without util-linux: start a new session, then exec.
+  cat <<'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+
+if len(sys.argv) < 2:
+    sys.exit(64)
+try:
+    os.setsid()
+except OSError:
+    pass
+os.execvp(sys.argv[1], sys.argv[1:])
+EOF
+}
+
 prepare_case() {
   case_name="$1"
   export CASE_ROOT="$temporary/$case_name"
@@ -200,7 +217,14 @@ prepare_case() {
     good_flock | write_stub flock
     good_flock | write_stub flock.real
   fi
-  if command -v setsid >/dev/null 2>&1; then ln -sf "$(command -v setsid)" "$MOCK_BIN/setsid"; fi
+  # setsid is a required tool: the backup refuses to run without one, because a
+  # session is the only safe way to terminate a whole pipeline. macOS has no
+  # setsid(1), so the harness supplies a faithful one there.
+  if command -v setsid >/dev/null 2>&1; then
+    ln -sf "$(command -v setsid)" "$MOCK_BIN/setsid"
+  else
+    good_setsid | write_stub setsid
+  fi
   if command -v uuidgen >/dev/null 2>&1; then ln -sf "$(command -v uuidgen)" "$MOCK_BIN/uuidgen"; fi
 }
 
@@ -247,6 +271,22 @@ except OSError:
     sys.exit(64)
 sys.exit(0)
 EOF
+}
+
+process_is_alive() {
+  # kill -0 succeeds on a zombie, and a terminated child reparented to a
+  # non-reaping init (su, or PID 1 in a container) stays one. A zombie has
+  # already exited, so liveness has to read the process state, not just
+  # signalability.
+  kill -0 "$1" 2>/dev/null || return 1
+  if [ -r "/proc/$1/stat" ]; then
+    state="$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)"
+    [ "$state" != "Z" ] || return 1
+  elif command -v ps >/dev/null 2>&1; then
+    state="$(ps -o state= -p "$1" 2>/dev/null | tr -d ' ')"
+    case "$state" in Z*) return 1 ;; esac
+  fi
+  return 0
 }
 
 assert_lock_free() {
@@ -897,9 +937,9 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 [ -n "$gzip_pid" ] || fail "the supervisor never recorded the gzip pid"
-kill -0 "$dump_pid" 2>/dev/null || fail "pg_dump should be running before the interrupt"
-kill -0 "$descendant_pid" 2>/dev/null || fail "the descendant should be running"
-kill -0 "$gzip_pid" 2>/dev/null || fail "gzip should be running"
+process_is_alive "$dump_pid" || fail "pg_dump should be running before the interrupt"
+process_is_alive "$descendant_pid" || fail "the descendant should be running"
+process_is_alive "$gzip_pid" || fail "gzip should be running"
 kill -TERM "$backup_pid"
 set +e
 wait "$backup_pid"
@@ -907,23 +947,17 @@ interrupt_status=$?
 set -e
 [ "$interrupt_status" -eq 143 ] || fail "interrupt should exit 143, got $interrupt_status"
 for _ in $(seq 1 100); do
-  if ! kill -0 "$dump_pid" 2>/dev/null && ! kill -0 "$gzip_pid" 2>/dev/null \
-     && ! kill -0 "$descendant_pid" 2>/dev/null; then
+  if ! process_is_alive "$dump_pid" && ! process_is_alive "$gzip_pid" \
+     && ! process_is_alive "$descendant_pid"; then
     break
   fi
   sleep 0.05
 done
-kill -0 "$dump_pid" 2>/dev/null && fail "pg_dump ($dump_pid) survived the interrupt"
-kill -0 "$gzip_pid" 2>/dev/null && fail "gzip ($gzip_pid) survived the interrupt"
-if command -v setsid >/dev/null 2>&1; then
-  # With setsid the supervisor owns a process group, so descendants die too.
-  kill -0 "$descendant_pid" 2>/dev/null \
-    && fail "the descendant ($descendant_pid) survived the interrupt"
-else
-  # Development hosts without setsid(1) can only reap the direct children; the
-  # production image has setsid, which the container run exercises.
-  kill "$descendant_pid" 2>/dev/null || true
-fi
+process_is_alive "$dump_pid" && fail "pg_dump ($dump_pid) survived the interrupt"
+process_is_alive "$gzip_pid" && fail "gzip ($gzip_pid) survived the interrupt"
+# The supervisor always owns a process group, so descendants die with it.
+process_is_alive "$descendant_pid" \
+  && fail "the descendant ($descendant_pid) survived the interrupt"
 assert_line 'category=interrupted' "$STATE/backup-last-failure"
 assert_absent "$STATE/backup-in-progress"
 assert_lock_free
@@ -961,8 +995,8 @@ set -e
 elapsed=$(( $(date +%s) - started_at ))
 [ "$resistant_status" -eq 143 ] || fail "interrupt should exit 143, got $resistant_status"
 [ "$elapsed" -lt 30 ] || fail "cleanup was not bounded: took ${elapsed}s"
-for _ in $(seq 1 100); do kill -0 "$stubborn_pid" 2>/dev/null || break; sleep 0.05; done
-kill -0 "$stubborn_pid" 2>/dev/null && fail "the TERM-resistant dump ($stubborn_pid) survived"
+for _ in $(seq 1 100); do process_is_alive "$stubborn_pid" || break; sleep 0.05; done
+process_is_alive "$stubborn_pid" && fail "the TERM-resistant dump ($stubborn_pid) survived"
 assert_line 'category=interrupted' "$STATE/backup-last-failure"
 assert_lock_free
 assert_empty_dir "$WORK"
@@ -999,10 +1033,22 @@ assert_line 'category=interrupted' "$STATE/backup-last-failure"
 assert_line 'outcome=failure' "$STATE/backup-last-attempt"
 assert_absent "$STATE/backup-in-progress"
 assert_absent "$STATE/last-backup"
-for _ in $(seq 1 100); do kill -0 "$repeat_dump" 2>/dev/null || break; sleep 0.05; done
-kill -0 "$repeat_dump" 2>/dev/null && fail "pg_dump ($repeat_dump) survived repeated interrupts"
+for _ in $(seq 1 100); do process_is_alive "$repeat_dump" || break; sleep 0.05; done
+process_is_alive "$repeat_dump" && fail "pg_dump ($repeat_dump) survived repeated interrupts"
 assert_lock_free
 assert_empty_dir "$WORK"
+
+# ------------------------------------- session supervision is a precondition
+# Without setsid there is no safe way to terminate a whole pipeline, so the
+# backup refuses to start rather than fall back to signalling pids one by one.
+prepare_case precondition-no-setsid
+rm -f "$MOCK_BIN/setsid"
+run_backup_status once
+[ "$captured_status" -eq 2 ] \
+  || fail "a missing setsid must abort with 2, got $captured_status"
+assert_contains 'required tool setsid is missing' "$CASE_ROOT/output"
+assert_not_contains 'pg_dump' "$CALLS"
+assert_absent "$STATE/backup-in-progress"
 
 # --------------------------------------------------- lock result semantics
 # Contention is exactly one reserved status; everything else is operational.

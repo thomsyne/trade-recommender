@@ -121,7 +121,7 @@ preflight() {
     log "state directory ${STATE_DIR} is not writable; cannot record backup state"
     return 1
   fi
-  for tool in flock pg_dump gzip aws mktemp mkfifo date; do
+  for tool in flock setsid pg_dump gzip aws mktemp mkfifo date; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       log "required tool ${tool} is missing"
       return 1
@@ -381,30 +381,11 @@ supervisor_group() {
 }
 
 signal_pipeline() {
-  # signal_pipeline SIGNAL -- to the process group when one is established,
-  # which reaches pg_dump, gzip and anything they spawned.
-  if [ -n "$group" ]; then
-    kill "-$1" "-${group}" 2>/dev/null || true
-    return 0
-  fi
-  # No process group (a host without setsid): the supervisor's handler would
-  # normally stop its children, but an escalation to KILL leaves it no chance
-  # to run, so the children are signalled directly through the pids it
-  # recorded. Recorded pids, never a pattern match: nothing outside this
-  # attempt can be signalled by accident.
-  # Children before the supervisor: reaping the supervisor first lets the
-  # caller race ahead and clear the work directory, and the recorded pids would
-  # be gone before they could be signalled. Stopping the children also lets a
-  # healthy supervisor finish its own cleanup on its own.
-  for pid_file in "${work_dir}/dump.pid" "${work_dir}/gzip.pid"; do
-    [ -f "$pid_file" ] || continue
-    child="$(cat "$pid_file" 2>/dev/null)"
-    case "$child" in
-      ''|*[!0-9]*) continue ;;
-    esac
-    kill "-$1" "$child" 2>/dev/null || true
-  done
-  kill "-$1" "$supervisor_pid" 2>/dev/null || true
+  # signal_pipeline SIGNAL -- always to the supervisor's own process group,
+  # which carries pg_dump, gzip and anything they spawned. The group is
+  # guaranteed: setsid is a required tool and supervisor_group() refuses to
+  # return this shell's own group, so nothing outside the attempt is signalled.
+  kill "-$1" "-${group}" 2>/dev/null || true
 }
 
 terminate_pipeline() {
@@ -418,7 +399,14 @@ terminate_pipeline() {
   # orphaned, and never blocks longer than the deadline.
   [ -n "$supervisor_pid" ] || return 0
   if ! group="$(supervisor_group)"; then
+    # The supervisor is a session leader by construction. If its group cannot
+    # be established the pipeline cannot be signalled safely, so say so rather
+    # than reach for individual pids and risk missing a descendant.
+    log "cannot establish the dump pipeline's process group; leaving it to the kernel"
     group=""
+    wait "$supervisor_pid" 2>/dev/null || true
+    supervisor_pid=""
+    return 0
   fi
   signal_pipeline TERM
   waited=0
@@ -434,9 +422,7 @@ terminate_pipeline() {
   # Every process signalled above is this attempt's own child or a member of
   # its process group, so this reaps exactly what it owns.
   wait "$supervisor_pid" 2>/dev/null || true
-  if [ -n "$group" ]; then
-    kill -KILL "-${group}" 2>/dev/null || true
-  fi
+  kill -KILL "-${group}" 2>/dev/null || true
   supervisor_pid=""
   group=""
 }
@@ -525,18 +511,10 @@ PIPELINE
   # spawn. It is never a fork here -- a shell's background child is not a
   # process group leader, which is the only case where setsid(1) forks -- so
   # $! remains the supervisor and wait still reaps it. dash's `set -m` does not
-  # create process groups for background jobs, so it is not an alternative.
-  # Without setsid (development hosts) the supervisor's own handler still
-  # terminates its direct children; only their descendants can outlive it.
-  # The lock descriptor is closed in the child: an inherited copy would keep the
-  # flock held for as long as any descendant lives, so one leaked process could
-  # block every future backup -- exactly the deadlock the kernel lock exists to
-  # avoid.
-  if command -v setsid >/dev/null 2>&1; then
-    eval "setsid sh \"\${work_dir}/pipeline.sh\" \"\$work_dir\" ${lock_fd}>&- &"
-  else
-    eval "sh \"\${work_dir}/pipeline.sh\" \"\$work_dir\" ${lock_fd}>&- &"
-  fi
+  # create process groups for background jobs, so it is not an alternative, and
+  # there is deliberately no fallback: without a session there is no safe way
+  # to terminate a whole pipeline, and preflight has already refused to run.
+  eval "setsid sh \"\${work_dir}/pipeline.sh\" \"\$work_dir\" ${lock_fd}>&- &"
   supervisor_pid=$!
   launching=0
   unset PGPASSWORD
