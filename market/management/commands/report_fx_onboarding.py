@@ -261,7 +261,12 @@ class Command(BaseCommand):
                 )
         self.stdout.write(
             json.dumps(
-                {"as_of": now.isoformat(), "rows": rows, "integrity_errors": sorted(set(errors))},
+                {
+                    "as_of": now.isoformat(),
+                    "rows": rows,
+                    "integrity_errors": sorted(set(errors)),
+                    "schedule_identity_issues": errors.identity_report,
+                },
                 default=lambda v: v.isoformat(),
                 sort_keys=True,
             )

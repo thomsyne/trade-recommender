@@ -91,15 +91,16 @@ class Phase2Tests(TestCase):
             self.assertEqual(capture_oanda_terms(), [])
             client.assert_not_called()
 
-    def test_seed_preserves_disable_and_deadlines_and_repairs_parameters(self):
+    def test_seed_preserves_disable_and_deadlines_and_repairs_policy(self):
         Instrument.objects.filter(code="USD_JPY").update(ingestion_enabled=False)
         job = ScheduledJob.objects.get(name="OANDA USD_JPY H1")
         original = job.next_run_at
-        job.parameters = {"instrument": "UNKNOWN", "granularity": "D", "days": 999}
+        job.missed_run_policy = "all"
         job.save()
         call_command("seed_canonical", verbosity=0)
         job.refresh_from_db()
         self.assertFalse(job.enabled)
+        self.assertEqual(job.missed_run_policy, "latest")
         self.assertEqual(job.next_run_at, original)
         self.assertEqual(job.parameters, {"instrument": "USD_JPY", "granularity": "H1"})
         self.assertEqual(Instrument.objects.count(), 12)
