@@ -67,11 +67,15 @@ EXIT_PRECONDITION=2
 EXIT_CONTENDED=3
 
 lock_fd=9
+probe_fd=7
+contender_fd=6
+# Reserved for "another attempt holds the lock". Distinct from every status a
+# shell, a signal or flock itself produces for an operational failure.
+FLOCK_CONTENTION_CODE=97
 lock_held=0
 work_dir=""
 supervisor_pid=""
 group=""
-watchdog_pid=""
 attempt_open=0
 attempt_id=""
 attempted_at=""
@@ -140,23 +144,46 @@ preflight() {
   fi
   rm -f "${STATE_DIR}/.backup-preflight" 2>/dev/null || true
   self_group="$(process_group $$)"
-  detect_flock_conflict_code
+  if ! detect_flock_conflict_code; then
+    # Fail closed. Without a dedicated conflict status every failure would have
+    # to be read as "another backup is running", and a genuinely broken lock
+    # would look like a healthy skip for ever. util-linux flock provides it;
+    # the production image ships that implementation.
+    log "flock(1) does not report a dedicated conflict exit status; refusing to guess"
+    return 1
+  fi
   return 0
 }
 
 detect_flock_conflict_code() {
-  # util-linux flock can report contention with its own exit status (-E), which
-  # is what separates "another backup holds the lock" from "the lock could not
-  # be evaluated at all". Support is read from the implementation's own help
-  # rather than by trying the flag, because a flock that silently ignores an
-  # unknown option would otherwise look like it honoured it. busybox flock has
-  # no -E, so the code stays empty and contention remains the documented
-  # reading there.
-  if flock --help 2>&1 | grep -q -- '--conflict-exit-code'; then
-    flock_conflict_code=97
-  else
-    flock_conflict_code=""
+  # Establish, by experiment rather than by reading help text, that this flock
+  # reports contention with a dedicated exit status. Help output is localized
+  # and an implementation that silently ignores an unknown option would look
+  # like it honoured it; only a real conflict answers with the reserved code.
+  #
+  # This shell takes the probe lock, then a child contends for it through its
+  # own descriptor. A child is a separate process, so the kernel genuinely
+  # denies it, and only an implementation honouring -E exits with
+  # FLOCK_CONTENTION_CODE.
+  flock_conflict_code=""
+  probe="${STATE_DIR}/.backup-lock-probe.$$"
+  if ! : >"$probe" 2>/dev/null; then
+    return 1
   fi
+  if ! eval "exec ${probe_fd}>>\"\$probe\"" 2>/dev/null; then
+    rm -f "$probe" 2>/dev/null || true
+    return 1
+  fi
+  if flock -n "$probe_fd" 2>/dev/null; then
+    ( eval "exec ${contender_fd}>>\"\$probe\"" \
+      && flock -n -E "$FLOCK_CONTENTION_CODE" "$contender_fd" ) >/dev/null 2>&1
+    if [ $? -eq "$FLOCK_CONTENTION_CODE" ]; then
+      flock_conflict_code="$FLOCK_CONTENTION_CODE"
+    fi
+  fi
+  eval "exec ${probe_fd}>&-" 2>/dev/null || true
+  rm -f "$probe" 2>/dev/null || true
+  [ -n "$flock_conflict_code" ]
 }
 
 acquire_lock() {
@@ -169,18 +196,17 @@ acquire_lock() {
     log "cannot open the attempt lock file ${LOCK_FILE}"
     return 2
   fi
-  if [ -n "$flock_conflict_code" ]; then
-    flock -n -E "$flock_conflict_code" "$lock_fd" 2>/dev/null
-  else
-    flock -n "$lock_fd" 2>/dev/null
-  fi
+  flock -n -E "$flock_conflict_code" "$lock_fd" 2>/dev/null
   lock_status=$?
   if [ "$lock_status" -eq 0 ]; then
     lock_held=1
     return 0
   fi
   eval "exec ${lock_fd}>&-" 2>/dev/null || true
-  if [ -n "$flock_conflict_code" ] && [ "$lock_status" -ne "$flock_conflict_code" ]; then
+  if [ "$lock_status" -ne "$flock_conflict_code" ]; then
+    # Anything that is not the reserved contention status is an operational
+    # failure. A losing contender has touched nothing: it never held the lock
+    # and never opened any state file.
     log "attempt lock could not be evaluated (flock exited ${lock_status})"
     return 2
   fi
@@ -381,33 +407,33 @@ signal_pipeline() {
   kill "-$1" "$supervisor_pid" 2>/dev/null || true
 }
 
-escalate_after_grace() {
-  # Watchdog: a pg_dump that blocks or ignores TERM must not hold cleanup open
-  # for ever, so termination is bounded. Cancelled as soon as TERM works.
-  sleep "$KILL_AFTER_SECONDS"
-  log "dump pipeline ignored TERM for ${KILL_AFTER_SECONDS}s; escalating to KILL"
-  signal_pipeline KILL
-}
-
 terminate_pipeline() {
   # Terminate the whole dump pipeline and reap it. The process group carries
   # pg_dump, gzip and anything they spawned.
+  #
+  # The grace period is a polling deadline in this shell, not a background
+  # timer. A timer would be one more process to own, signal and reap -- and the
+  # previous one left its sleep(1) orphaned when it was cancelled. Polling the
+  # marker the supervisor writes on every exit path costs nothing, cannot be
+  # orphaned, and never blocks longer than the deadline.
   [ -n "$supervisor_pid" ] || return 0
   if ! group="$(supervisor_group)"; then
     group=""
   fi
   signal_pipeline TERM
-  # The watchdog must not inherit the lock descriptor, or a killed backup would
-  # keep the attempt lock held until the grace period elapsed.
-  eval "escalate_after_grace ${lock_fd}>&- &"
-  watchdog_pid=$!
+  waited=0
+  while [ "$waited" -lt "$KILL_AFTER_SECONDS" ]; do
+    [ -f "${work_dir}/supervisor.done" ] && break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [ ! -f "${work_dir}/supervisor.done" ]; then
+    log "dump pipeline ignored TERM for ${KILL_AFTER_SECONDS}s; escalating to KILL"
+    signal_pipeline KILL
+  fi
+  # Every process signalled above is this attempt's own child or a member of
+  # its process group, so this reaps exactly what it owns.
   wait "$supervisor_pid" 2>/dev/null || true
-  # KILL, not TERM: this runs inside the signal handler, which has already set
-  # INT/TERM to ignore, and a child forked from there inherits that disposition
-  # -- a TERM would be ignored and cancelling the watchdog would block on it
-  # for the whole grace period.
-  kill -KILL "$watchdog_pid" 2>/dev/null || true
-  wait "$watchdog_pid" 2>/dev/null || true
   if [ -n "$group" ]; then
     kill -KILL "-${group}" 2>/dev/null || true
   fi
@@ -459,12 +485,19 @@ set -u
 work="$1"
 dump_pid=""
 gzip_pid=""
+announce_exit() {
+  # The parent polls for this instead of blocking in wait(), so it can bound
+  # how long a stuck pipeline delays cleanup without forking a timer that
+  # would itself need owning and reaping.
+  printf '%s\n' "$1" >"$work/supervisor.done" 2>/dev/null || true
+}
 supervisor_cleanup() {
   trap '' INT TERM
   [ -n "$dump_pid" ] && kill -TERM "$dump_pid" 2>/dev/null
   [ -n "$gzip_pid" ] && kill -TERM "$gzip_pid" 2>/dev/null
   [ -n "$dump_pid" ] && wait "$dump_pid" 2>/dev/null
   [ -n "$gzip_pid" ] && wait "$gzip_pid" 2>/dev/null
+  announce_exit interrupted
   exit 143
 }
 trap supervisor_cleanup INT TERM
@@ -480,6 +513,7 @@ dump_status=$?
 wait "$gzip_pid"
 gzip_status=$?
 printf '%s %s\n' "$dump_status" "$gzip_status" >"$work/pipeline.status"
+announce_exit complete
 PIPELINE
   # pg_dump reads the password from the environment, never from a command line
   # or a state file.

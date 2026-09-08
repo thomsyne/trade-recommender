@@ -36,6 +36,40 @@ assert_absent() { [ ! -e "$1" ] || fail "did not expect $1 to exist"; }
 assert_present() { [ -e "$1" ] || fail "expected $1 to exist"; }
 assert_empty_dir() { [ -z "$(ls -A "$1")" ] || fail "expected $1 to be empty, found: $(ls -A "$1")"; }
 
+# Every real executable the harness links to is fingerprinted up front and
+# re-checked at the end: no case may modify a tool on this machine.
+guarded_tools=""
+guard_digest() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+  else openssl dgst -sha256 "$1" | sed 's/^.*= //'
+  fi
+}
+guard_record() {
+  for tool in "$@"; do
+    path="$(command -v "$tool" 2>/dev/null || true)"
+    [ -n "$path" ] && [ -f "$path" ] || continue
+    guarded_tools="$guarded_tools $path"
+    printf '%s %s\n' "$path" "$(guard_digest "$path")" >>"$temporary/guarded"
+  done
+}
+guard_verify() {
+  while read -r path digest; do
+    [ -n "$path" ] || continue
+    if [ ! -f "$path" ]; then
+      echo "harness destroyed $path" >&2
+      exit 1
+    fi
+    now="$(guard_digest "$path")"
+    if [ "$now" != "$digest" ]; then
+      echo "harness modified the real executable $path" >&2
+      exit 1
+    fi
+  done <"$temporary/guarded"
+}
+: >"$temporary/guarded"
+guard_record flock setsid uuidgen gzip sha256sum shasum openssl base64 sleep mv cat sh
+
 toolbox="$temporary/toolbox"
 mkdir -p "$toolbox"
 for command in basename cat chmod cp cut date dirname env grep gzip head kill ls mkdir mkfifo mktemp mv printf ps rm rmdir sed seq sh sleep tail tr wc; do
@@ -55,7 +89,23 @@ for command in env python3; do
   if [ -n "$path" ]; then ln -sf "$path" "$toolbox/$command"; fi
 done
 
-write_stub() { name="$1"; shift; cat >"$MOCK_BIN/$name"; chmod 755 "$MOCK_BIN/$name"; }
+write_stub() {
+  # Replace, never write through, whatever is already at this path.
+  # prepare_case links some mock names at the real executable so the genuine
+  # implementation is exercised, and a shell redirection follows a symlink: a
+  # plain `cat >` here truncated /usr/bin/flock itself when the harness ran as
+  # root, and failed with "Text file busy" where the target was in use.
+  name="$1"; shift
+  case "$name" in
+    */*|.|..) echo "write_stub refuses a path: $name" >&2; exit 1 ;;
+  esac
+  target="$MOCK_BIN/$name"
+  rm -f "$target"
+  [ ! -e "$target" ] || { echo "write_stub could not clear $target" >&2; exit 1; }
+  cat >"$target"
+  chmod 755 "$target"
+  [ ! -L "$target" ] || { echo "write_stub produced a symlink: $target" >&2; exit 1; }
+}
 
 good_dump() {
   # Emits a plausible plain pg_dump: header, >4 KiB body, completion marker.
@@ -145,8 +195,10 @@ prepare_case() {
   # Python stub is only a macOS stand-in.
   if command -v flock >/dev/null 2>&1; then
     ln -sf "$(command -v flock)" "$MOCK_BIN/flock"
+    ln -sf "$(command -v flock)" "$MOCK_BIN/flock.real"
   else
     good_flock | write_stub flock
+    good_flock | write_stub flock.real
   fi
   if command -v setsid >/dev/null 2>&1; then ln -sf "$(command -v setsid)" "$MOCK_BIN/setsid"; fi
   if command -v uuidgen >/dev/null 2>&1; then ln -sf "$(command -v uuidgen)" "$MOCK_BIN/uuidgen"; fi
@@ -154,24 +206,45 @@ prepare_case() {
 
 good_flock() {
   # macOS has no flock(1); emulate the util-linux fd semantics with Python's
-  # fcntl. The lock applies to the open file description shared with the
-  # backup shell through the inherited descriptor, so it persists until the
-  # backup closes that descriptor (the real flock behaves identically).
+  # fcntl, including -E so the harness exercises the same contention contract
+  # the production implementation provides.
   cat <<'EOF'
 #!/usr/bin/env python3
 import fcntl
-import os
 import sys
 
-fd = int(sys.argv[-1])
-unlock = "-u" in sys.argv
+argv = sys.argv[1:]
+conflict_code = 1
+fd = None
+index = 0
+unlock = False
+while index < len(argv):
+    token = argv[index]
+    if token in ("-E", "--conflict-exit-code"):
+        conflict_code = int(argv[index + 1])
+        index += 2
+        continue
+    if token in ("-u", "--unlock"):
+        unlock = True
+    elif token in ("-n", "--nonblock", "-x", "--exclusive"):
+        pass
+    else:
+        try:
+            fd = int(token)
+        except ValueError:
+            pass
+    index += 1
+if fd is None:
+    sys.exit(64)
 if unlock:
     fcntl.flock(fd, fcntl.LOCK_UN)
     sys.exit(0)
 try:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
-    sys.exit(1)
+    sys.exit(conflict_code)
+except OSError:
+    sys.exit(64)
 sys.exit(0)
 EOF
 }
@@ -638,6 +711,7 @@ assert_present "$STATE/backup-in-progress"
 assert_contains 'attempt_id=' "$STATE/backup-in-progress"
 assert_contains 'started_at=' "$STATE/backup-in-progress"
 assert_contains 'object_key=postgres/' "$STATE/backup-in-progress"
+cp "$STATE/backup-in-progress" "$CASE_ROOT/holder-in-progress"
 # Second backup overlaps the first: it must skip (lock held), never upload.
 env -i PATH="$MOCK_BIN:$toolbox" HOME="$CASE_ROOT" TMPDIR="$WORK" CALLS="$CALLS" FAKE_BUCKET="$FAKE_BUCKET" \
   POSTGRES_HOST=db POSTGRES_USER=app POSTGRES_DB=app POSTGRES_PASSWORD=not-a-real-secret \
@@ -650,6 +724,11 @@ for _ in $(seq 1 60); do
 done
 grep -q 'another backup holds the attempt lock' "$CASE_ROOT/output-second" \
   || fail "a second backup while one is running must skip, not proceed"
+# Still mid-attempt: the holder's durable record must be exactly what it was
+# before the contender ran, and no second attempt record may exist.
+[ "$(cat "$STATE/backup-in-progress")" = "$(cat "$CASE_ROOT/holder-in-progress")" ] \
+  || fail "the losing contender changed the holder's in-progress record"
+assert_absent "$STATE/backup-last-failure"
 : >"$CASE_ROOT/release"
 set +e
 wait "$second_pid"
@@ -657,7 +736,8 @@ second_status=$?
 wait "$first_pid"
 first_status=$?
 set -e
-[ "$second_status" -ne 0 ] || fail "a skipped concurrent backup must exit non-zero"
+[ "$second_status" -eq 3 ] \
+  || fail "genuine contention must use the reserved skip status, got $second_status"
 [ "$first_status" -eq 0 ] || fail "the first backup should succeed after the second was skipped"
 assert_absent "$STATE/backup-in-progress"
 [ -e "$STATE/.backup-lock" ] || fail "the persistent lock file must not be removed"
@@ -887,24 +967,91 @@ assert_line 'category=interrupted' "$STATE/backup-last-failure"
 assert_lock_free
 assert_empty_dir "$WORK"
 
-# ----------------------------- a broken lock is an error, not a quiet skip
-prepare_case lock-unusable
-write_stub flock <<'EOF'
+# ------------------------------- repeated signals during dump and cleanup
+# A second TERM arriving while the handler runs must not interrupt failure
+# publication, re-enter cleanup, or leave anything of this attempt running.
+prepare_case interrupt-repeated-signals
+write_stub pg_dump <<EOF
 #!/bin/bash
-# Neither acquisition nor contention: an operational failure.
-echo "flock: cannot open lock file" >&2
-exit 64
+echo "pg_dump \$*" >>"\$CALLS"
+printf -- '--\n-- PostgreSQL database dump\n--\n'
+echo "pg_dump_pid=\$\$" >>"\$CALLS"
+echo started >"$CASE_ROOT/dump-started"
+exec sleep 30
 EOF
+env -i PATH="$MOCK_BIN:$toolbox" HOME="$CASE_ROOT" TMPDIR="$WORK" CALLS="$CALLS" FAKE_BUCKET="$FAKE_BUCKET" \
+  POSTGRES_HOST=db POSTGRES_USER=app POSTGRES_DB=app POSTGRES_PASSWORD=not-a-real-secret \
+  BACKUP_BUCKET=fake-bucket AWS_REGION=us-east-1 BACKUP_STATE_DIR="$STATE" BACKUP_WORK_DIR="$WORK" \
+  /bin/sh "$backup" once >"$CASE_ROOT/output" 2>"$CASE_ROOT/error" &
+repeat_pid=$!
+for _ in $(seq 1 100); do [ -f "$CASE_ROOT/dump-started" ] && break; sleep 0.05; done
+assert_present "$CASE_ROOT/dump-started"
+repeat_dump="$(sed -n 's/^pg_dump_pid=//p' "$CALLS" | tail -1)"
+kill -TERM "$repeat_pid"
+kill -TERM "$repeat_pid" 2>/dev/null || true
+kill -TERM "$repeat_pid" 2>/dev/null || true
+set +e
+wait "$repeat_pid"
+repeat_status=$?
+set -e
+[ "$repeat_status" -eq 143 ] || fail "repeated interrupts should still exit 143, got $repeat_status"
+assert_line 'category=interrupted' "$STATE/backup-last-failure"
+assert_line 'outcome=failure' "$STATE/backup-last-attempt"
+assert_absent "$STATE/backup-in-progress"
+assert_absent "$STATE/last-backup"
+for _ in $(seq 1 100); do kill -0 "$repeat_dump" 2>/dev/null || break; sleep 0.05; done
+kill -0 "$repeat_dump" 2>/dev/null && fail "pg_dump ($repeat_dump) survived repeated interrupts"
+assert_lock_free
+assert_empty_dir "$WORK"
+
+# --------------------------------------------------- lock result semantics
+# Contention is exactly one reserved status; everything else is operational.
+
+prepare_case lock-operational-error
+# Honours -E for the preflight probe, but fails the real acquisition (fd 9)
+# with a status that is not the reserved one. That is a broken lock, not a busy
+# one. Written in shell so it runs wherever the harness does.
+cat >"$MOCK_BIN/flock.stub" <<EOF
+#!/bin/sh
+case " \$* " in
+  *" 9 "*) exit 64 ;;
+esac
+exec "$MOCK_BIN/flock.real" "\$@"
+EOF
+chmod 755 "$MOCK_BIN/flock.stub"
+rm -f "$MOCK_BIN/flock" && mv "$MOCK_BIN/flock.stub" "$MOCK_BIN/flock"
 run_backup_status once
-if "$MOCK_BIN/flock" --help 2>&1 | grep -q -- '--conflict-exit-code'; then
-  [ "$captured_status" -eq 2 ] \
-    || fail "an unusable lock must abort with 2, got $captured_status"
-  assert_contains 'could not be evaluated' "$CASE_ROOT/output"
-else
-  # Without flock -E (busybox) contention and error are indistinguishable, and
-  # the documented reading is contention.
-  [ "$captured_status" -eq 3 ] || fail "expected the documented skip, got $captured_status"
-fi
+[ "$captured_status" -eq 2 ] \
+  || fail "an unusable lock must abort with 2, got $captured_status"
+assert_contains 'could not be evaluated' "$CASE_ROOT/output"
+assert_not_contains 'pg_dump' "$CALLS"
+assert_absent "$STATE/backup-in-progress"
+assert_absent "$STATE/backup-last-attempt"
+
+prepare_case lock-unsupported-flock
+# An implementation with no dedicated conflict status: -E is stripped, so
+# contention is indistinguishable from failure and the backup must fail closed
+# rather than read every failure as "another backup is running".
+cat >"$MOCK_BIN/flock.stub" <<EOF
+#!/bin/sh
+args=""
+skip=0
+for token in "\$@"; do
+  if [ "\$skip" = 1 ]; then skip=0; continue; fi
+  case "\$token" in
+    -E|--conflict-exit-code) skip=1; continue ;;
+  esac
+  args="\$args \$token"
+done
+exec "$MOCK_BIN/flock.real" \$args
+EOF
+chmod 755 "$MOCK_BIN/flock.stub"
+rm -f "$MOCK_BIN/flock" && mv "$MOCK_BIN/flock.stub" "$MOCK_BIN/flock"
+run_backup_status once
+[ "$captured_status" -eq 2 ] \
+  || fail "an unsupported flock must fail closed with 2, got $captured_status"
+assert_contains 'dedicated conflict exit status' "$CASE_ROOT/output"
+assert_not_contains 'another backup holds' "$CASE_ROOT/output"
 assert_not_contains 'pg_dump' "$CALLS"
 
 # -------------------------------------------------------------- restore-check
@@ -935,4 +1082,5 @@ fi
 assert_contains 'archive_unreadable' "$CASE_ROOT/error"
 unset RESTORE_CHECK_DB
 
+guard_verify
 echo "backup script simulations passed"
