@@ -166,6 +166,8 @@ class AnthropicProvider:
 
 
 def generate_recommendation(instrument, *, provider=None, generated_at=None, allow_fixture=False):
+    if not type(instrument).objects.filter(pk=instrument.pk, active=True).exists():
+        raise ValueError(f"Decision workflows are disabled for {instrument.code}")
     generated_at = generated_at or timezone.now()
     snapshot = PairEvidenceSnapshot.objects.filter(
         instrument=instrument, captured_at__lte=generated_at

@@ -320,6 +320,57 @@ class JobStateProjectionTests(TestCase):
         self.assertEqual(state.state, "stale")
         self.assertIn("Overdue", state.reason)
 
+    def test_oanda_disabled_reasons_follow_collection_eligibility_for_all_onboarding_pairs(self):
+        from market.models import SourceRegistry
+
+        SourceRegistry.objects.create(name="OANDA v20", enabled=True)
+        codes = (
+            "USD_JPY",
+            "AUD_USD",
+            "USD_CHF",
+            "NZD_USD",
+            "EUR_JPY",
+            "GBP_JPY",
+            "AUD_JPY",
+            "AUD_CAD",
+        )
+        for order, code in enumerate(codes, 5):
+            instrument = Instrument.objects.create(
+                code=code,
+                base_currency=code[:3],
+                quote_currency=code[4:],
+                display_order=order,
+                active=False,
+                ingestion_enabled=True,
+            )
+            job = self.job(
+                f"OANDA {code} H1",
+                "market.ingest_oanda",
+                enabled=False,
+                parameters={"instrument": code, "granularity": "H1"},
+            )
+            with self.subTest(code=code, reason="configuration"), override_settings(OANDA_TOKEN=""):
+                state = project_job_state(job)
+                self.assertEqual(state.state, "disabled_configuration")
+                self.assertEqual(state.reason, "OANDA_TOKEN is not configured.")
+            with self.subTest(code=code, reason="registry"), override_settings(OANDA_TOKEN="mock"):
+                state = project_job_state(job)
+                self.assertEqual(state.state, "disabled_intentional")
+                self.assertEqual(state.reason, "Disabled in the schedule registry.")
+            instrument.ingestion_enabled = False
+            instrument.save(update_fields=("ingestion_enabled",))
+            for token in ("", "mock"):
+                with (
+                    self.subTest(code=code, reason="collection policy", token_present=bool(token)),
+                    override_settings(OANDA_TOKEN=token),
+                ):
+                    state = project_job_state(job)
+                    self.assertEqual(state.state, "disabled_intentional")
+                    self.assertEqual(
+                        state.reason,
+                        f"Live collection is disabled for {code} (ingestion_enabled=False).",
+                    )
+
     def test_disabled_states_are_data_driven_not_credential_labels(self):
         now = timezone.now()
         postmortem = self.job("postmortem", "forecast.interpret_postmortems", enabled=False)
@@ -349,7 +400,12 @@ class JobStateProjectionTests(TestCase):
             code="USD_JPY", base_currency="USD", quote_currency="JPY", display_order=5, active=False
         )
         Instrument.objects.create(
-            code="USD_CAD", base_currency="USD", quote_currency="CAD", display_order=4, active=True
+            code="USD_CAD",
+            base_currency="USD",
+            quote_currency="CAD",
+            display_order=4,
+            active=True,
+            ingestion_enabled=True,
         )
         out_of_scope = self.job(
             "jpy", "market.ingest_oanda", enabled=False, parameters={"instrument": "USD_JPY"}

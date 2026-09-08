@@ -106,6 +106,7 @@ SHA-256 fingerprint and is never rendered or logged. Review
 | `make worker` | Run the durable worker loop |
 | `make scheduler` | Run the durable scheduler loop |
 | `make ingest` | Show required arguments for direct OANDA ingestion |
+| `.venv/bin/python manage.py report_fx_onboarding` | Read-only ingestion-only FX health and isolation report |
 | `make baseline` | Lock one macro and tactical mechanical baseline per pair |
 | `make resolve` | Resolve every forecast whose later sessions are available |
 | `make recommend` | Generate governed recommendations from fresh pair evidence |
@@ -130,6 +131,7 @@ default cap and never replaces deterministic review facts.
 - [Gmail owner notifications](docs/gmail-notifications.md)
 - [AWS deployment, backup, rollback, and restore](docs/deployment.md)
 - [OANDA provider contract](docs/providers/oanda.md)
+- [Phase 2 ingestion-only registry, capacity and future rollout](docs/phase2/rollout.md)
 - [Forecast contract](docs/forecast-contract.md)
 - [Governed recommendation contract](docs/recommendation-contract.md)
 - [Research ingestion contract](docs/research-ingestion.md)

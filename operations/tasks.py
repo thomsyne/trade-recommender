@@ -8,6 +8,7 @@ from forecasts.paper import resolve_due_paper_trades
 from forecasts.recommendations import generate_all_recommendations, resolve_due_recommendations
 from forecasts.reviews import build_due_review_cohort
 from forecasts.services import resolve_due_forecasts
+from market.live_acquisition import LIVE_INTERVALS, canonical_live_start
 from market.models import IngestionRun, Instrument, SourceRegistry
 from market.oanda import OandaClient
 from market.services import store_ingestion, store_oanda_terms
@@ -70,24 +71,41 @@ def execute_task(task_name, parameters):
 
 def ingest_oanda(parameters):
     instrument = Instrument.objects.get(code=parameters["instrument"])
+    if not instrument.ingestion_enabled:
+        raise ValueError(f"Live ingestion is disabled for {instrument.code}")
     granularity = parameters["granularity"]
+    if granularity not in LIVE_INTERVALS:
+        raise ValueError("Unsupported live granularity; use H1/H4/D/W")
     end = _datetime(parameters.get("to")) if parameters.get("to") else datetime.now(UTC)
     default_days = {"H1": 14, "H4": 14, "D": 90, "W": 730}[granularity]
     days = int(parameters.get("days", default_days))
     start = (
         _datetime(parameters.get("from")) if parameters.get("from") else end - timedelta(days=days)
     )
+    if start >= end:
+        raise ValueError("start must be before end")
+    start = canonical_live_start(start, granularity)
     source = SourceRegistry.objects.get(name="OANDA v20")
+    if not source.enabled:
+        raise ValueError("OANDA source is disabled")
     with task_stage("provider_fetch"):
         with OandaClient(settings.OANDA_TOKEN, settings.OANDA_ENVIRONMENT) as client:
             candles, manifest = client.fetch_candles(instrument.code, granularity, start, end)
     with task_stage("store"):
         run = store_ingestion(source, instrument, granularity, start, end, candles, manifest)
-    if run.status == IngestionRun.Status.SUCCEEDED and granularity == "D":
+    if run.status != IngestionRun.Status.SUCCEEDED:
+        raise ValueError(f"OANDA ingestion ended as {run.status}")
+    # Recheck decision eligibility after the provider round trip.
+    instrument.refresh_from_db(fields=("active",))
+    if instrument.active and run.status == IngestionRun.Status.SUCCEEDED and granularity == "D":
         with task_stage("resolve"):
             resolve_due_forecasts(instrument)
             resolve_due_recommendations(instrument)
-    if run.status == IngestionRun.Status.SUCCEEDED and granularity in {"H1", "D"}:
+    if (
+        instrument.active
+        and run.status == IngestionRun.Status.SUCCEEDED
+        and granularity in {"H1", "D"}
+    ):
         with task_stage("paper"):
             resolve_due_paper_trades(instrument)
             build_due_review_cohort(instrument=instrument)
@@ -97,7 +115,11 @@ def ingest_oanda(parameters):
 def capture_oanda_terms():
     if not settings.OANDA_ACCOUNT_ID:
         raise ValueError("OANDA_ACCOUNT_ID is not configured")
-    codes = list(Instrument.objects.filter(active=True).values_list("code", flat=True))
+    if not settings.OANDA_TOKEN:
+        raise ValueError("OANDA_TOKEN is not configured")
+    codes = list(Instrument.objects.filter(ingestion_enabled=True).values_list("code", flat=True))
+    if not codes:
+        return []
     with task_stage("provider_fetch"):
         with OandaClient(settings.OANDA_TOKEN, settings.OANDA_ENVIRONMENT) as client:
             payload = client.fetch_account_terms(settings.OANDA_ACCOUNT_ID, codes)
@@ -106,4 +128,7 @@ def capture_oanda_terms():
 
 
 def _datetime(value):
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Ingestion timestamps must be timezone-aware")
+    return parsed.astimezone(UTC)

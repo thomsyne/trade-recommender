@@ -82,11 +82,19 @@ class Instrument(models.Model):
         EUR_USD = "EUR_USD", "EUR/USD"
         USD_JPY = "USD_JPY", "USD/JPY"
 
+        USD_CHF = "USD_CHF", "USD/CHF"
+        NZD_USD = "NZD_USD", "NZD/USD"
+        EUR_JPY = "EUR_JPY", "EUR/JPY"
+        GBP_JPY = "GBP_JPY", "GBP/JPY"
+        AUD_JPY = "AUD_JPY", "AUD/JPY"
+        AUD_CAD = "AUD_CAD", "AUD/CAD"
+
     code = models.CharField(max_length=7, choices=Code, unique=True)
     base_currency = models.CharField(max_length=3)
     quote_currency = models.CharField(max_length=3)
     display_order = models.PositiveSmallIntegerField(unique=True)
     active = models.BooleanField(default=True)
+    ingestion_enabled = models.BooleanField(default=False)
 
     class Meta:
         ordering = ("display_order",)

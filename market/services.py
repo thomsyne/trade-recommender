@@ -276,7 +276,11 @@ def store_ingestion(
                 "granularity": granularity,
                 "requested_from": start,
                 "requested_to": end,
-                "parameters": {key: value for key, value in manifest.items() if key != "requests"},
+                "parameters": (
+                    manifest
+                    if dataset_version is None
+                    else {key: value for key, value in manifest.items() if key != "requests"}
+                ),
             },
         )
         if not created:

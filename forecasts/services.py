@@ -80,6 +80,8 @@ def ensure_target_contracts():
 
 @transaction.atomic
 def issue_baselines(instrument, issued_at=None, allow_fixture=False):
+    if not type(instrument).objects.filter(pk=instrument.pk, active=True).exists():
+        raise ValueError(f"Decision workflows are disabled for {instrument.code}")
     issued_at = issued_at or timezone.now()
     contracts = ensure_target_contracts()
     evidence = _capture_market_evidence(instrument, issued_at)

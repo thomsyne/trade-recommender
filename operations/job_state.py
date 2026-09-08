@@ -83,20 +83,23 @@ class JobState:
 
 def disabled_reason(job):
     """Return (state, human reason) for a disabled job, derived from data and policy."""
-    from market.models import Instrument
+    from market.models import Instrument, SourceRegistry
     from research.models import ProviderEvaluation, SourcePolicy
 
     task = job.task_name
     if task == "market.ingest_oanda":
         code = job.parameters.get("instrument", "")
         instrument = Instrument.objects.filter(code=code).first()
-        if instrument is not None and not instrument.active:
+        if instrument is not None and not instrument.ingestion_enabled:
             return (
                 "disabled_intentional",
-                f"{code} is outside the prospective pair scope; not collected by policy.",
+                f"Live collection is disabled for {code} (ingestion_enabled=False).",
             )
         if not settings.OANDA_TOKEN:
             return ("disabled_configuration", "OANDA_TOKEN is not configured.")
+        source = SourceRegistry.objects.filter(name="OANDA v20").first()
+        if source is None or not source.enabled:
+            return ("disabled_capability", "OANDA source is unavailable or disabled.")
         return ("disabled_intentional", "Disabled in the schedule registry.")
     if task == "market.capture_oanda_terms":
         missing = [

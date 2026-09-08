@@ -35,6 +35,28 @@ PROTECTIONS = (
 )
 
 
+def instrument_at_0028(**values):
+    """Seed the schema under test, then bind its identity to the service model.
+
+    Runtime Instrument acquired ingestion_enabled in 0030; its INSERT cannot
+    target a deliberately old 0028 table. Do not fake forward migrations here.
+    """
+    from market.models import Instrument
+
+    historical = (
+        MigrationExecutor(connection)
+        .loader.project_state(AFTER)
+        .apps.get_model("market", "Instrument")
+    )
+    row = historical.objects.create(**values)
+    return Instrument.objects.defer("ingestion_enabled").get(pk=row.pk)
+
+
+def restore_head():
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+
+
 def trigger_names():
     with connection.cursor() as cursor:
         cursor.execute(
@@ -61,7 +83,7 @@ class LiveObservationMigrationTests(TransactionTestCase):
         # Restore the head state, not the 0028 state this class migrates back
         # to: leaving the shared database behind head would silently run every
         # later test without the 0029 lineage protections.
-        MigrationExecutor(connection).migrate(AFTER_0029)
+        restore_head()
         super().tearDown()
 
     def seed_legacy_rows(self):
@@ -205,11 +227,11 @@ class LiveObservationMigrationTests(TransactionTestCase):
 
     def record_live_observation(self):
         """One provider observation through the real ingestion path at the 0028 schema."""
-        from market.models import Instrument, SourceRegistry
+        from market.models import SourceRegistry
         from market.services import store_ingestion
         from market.tests.factories import candle
 
-        instrument = Instrument.objects.create(
+        instrument = instrument_at_0028(
             code="USD_CAD", base_currency="USD", quote_currency="CAD", display_order=1
         )
         source = SourceRegistry.objects.create(
@@ -252,9 +274,9 @@ class LiveObservationMigrationTests(TransactionTestCase):
         self.assertEqual(CandleObservation.objects.count(), 1)
 
     def test_reverse_is_refused_while_appended_snapshots_share_an_as_of(self):
-        from market.models import CandleObservation, Instrument, TechnicalSnapshot
+        from market.models import CandleObservation, TechnicalSnapshot
 
-        instrument = Instrument.objects.create(
+        instrument = instrument_at_0028(
             code="USD_CAD", base_currency="USD", quote_currency="CAD", display_order=1
         )
         as_of = datetime(2026, 1, 5, 9, tzinfo=UTC)
@@ -300,7 +322,7 @@ class LineageRenumberMigrationTests(TransactionTestCase):
 
     def tearDown(self):
         # 0029 is forward-only while observations exist: empty the ledger (and
-        # its protected parents) first, then restore the full 0029 schema so
+        # its protected parents) first, then restore the full head schema so
         # the shared test database is left as the normal head state.
         with connection.cursor() as cursor:
             cursor.execute("ALTER TABLE market_candleobservation DISABLE TRIGGER USER")
@@ -312,7 +334,7 @@ class LineageRenumberMigrationTests(TransactionTestCase):
             cursor.execute("ALTER TABLE market_candleobservation ENABLE TRIGGER USER")
             cursor.execute("ALTER TABLE market_candle ENABLE TRIGGER USER")
             cursor.execute("ALTER TABLE market_ingestionrun ENABLE TRIGGER USER")
-        MigrationExecutor(connection).migrate(AFTER_0029)
+        restore_head()
         super().tearDown()
 
     def seed_0028_ledger(self):
@@ -321,9 +343,9 @@ class LineageRenumberMigrationTests(TransactionTestCase):
         candle whose first recorded view was written as revision 2 with no
         supersedes. Prices are sub-unit so the canonical SQL/Python hash
         parity is exercised by the migration preflight too."""
-        from market.models import Instrument, SourceRegistry
+        from market.models import SourceRegistry
 
-        instrument = Instrument.objects.create(
+        instrument = instrument_at_0028(
             code="AUD_USD", base_currency="AUD", quote_currency="USD", display_order=1
         )
         source_a = SourceRegistry.objects.create(
