@@ -534,3 +534,89 @@ class Phase2DecisionEnumerationTests(TestCase):
         )
         self.assertEqual(ProviderBudgetReservation.objects.count(), 0)
         self.assertEqual(OutboxMessage.objects.count(), 0)
+
+
+@override_settings(
+    OANDA_TOKEN="mock-only",
+    OANDA_ACCOUNT_ID="mock-account",
+    ANTHROPIC_API_KEY="",
+    EODHD_API_TOKEN="",
+)
+class Phase2ExactWindowTests(TestCase):
+    def test_new_fetch_of_same_window_preserves_a_b_a_but_persistence_replay_is_idempotent(self):
+        from datetime import UTC, datetime, timedelta
+        from decimal import Decimal
+
+        import httpx
+
+        from market.models import Candle, CandleObservation, SourceRegistry
+        from market.oanda import OandaClient
+        from market.services import store_ingestion
+        from market.tests.factories import candle
+
+        call_command("seed_canonical", verbosity=0)
+        start = datetime(2026, 1, 5, 8, tzinfo=UTC)
+        end = start + timedelta(hours=1)
+        volumes = iter((100, 101, 100))
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                json={
+                    "candles": [
+                        {
+                            "time": start.isoformat(),
+                            "complete": True,
+                            "volume": next(volumes),
+                            "bid": {k: "150.123456" for k in "ohlc"},
+                            "ask": {k: "150.123457" for k in "ohlc"},
+                        }
+                    ]
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        with patch(
+            "operations.tasks.OandaClient",
+            side_effect=lambda token, environment: OandaClient(
+                token, environment, transport=transport
+            ),
+        ):
+            runs = [
+                ingest_oanda(
+                    {
+                        "instrument": "USD_JPY",
+                        "granularity": "H1",
+                        "from": start.isoformat(),
+                        "to": end.isoformat(),
+                    }
+                )
+                for _ in range(3)
+            ]
+        self.assertEqual(len({run.pk for run in runs}), 3)
+        observations = CandleObservation.objects.filter(instrument__code="USD_JPY").order_by(
+            "revision"
+        )
+        self.assertEqual(list(observations.values_list("volume", flat=True)), [100, 101, 100])
+        self.assertEqual(Candle.objects.filter(instrument__code="USD_JPY").count(), 1)
+        instrument = Instrument.objects.get(code="USD_JPY")
+        replay = store_ingestion(
+            SourceRegistry.objects.get(name="OANDA v20"),
+            instrument,
+            "H1",
+            start,
+            end,
+            [
+                candle(
+                    start,
+                    **{
+                        f"{side}_{field}": Decimal("150.123456" if side == "bid" else "150.123457")
+                        for side in ("bid", "ask")
+                        for field in ("open", "high", "low", "close")
+                    },
+                )
+            ],
+            runs[-1].parameters,
+        )
+        self.assertEqual(replay.pk, runs[-1].pk)
+        self.assertEqual(observations.count(), 3)

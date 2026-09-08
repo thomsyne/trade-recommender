@@ -131,7 +131,16 @@ class OandaClient:
                 "includeFirst": "true" if first_request else "false",
             }
             response = self.client.get(f"/instruments/{instrument}/candles", params=params)
-            requests.append({"url": str(response.request.url), "status": response.status_code})
+            # A new provider observation is distinct from replaying one persisted run,
+            # even when its requested window is identical (including A -> B -> A).
+            requests.append(
+                {
+                    "url": str(response.request.url),
+                    "status": response.status_code,
+                    "retrieved_at": _iso(datetime.now(UTC)),
+                    "provider_request_id": response.headers.get("RequestID", ""),
+                }
+            )
             if response.status_code != 200:
                 try:
                     message = response.json().get("errorMessage")
