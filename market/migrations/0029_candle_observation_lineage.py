@@ -117,7 +117,13 @@ AS $$
     || ',"granularity":"' || granularity || '"'
     || ',"instrument":"' || instrument_code || '"'
     || ',"timestamp":"' || CASE
-         WHEN date_part('microsecond', ts AT TIME ZONE 'UTC')::int = 0
+         -- date_part('microseconds', ...) is the SECONDS field multiplied by a
+         -- million, so it is 5000000 at :05.000000 and only zero when the
+         -- seconds are zero too. Python's isoformat drops the fractional part
+         -- whenever the microseconds are zero, at any second, so the boundary
+         -- is the remainder -- not the raw value. The modulus is doubled
+         -- because this body is executed through a parameterised cursor.
+         WHEN date_part('microseconds', ts AT TIME ZONE 'UTC')::bigint %% 1000000 = 0
            THEN to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS')
          ELSE to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US')
        END || '+00:00"'
@@ -305,6 +311,69 @@ END;
 $$;
 """
 
+# Whether frozen evidence referenced a candle AS OF a given instant. The
+# present-tense function above is right for a live INSERT, where "now" is the
+# moment the view is recorded, but it is wrong for judging rows written long
+# ago: a revision that was entirely correct when it was recorded would be
+# re-read as a conflict merely because a recommendation cited that candle
+# afterwards. Returns NULL when the historical state cannot be reconstructed --
+# a referencing row whose own timestamp is unknown -- so the caller can
+# preserve the recorded kind instead of guessing at it.
+CREATE_CANDLE_REFERENCED_AS_OF_SQL = r"""
+CREATE FUNCTION market_candleobservation_candle_referenced_as_of(
+    target_candle bigint,
+    as_of timestamptz
+) RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM public.market_candleconflict
+                WHERE existing_candle_id = target_candle AND created_at <= as_of)
+       OR EXISTS (SELECT 1 FROM public.forecasts_evidencesnapshot
+                   WHERE anchor_candle_id = target_candle AND captured_at <= as_of)
+       OR EXISTS (SELECT 1 FROM public.forecasts_forecastresolution
+                   WHERE horizon_candle_id = target_candle AND resolved_at <= as_of)
+       OR EXISTS (SELECT 1 FROM public.forecasts_recommendation
+                   WHERE reference_candle_id = target_candle AND generated_at <= as_of)
+       OR EXISTS (SELECT 1 FROM public.forecasts_recommendationresolution
+                   WHERE horizon_candle_id = target_candle AND resolved_at <= as_of)
+       OR EXISTS (SELECT 1 FROM public.forecasts_papertradeentry
+                   WHERE candle_id = target_candle AND entered_at <= as_of)
+       OR EXISTS (SELECT 1 FROM public.forecasts_papertraderesult
+                   WHERE (horizon_candle_id = target_candle OR exit_candle_id = target_candle)
+                     AND resolved_at <= as_of)
+    THEN
+        RETURN TRUE;
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.market_candleconflict
+                WHERE existing_candle_id = target_candle AND created_at IS NULL)
+       OR EXISTS (SELECT 1 FROM public.forecasts_evidencesnapshot
+                   WHERE anchor_candle_id = target_candle AND captured_at IS NULL)
+       OR EXISTS (SELECT 1 FROM public.forecasts_forecastresolution
+                   WHERE horizon_candle_id = target_candle AND resolved_at IS NULL)
+       OR EXISTS (SELECT 1 FROM public.forecasts_recommendation
+                   WHERE reference_candle_id = target_candle AND generated_at IS NULL)
+       OR EXISTS (SELECT 1 FROM public.forecasts_recommendationresolution
+                   WHERE horizon_candle_id = target_candle AND resolved_at IS NULL)
+       OR EXISTS (SELECT 1 FROM public.forecasts_papertradeentry
+                   WHERE candle_id = target_candle AND entered_at IS NULL)
+       OR EXISTS (SELECT 1 FROM public.forecasts_papertraderesult
+                   WHERE (horizon_candle_id = target_candle OR exit_candle_id = target_candle)
+                     AND resolved_at IS NULL)
+    THEN
+        RETURN NULL;
+    END IF;
+    RETURN FALSE;
+END;
+$$;
+"""
+
+DROP_CANDLE_REFERENCED_AS_OF_SQL = (
+    "DROP FUNCTION IF EXISTS market_candleobservation_candle_referenced_as_of(bigint, timestamptz);"
+)
+
 DROP_CANDLE_REFERENCED_SQL = (
     "DROP FUNCTION IF EXISTS market_candleobservation_candle_is_referenced(bigint);"
 )
@@ -322,6 +391,7 @@ DECLARE
     run_row record;
     head_row record;
     recomputed text;
+    candle_recomputed text;
     differing text;
     expected_completion timestamptz;
     expected_kind text;
@@ -426,7 +496,21 @@ BEGIN
         IF NEW.ingestion_run_id IS DISTINCT FROM candle_row.ingestion_run_id THEN
             RAISE EXCEPTION 'initial observation must belong to the run that froze its candle';
         END IF;
-        IF candle_row.content_sha256 IS DISTINCT FROM NEW.content_sha256 THEN
+        -- Recompute the candle's hash from the candle's OWN fields. Comparing
+        -- the observation against the hash the candle merely carries would
+        -- bless a row holding content A while advertising the digest of B, and
+        -- an initial observation attesting B on top of it.
+        candle_recomputed := market_candleobservation_content_sha256(
+            (SELECT code FROM public.market_instrument WHERE id = candle_row.instrument_id),
+            candle_row.granularity, candle_row.timestamp, candle_row.complete,
+            candle_row.volume, candle_row.bid_open, candle_row.bid_high,
+            candle_row.bid_low, candle_row.bid_close, candle_row.ask_open,
+            candle_row.ask_high, candle_row.ask_low, candle_row.ask_close);
+        IF candle_row.content_sha256 IS DISTINCT FROM candle_recomputed THEN
+            RAISE EXCEPTION
+                'frozen candle content_sha256 does not recompute from its own content';
+        END IF;
+        IF candle_recomputed IS DISTINCT FROM NEW.content_sha256 THEN
             RAISE EXCEPTION 'initial observation content must match its frozen candle';
         END IF;
         IF EXISTS (SELECT 1 FROM public.market_candleobservation
@@ -582,10 +666,12 @@ def drop_alignment_function(apps, schema_editor):
 def create_candle_referenced_function(apps, schema_editor):
     if schema_editor.connection.vendor == "postgresql":
         schema_editor.execute(CREATE_CANDLE_REFERENCED_SQL)
+        schema_editor.execute(CREATE_CANDLE_REFERENCED_AS_OF_SQL)
 
 
 def drop_candle_referenced_function(apps, schema_editor):
     if schema_editor.connection.vendor == "postgresql":
+        schema_editor.execute(DROP_CANDLE_REFERENCED_AS_OF_SQL)
         schema_editor.execute(DROP_CANDLE_REFERENCED_SQL)
 
 
@@ -733,6 +819,38 @@ PREFLIGHT_CHECKS = (
         """,
         "refuses initial/late_arrival rows that do not match the run that froze their candle",
     ),
+    (
+        """
+        SELECT count(*) FROM market_candle candle
+         JOIN market_instrument instrument ON instrument.id = candle.instrument_id
+         WHERE candle.dataset_version_id IS NULL
+           AND candle.content_sha256 IS NOT NULL
+           AND EXISTS (SELECT 1 FROM market_candleobservation observation
+                        WHERE observation.candle_id = candle.id)
+           AND candle.content_sha256 IS DISTINCT FROM
+               public.market_candleobservation_content_sha256(
+                   instrument.code, candle.granularity, candle.timestamp,
+                   candle.complete, candle.volume,
+                   candle.bid_open, candle.bid_high, candle.bid_low, candle.bid_close,
+                   candle.ask_open, candle.ask_high, candle.ask_low, candle.ask_close)
+        """,
+        "refuses observed candles whose content_sha256 does not recompute from their content",
+    ),
+    (
+        """
+        SELECT count(*) FROM market_candleobservation observation
+         JOIN market_candle candle ON candle.id = observation.candle_id
+         JOIN market_instrument instrument ON instrument.id = candle.instrument_id
+         WHERE observation.kind IN ('initial', 'late_arrival')
+           AND observation.content_sha256 IS DISTINCT FROM
+               public.market_candleobservation_content_sha256(
+                   instrument.code, candle.granularity, candle.timestamp,
+                   candle.complete, candle.volume,
+                   candle.bid_open, candle.bid_high, candle.bid_low, candle.bid_close,
+                   candle.ask_open, candle.ask_high, candle.ask_low, candle.ask_close)
+        """,
+        "refuses root observations that do not attest their frozen candle's own content",
+    ),
 )
 
 # Checks that only make sense once the chains are dense, so they run after the
@@ -765,21 +883,47 @@ POST_RENUMBER_CHECKS = (
         "refuses revision rows whose differing_fields do not match their frozen candle",
     ),
     (
+        # A conflict means the view departed from frozen evidence, so a row that
+        # agrees with its candle can never be one. This half is time-independent
+        # and always checked.
         """
         SELECT count(*) FROM market_candleobservation observation
          JOIN market_candle candle ON candle.id = observation.candle_id
+         WHERE observation.kind = 'conflict'
+           AND public.market_candleobservation_differing_fields(
+                   observation, candle.complete, candle.volume,
+                   candle.bid_open, candle.bid_high, candle.bid_low,
+                   candle.bid_close, candle.ask_open, candle.ask_high,
+                   candle.ask_low, candle.ask_close) = '[]'
+        """,
+        "refuses conflict rows whose content agrees with their frozen candle",
+    ),
+    (
+        # The other half depends on whether frozen evidence cited the candle,
+        # and that has to be read AS OF the observation: a revision recorded
+        # before any recommendation existed is not retrospectively a conflict
+        # because one cites the candle today. Rows whose historical reference
+        # state cannot be reconstructed (the function returns NULL) keep the
+        # kind they were recorded with rather than being re-adjudicated.
+        """
+        SELECT count(*) FROM market_candleobservation observation
+         JOIN market_candle candle ON candle.id = observation.candle_id
+         CROSS JOIN LATERAL (
+             SELECT public.market_candleobservation_candle_referenced_as_of(
+                        observation.candle_id, observation.observed_at) AS referenced
+         ) AS history
          WHERE observation.kind IN ('revision', 'conflict')
+           AND history.referenced IS NOT NULL
            AND observation.kind <> CASE
                  WHEN public.market_candleobservation_differing_fields(
                           observation, candle.complete, candle.volume,
                           candle.bid_open, candle.bid_high, candle.bid_low,
                           candle.bid_close, candle.ask_open, candle.ask_high,
                           candle.ask_low, candle.ask_close) <> '[]'
-                      AND public.market_candleobservation_candle_is_referenced(
-                              observation.candle_id)
+                      AND history.referenced
                  THEN 'conflict' ELSE 'revision' END
         """,
-        "refuses revision rows whose kind contradicts their evidence",
+        "refuses revision rows whose kind contradicts the evidence of their own time",
     ),
     (
         """

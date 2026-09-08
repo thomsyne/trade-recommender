@@ -176,6 +176,13 @@ def _published_success_is_contradicted(state):
     return False
 
 
+def _success_is_uncommitted(state):
+    """True when the published success belongs to an attempt still in progress."""
+    if not state.last_success or not state.in_progress:
+        return False
+    return _same_attempt(state.last_success, state.in_progress)
+
+
 def _same_attempt(first, second):
     """True when two state records describe the same backup attempt.
 
@@ -227,8 +234,29 @@ def backup_assessment(state, *, now, max_age_hours):
     if _published_success_is_contradicted(state):
         detail["state"] = "contradicted"
         return False, detail
+    if (
+        state.last_success is not None
+        and _parse_timestamp(state.last_success.get("completed_at")) is None
+    ):
+        # A success record that exists but cannot be read is not a success. It
+        # is reported separately from having no record at all.
+        detail["state"] = "success_malformed"
+        return False, detail
+    if _success_is_uncommitted(state):
+        # backup.sh publishes the success detail before committing the
+        # authoritative attempt record, and deliberately retains its
+        # in-progress evidence if that commit fails. A success detail belonging
+        # to the attempt still in progress has therefore not committed, and
+        # must not be read as one.
+        detail["state"] = "uncommitted"
+        return False, detail
     success_at = state.last_success_at
     if success_at is None:
+        return False, detail
+    if success_at > now:
+        # Nothing can have completed later than now; a clock or a forged file
+        # is the only way to produce this, and neither is a healthy backup.
+        detail["state"] = "future_dated"
         return False, detail
     age = (now - success_at).total_seconds()
     detail["last_success_age_seconds"] = int(age)

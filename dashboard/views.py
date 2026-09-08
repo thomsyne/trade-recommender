@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 
 from django.conf import settings
@@ -79,6 +80,18 @@ def health(request):
 
 def live(request):
     return JsonResponse({"status": "ok"})
+
+
+def _occurrence_identity(row):
+    """The identity of the recurring work an occurrence belongs to.
+
+    A scheduled job is the identity when there is one; ad-hoc occurrences fall
+    back to their task and the exact parameters they ran with, so a success for
+    USD_CAD H1 never marks a EUR_USD H4 failure recovered.
+    """
+    if row.get("scheduled_job_id"):
+        return ("job", row["scheduled_job_id"])
+    return ("task", row.get("task_name"), json.dumps(row.get("parameters") or {}, sort_keys=True))
 
 
 def migration_status():
@@ -983,14 +996,25 @@ def operations(request):
     ).count()
     job_states = project_all_job_states(now=now)
     recent_failures = list(TaskFailure.objects.select_related("occurrence__scheduled_job")[:20])
-    latest_success_by_task = {
-        row["task_name"]: row["latest"]
+    # Recovery is correlated by the identity of the work, not by the task name
+    # alone: two scheduled jobs run the same task for different instruments or
+    # granularities, and one pair succeeding says nothing about another pair.
+    latest_success_by_identity = {
+        _occurrence_identity(row): row["latest"]
         for row in JobOccurrence.objects.filter(status=JobOccurrence.Status.SUCCEEDED)
-        .values("task_name")
+        .values("scheduled_job_id", "task_name", "parameters")
         .annotate(latest=Max("scheduled_for"))
     }
     for failure in recent_failures:
-        latest_success = latest_success_by_task.get(failure.task_name)
+        latest_success = latest_success_by_identity.get(
+            _occurrence_identity(
+                {
+                    "scheduled_job_id": failure.occurrence.scheduled_job_id,
+                    "task_name": failure.occurrence.task_name,
+                    "parameters": failure.occurrence.parameters,
+                }
+            )
+        )
         # A failed attempt whose own occurrence later succeeded on retry is
         # recovered, distinct from recovery by a later occurrence of the task.
         failure.recovered_on_retry = failure.occurrence.status == JobOccurrence.Status.SUCCEEDED

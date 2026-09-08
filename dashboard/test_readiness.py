@@ -41,6 +41,72 @@ class ReadinessBackupStateTests(TestCase):
         ):
             return self.client.get(reverse("ready"))
 
+    def test_malformed_success_record_is_not_read_as_a_success(self):
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(1),
+            completed_at="not-a-timestamp",
+            object_key="postgres/20260907T120000Z.sql.gz",
+        )
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempt_id=attempt_id(1),
+            outcome="success",
+            stage="record",
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["backup"]["state"], "success_malformed")
+
+    def test_success_belonging_to_an_unresolved_attempt_is_not_committed(self):
+        # backup.sh publishes the success detail before committing, and keeps
+        # its in-progress evidence when the commit fails.
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(7),
+            completed_at=iso(timedelta(minutes=2)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+        )
+        write_state(
+            self.directory,
+            "backup-in-progress",
+            attempt_id=attempt_id(7),
+            started_at=iso(timedelta(minutes=3)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            stage="record",
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["backup"]["state"], "uncommitted")
+
+    def test_future_dated_success_is_rejected(self):
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(2),
+            completed_at=iso(-timedelta(hours=3)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+        )
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempt_id=attempt_id(2),
+            outcome="success",
+            stage="record",
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["backup"]["state"], "future_dated")
+
     def test_fresh_success_is_ready_and_reports_safe_detail(self):
         write_state(
             self.directory,
@@ -445,12 +511,56 @@ class OperationsPageSemanticsTests(TestCase):
             occurred_at=now - timedelta(minutes=29),
         )
 
+        # A second scheduled job runs the SAME task for a different series. Its
+        # success must not launder the first job's failure.
+        other_job = ScheduledJob.objects.create(
+            name="EUR_USD pair evidence (sibling series)",
+            task_name=job.task_name,
+            parameters={"instrument": "EUR_USD", "granularity": "H4"},
+            interval_seconds=14_400,
+            next_run_at=now + timedelta(hours=1),
+        )
+        stranded = JobOccurrence.objects.create(
+            idempotency_key="stranded-other-series",
+            scheduled_job=other_job,
+            task_name=other_job.task_name,
+            parameters=other_job.parameters,
+            scheduled_for=now - timedelta(hours=4),
+            available_at=now - timedelta(hours=4),
+            status=JobOccurrence.Status.FAILED,
+            attempts=3,
+            max_attempts=3,
+        )
+        cls.stranded_failure = TaskFailure.objects.create(
+            occurrence=stranded,
+            attempt_number=3,
+            task_name=other_job.task_name,
+            error_code="provider_timeout",
+            category="network",
+            stage="provider_fetch",
+            exception_type="ReadTimeout",
+            summary="ReadTimeout: provider request timed out",
+            terminal=True,
+            occurred_at=now - timedelta(hours=4),
+        )
+
     def failure_row(self, content, failure):
         rows = [
             chunk for chunk in content.split("<tr>") if f"#{failure.occurrence_id}</small>" in chunk
         ]
         self.assertEqual(len(rows), 1, failure.occurrence_id)
         return rows[0]
+
+    def test_a_sibling_jobs_success_does_not_mark_another_series_recovered(self):
+        """Recovery is per scheduled job, not per task name."""
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("operations"))
+        content = response.content.decode()
+
+        row = self.failure_row(content, self.stranded_failure)
+        self.assertIn("TERMINAL", row)
+        self.assertNotIn("RECOVERED", row)
 
     def test_failure_recovered_within_its_own_occurrence_is_labelled_recovered_on_retry(self):
         self.client.force_login(self.user)

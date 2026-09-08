@@ -520,9 +520,9 @@ gzip_pid="$(sed -n 's/^gzip_pid=//p' "$CALLS" | tail -1)"
 if [ -n "$gzip_pid" ] && kill -0 "$gzip_pid" 2>/dev/null; then
   fail "gzip child $gzip_pid survived an interrupted backup"
 fi
-if pkill -f "sleep 30" 2>/dev/null; then
-  fail "pg_dump survived an interrupted backup"
-fi
+# No global pattern kill here: the stub exec'd into sleep, so its own recorded
+# pid IS that process and is asserted above. A pkill -f would reach unrelated
+# processes on the machine.
 
 # -------------------------------------------- interrupt after the commit
 # The attempt record is the single commit; it is written before the success
@@ -848,6 +848,64 @@ assert_line 'category=interrupted' "$STATE/backup-last-failure"
 assert_absent "$STATE/backup-in-progress"
 assert_lock_free
 assert_empty_dir "$WORK"
+
+# ------------------------------ TERM-resistant dump is killed, not waited on
+# A dump that ignores TERM must not hold cleanup open for ever: termination
+# escalates to KILL after a bounded grace period.
+prepare_case interrupt-term-resistant
+write_stub pg_dump <<EOF
+#!/bin/bash
+echo "pg_dump \$*" >>"\$CALLS"
+printf -- '--\n-- PostgreSQL database dump\n--\n'
+trap '' TERM
+echo "pg_dump_pid=\$\$" >>"\$CALLS"
+echo started >"$CASE_ROOT/dump-started"
+while true; do sleep 0.2; done
+EOF
+env -i PATH="$MOCK_BIN:$toolbox" HOME="$CASE_ROOT" TMPDIR="$WORK" CALLS="$CALLS" FAKE_BUCKET="$FAKE_BUCKET" \
+  POSTGRES_HOST=db POSTGRES_USER=app POSTGRES_DB=app POSTGRES_PASSWORD=not-a-real-secret \
+  BACKUP_BUCKET=fake-bucket AWS_REGION=us-east-1 BACKUP_STATE_DIR="$STATE" BACKUP_WORK_DIR="$WORK" \
+  BACKUP_KILL_AFTER_SECONDS=2 \
+  /bin/sh "$backup" once >"$CASE_ROOT/output" 2>"$CASE_ROOT/error" &
+resistant_pid=$!
+for _ in $(seq 1 100); do [ -f "$CASE_ROOT/dump-started" ] && break; sleep 0.05; done
+assert_present "$CASE_ROOT/dump-started"
+stubborn_pid="$(sed -n 's/^pg_dump_pid=//p' "$CALLS" | tail -1)"
+[ -n "$stubborn_pid" ] || fail "could not read the TERM-resistant pid"
+started_at="$(date +%s)"
+kill -TERM "$resistant_pid"
+set +e
+wait "$resistant_pid"
+resistant_status=$?
+set -e
+elapsed=$(( $(date +%s) - started_at ))
+[ "$resistant_status" -eq 143 ] || fail "interrupt should exit 143, got $resistant_status"
+[ "$elapsed" -lt 30 ] || fail "cleanup was not bounded: took ${elapsed}s"
+for _ in $(seq 1 100); do kill -0 "$stubborn_pid" 2>/dev/null || break; sleep 0.05; done
+kill -0 "$stubborn_pid" 2>/dev/null && fail "the TERM-resistant dump ($stubborn_pid) survived"
+assert_line 'category=interrupted' "$STATE/backup-last-failure"
+assert_lock_free
+assert_empty_dir "$WORK"
+
+# ----------------------------- a broken lock is an error, not a quiet skip
+prepare_case lock-unusable
+write_stub flock <<'EOF'
+#!/bin/bash
+# Neither acquisition nor contention: an operational failure.
+echo "flock: cannot open lock file" >&2
+exit 64
+EOF
+run_backup_status once
+if "$MOCK_BIN/flock" --help 2>&1 | grep -q -- '--conflict-exit-code'; then
+  [ "$captured_status" -eq 2 ] \
+    || fail "an unusable lock must abort with 2, got $captured_status"
+  assert_contains 'could not be evaluated' "$CASE_ROOT/output"
+else
+  # Without flock -E (busybox) contention and error are indistinguishable, and
+  # the documented reading is contention.
+  [ "$captured_status" -eq 3 ] || fail "expected the documented skip, got $captured_status"
+fi
+assert_not_contains 'pg_dump' "$CALLS"
 
 # -------------------------------------------------------------- restore-check
 prepare_case restore-check-refusals

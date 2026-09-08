@@ -9,11 +9,13 @@ opposite direction: legitimate provider behaviour must still be accepted.
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from importlib import import_module
 
 from django.db import DatabaseError, connection, transaction
 from django.test import TransactionTestCase
 from django.utils import timezone
 
+from forecasts.models import EvidenceSnapshot
 from market.models import (
     Candle,
     CandleObservation,
@@ -85,12 +87,14 @@ class ObservationLineageEnforcementTests(TransactionTestCase):
             run.refresh_from_db()
         return run
 
-    def make_candle(self, timestamp, granularity, *, legacy=False, run=None, **changes):
+    def make_candle(
+        self, timestamp, granularity, *, legacy=False, run=None, content_sha256=None, **changes
+    ):
         """Create one live candle row directly, bypassing ingestion validation."""
         item = candle(timestamp, **changes)
         end = live_candle_completion(timestamp, granularity)
         run = run or self.make_run(granularity, timestamp, end)
-        digest = candle_content_sha256(self.instrument.code, granularity, item)
+        digest = content_sha256 or candle_content_sha256(self.instrument.code, granularity, item)
         row = Candle.objects.create(
             instrument=self.instrument,
             ingestion_run=run,
@@ -307,6 +311,33 @@ class ObservationLineageEnforcementTests(TransactionTestCase):
             )
         )
 
+    # ---- frozen candle content ---------------------------------------------
+
+    def test_candle_carrying_a_hash_of_other_content_cannot_be_attested(self):
+        """The candle's own hash must recompute, not merely be echoed back."""
+        other = candle(MONDAY_HOUR, volume=999)
+        forged = candle_content_sha256(self.instrument.code, "H1", other)
+        row, run, item = self.make_candle(MONDAY_HOUR, "H1", content_sha256=forged)
+
+        # The observation attests the digest the candle advertises, and its own
+        # content hashes to it, so only recomputing the candle catches this.
+        self.assert_insert_rejected(
+            self.observation_values(row, run, other, content_sha256=forged, volume=other.volume)
+        )
+
+    def test_root_observation_must_attest_the_candle_it_froze(self):
+        row, run, item = self.make_candle(MONDAY_HOUR, "H1")
+        divergent = candle(MONDAY_HOUR, volume=item.volume + 1)
+
+        self.assert_insert_rejected(
+            self.observation_values(row, run, divergent, volume=divergent.volume)
+        )
+
+    def test_root_observation_matching_its_candle_is_accepted(self):
+        row, run, item = self.make_candle(MONDAY_HOUR, "H1")
+
+        self.assert_insert_accepted(self.observation_values(row, run, item))
+
     # ---- differing_fields --------------------------------------------------
 
     def test_initial_observation_with_null_differing_fields_is_rejected(self):
@@ -470,6 +501,11 @@ class SqlPythonParityTests(TransactionTestCase):
         )
         timestamps = (
             MONDAY_HOUR,
+            # Whole, non-zero seconds: date_part('microseconds') is the seconds
+            # field times a million, so this is where a naive zero-test makes
+            # SQL emit '.000000' that Python's isoformat omits.
+            MONDAY_HOUR + timedelta(seconds=5),
+            MONDAY_HOUR + timedelta(seconds=59),
             MONDAY_HOUR + timedelta(microseconds=1),
             MONDAY_HOUR + timedelta(microseconds=100000),
             MONDAY_HOUR + timedelta(microseconds=999999),
@@ -551,3 +587,139 @@ class SqlPythonParityTests(TransactionTestCase):
         )
         self.assertEqual(hijacked, candle_content_sha256("USD_CAD", "H1", item))
         self.assertTrue(aligned)
+
+
+class HistoricalKindEvaluationTests(TransactionTestCase):
+    """Migration 0029 must judge an old row by the world it was written in.
+
+    A ``revision`` recorded while nothing cited the candle is still a revision
+    after a recommendation cites that candle. Re-adjudicating it against
+    today's references would rewrite historical meaning and, worse, make the
+    migration refuse a ledger that was always correct.
+    """
+
+    def setUp(self):
+        self.instrument, _ = Instrument.objects.get_or_create(
+            code="USD_CAD",
+            defaults={"base_currency": "USD", "quote_currency": "CAD", "display_order": 1},
+        )
+        self.source, _ = SourceRegistry.objects.get_or_create(
+            name="OANDA v20",
+            defaults={
+                "tier": "established",
+                "base_url": "https://developer.oanda.com",
+                "acquisition_method": "v20 REST API",
+                "retention_policy": "test only",
+            },
+        )
+
+    def ingest(self, items, batch):
+        return store_ingestion(
+            self.source,
+            self.instrument,
+            "H1",
+            items[0].timestamp,
+            live_candle_completion(items[-1].timestamp, "H1"),
+            items,
+            {"batch": batch, "requests": []},
+        )
+
+    def sql(self, statement, params=()):
+        with connection.cursor() as cursor:
+            cursor.execute(statement, params)
+            return cursor.fetchone()[0]
+
+    def test_a_later_reference_does_not_retroactively_recast_an_old_revision(self):
+        from market.models import TechnicalSnapshot
+
+        self.ingest([candle(MONDAY_HOUR)], "first")
+        self.ingest([candle(MONDAY_HOUR, volume=250)], "revised")
+        row = Candle.objects.get(granularity="H1")
+        revision = row.authoritative_observation()
+        self.assertEqual(revision.kind, CandleObservation.Kind.REVISION)
+
+        # Frozen evidence starts citing the candle only now, after the revision
+        # was recorded.
+        snapshot = TechnicalSnapshot.objects.filter(instrument=self.instrument).first()
+        EvidenceSnapshot.objects.create(
+            instrument=self.instrument,
+            anchor_candle=row,
+            technical_snapshot=snapshot,
+            market_data_cutoff=revision.observed_at + timedelta(hours=1),
+            captured_at=revision.observed_at + timedelta(hours=1),
+            payload={"test": "later-reference"},
+            sha256="e" * 64,
+        )
+
+        self.assertTrue(
+            self.sql("SELECT market_candleobservation_candle_is_referenced(%s)", [row.pk]),
+            "the candle is referenced today",
+        )
+        self.assertFalse(
+            self.sql(
+                "SELECT market_candleobservation_candle_referenced_as_of(%s, %s)",
+                [row.pk, revision.observed_at],
+            ),
+            "but nothing cited it when the revision was recorded",
+        )
+
+        # Judging the same row against today's references -- the defect this
+        # test exists for -- would have condemned it.
+        self.assertEqual(
+            self.sql(
+                """
+                SELECT count(*) FROM market_candleobservation observation
+                 JOIN market_candle candle ON candle.id = observation.candle_id
+                 WHERE observation.kind IN ('revision', 'conflict')
+                   AND observation.kind <> CASE
+                         WHEN public.market_candleobservation_differing_fields(
+                                  observation, candle.complete, candle.volume,
+                                  candle.bid_open, candle.bid_high, candle.bid_low,
+                                  candle.bid_close, candle.ask_open, candle.ask_high,
+                                  candle.ask_low, candle.ask_close) <> '[]'
+                              AND public.market_candleobservation_candle_is_referenced(
+                                      observation.candle_id)
+                         THEN 'conflict' ELSE 'revision' END
+                """
+            ),
+            1,
+            "a present-tense reading of this ledger flags the revision",
+        )
+
+        # The migration's own post-renumber validation must accept the ledger.
+        lineage = import_module("market.migrations.0029_candle_observation_lineage")
+        for statement, message in lineage.POST_RENUMBER_CHECKS:
+            self.assertEqual(self.sql(statement), 0, f"0029 would have refused: {message}")
+
+    def test_a_reference_predating_the_observation_still_requires_a_conflict(self):
+        from market.models import TechnicalSnapshot
+
+        self.ingest([candle(MONDAY_HOUR)], "first")
+        row = Candle.objects.get(granularity="H1")
+        initial = row.authoritative_observation()
+        snapshot = TechnicalSnapshot.objects.filter(instrument=self.instrument).first()
+        EvidenceSnapshot.objects.create(
+            instrument=self.instrument,
+            anchor_candle=row,
+            technical_snapshot=snapshot,
+            market_data_cutoff=initial.observed_at,
+            captured_at=initial.observed_at,
+            payload={"test": "earlier-reference"},
+            sha256="f" * 64,
+        )
+
+        # The candle was already cited, so a departing view is a conflict, and
+        # the as-of function agrees with the present-tense one.
+        self.ingest([candle(MONDAY_HOUR, volume=250)], "revised")
+        head = Candle.objects.get(granularity="H1").authoritative_observation()
+
+        self.assertEqual(head.kind, CandleObservation.Kind.CONFLICT)
+        self.assertTrue(
+            self.sql(
+                "SELECT market_candleobservation_candle_referenced_as_of(%s, %s)",
+                [row.pk, head.observed_at],
+            )
+        )
+        lineage = import_module("market.migrations.0029_candle_observation_lineage")
+        for statement, message in lineage.POST_RENUMBER_CHECKS:
+            self.assertEqual(self.sql(statement), 0, f"0029 would have refused: {message}")

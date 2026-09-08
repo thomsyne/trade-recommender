@@ -53,6 +53,8 @@ STATE_DIR="${BACKUP_STATE_DIR:-/var/lib/trade-recommender}"
 WORK_ROOT="${BACKUP_WORK_DIR:-${TMPDIR:-/tmp}}"
 MIN_BYTES="${BACKUP_MIN_BYTES:-1024}"
 INTERVAL="${BACKUP_INTERVAL_SECONDS:-21600}"
+# How long a dump may ignore TERM before it is killed outright.
+KILL_AFTER_SECONDS="${BACKUP_KILL_AFTER_SECONDS:-10}"
 LOCK_FILE="${STATE_DIR}/.backup-lock"
 IN_PROGRESS_FILE="${STATE_DIR}/backup-in-progress"
 ATTEMPT_FILE="${STATE_DIR}/backup-last-attempt"
@@ -68,6 +70,8 @@ lock_fd=9
 lock_held=0
 work_dir=""
 supervisor_pid=""
+group=""
+watchdog_pid=""
 attempt_open=0
 attempt_id=""
 attempted_at=""
@@ -77,6 +81,7 @@ stage="idle"
 launching=0
 pending_signal=""
 self_group=""
+flock_conflict_code=""
 fail_category=""
 fail_status=0
 
@@ -135,22 +140,51 @@ preflight() {
   fi
   rm -f "${STATE_DIR}/.backup-preflight" 2>/dev/null || true
   self_group="$(process_group $$)"
+  detect_flock_conflict_code
   return 0
 }
 
-acquire_lock() {
-  # 0 acquired, 1 another attempt holds it. Every error that is not contention
-  # was already ruled out by preflight(), which proved flock(1) exists and the
-  # state directory is writable, so a failure here is contention.
-  if ! eval "exec ${lock_fd}>>\"\$LOCK_FILE\"" 2>/dev/null; then
-    return 1
+detect_flock_conflict_code() {
+  # util-linux flock can report contention with its own exit status (-E), which
+  # is what separates "another backup holds the lock" from "the lock could not
+  # be evaluated at all". Support is read from the implementation's own help
+  # rather than by trying the flag, because a flock that silently ignores an
+  # unknown option would otherwise look like it honoured it. busybox flock has
+  # no -E, so the code stays empty and contention remains the documented
+  # reading there.
+  if flock --help 2>&1 | grep -q -- '--conflict-exit-code'; then
+    flock_conflict_code=97
+  else
+    flock_conflict_code=""
   fi
-  if flock -n "$lock_fd" 2>/dev/null; then
+}
+
+acquire_lock() {
+  # 0 acquired, 3 another attempt holds the lock, 2 the lock could not be
+  # evaluated. Reporting an operational failure as contention would let a
+  # broken lock look like a healthy skip forever, so the two are kept apart:
+  # a descriptor that will not open is an error, and where flock supports -E
+  # only its conflict status counts as contention.
+  if ! eval "exec ${lock_fd}>>\"\$LOCK_FILE\"" 2>/dev/null; then
+    log "cannot open the attempt lock file ${LOCK_FILE}"
+    return 2
+  fi
+  if [ -n "$flock_conflict_code" ]; then
+    flock -n -E "$flock_conflict_code" "$lock_fd" 2>/dev/null
+  else
+    flock -n "$lock_fd" 2>/dev/null
+  fi
+  lock_status=$?
+  if [ "$lock_status" -eq 0 ]; then
     lock_held=1
     return 0
   fi
   eval "exec ${lock_fd}>&-" 2>/dev/null || true
-  return 1
+  if [ -n "$flock_conflict_code" ] && [ "$lock_status" -ne "$flock_conflict_code" ]; then
+    log "attempt lock could not be evaluated (flock exited ${lock_status})"
+    return 2
+  fi
+  return 3
 }
 
 release_lock() {
@@ -320,21 +354,65 @@ supervisor_group() {
   printf '%s' "$pgid"
 }
 
+signal_pipeline() {
+  # signal_pipeline SIGNAL -- to the process group when one is established,
+  # which reaches pg_dump, gzip and anything they spawned.
+  if [ -n "$group" ]; then
+    kill "-$1" "-${group}" 2>/dev/null || true
+    return 0
+  fi
+  # No process group (a host without setsid): the supervisor's handler would
+  # normally stop its children, but an escalation to KILL leaves it no chance
+  # to run, so the children are signalled directly through the pids it
+  # recorded. Recorded pids, never a pattern match: nothing outside this
+  # attempt can be signalled by accident.
+  # Children before the supervisor: reaping the supervisor first lets the
+  # caller race ahead and clear the work directory, and the recorded pids would
+  # be gone before they could be signalled. Stopping the children also lets a
+  # healthy supervisor finish its own cleanup on its own.
+  for pid_file in "${work_dir}/dump.pid" "${work_dir}/gzip.pid"; do
+    [ -f "$pid_file" ] || continue
+    child="$(cat "$pid_file" 2>/dev/null)"
+    case "$child" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    kill "-$1" "$child" 2>/dev/null || true
+  done
+  kill "-$1" "$supervisor_pid" 2>/dev/null || true
+}
+
+escalate_after_grace() {
+  # Watchdog: a pg_dump that blocks or ignores TERM must not hold cleanup open
+  # for ever, so termination is bounded. Cancelled as soon as TERM works.
+  sleep "$KILL_AFTER_SECONDS"
+  log "dump pipeline ignored TERM for ${KILL_AFTER_SECONDS}s; escalating to KILL"
+  signal_pipeline KILL
+}
+
 terminate_pipeline() {
   # Terminate the whole dump pipeline and reap it. The process group carries
-  # pg_dump, gzip and anything they spawned; the supervisor PID is the fallback
-  # when the group cannot be established, and its own handler kills its children.
+  # pg_dump, gzip and anything they spawned.
   [ -n "$supervisor_pid" ] || return 0
-  if group="$(supervisor_group)"; then
-    kill -TERM "-${group}" 2>/dev/null || true
-  else
-    kill -TERM "$supervisor_pid" 2>/dev/null || true
+  if ! group="$(supervisor_group)"; then
+    group=""
   fi
+  signal_pipeline TERM
+  # The watchdog must not inherit the lock descriptor, or a killed backup would
+  # keep the attempt lock held until the grace period elapsed.
+  eval "escalate_after_grace ${lock_fd}>&- &"
+  watchdog_pid=$!
   wait "$supervisor_pid" 2>/dev/null || true
-  if [ -n "${group:-}" ]; then
+  # KILL, not TERM: this runs inside the signal handler, which has already set
+  # INT/TERM to ignore, and a child forked from there inherits that disposition
+  # -- a TERM would be ignored and cancelling the watchdog would block on it
+  # for the whole grace period.
+  kill -KILL "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  if [ -n "$group" ]; then
     kill -KILL "-${group}" 2>/dev/null || true
   fi
   supervisor_pid=""
+  group=""
 }
 
 on_signal() {
@@ -584,9 +662,15 @@ backup_once() {
     log "backup aborted before any work: preconditions are not met"
     return "$EXIT_PRECONDITION"
   fi
-  if ! acquire_lock; then
+  acquire_lock
+  lock_outcome=$?
+  if [ "$lock_outcome" -eq "$EXIT_CONTENDED" ]; then
     log "another backup holds the attempt lock; skipping this attempt"
     return "$EXIT_CONTENDED"
+  fi
+  if [ "$lock_outcome" -ne 0 ]; then
+    log "backup aborted: the attempt lock is not usable"
+    return "$EXIT_PRECONDITION"
   fi
   attempted_at="$(date -u +%FT%TZ)"
   if ! attempt_id="$(new_attempt_id)"; then
