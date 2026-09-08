@@ -95,7 +95,7 @@ class Phase2Tests(TestCase):
         Instrument.objects.filter(code="USD_JPY").update(ingestion_enabled=False)
         job = ScheduledJob.objects.get(name="OANDA USD_JPY H1")
         original = job.next_run_at
-        job.parameters = {"instrument": "EUR_USD", "granularity": "D", "days": 999}
+        job.parameters = {"instrument": "UNKNOWN", "granularity": "D", "days": 999}
         job.save()
         call_command("seed_canonical", verbosity=0)
         job.refresh_from_db()
@@ -246,7 +246,7 @@ class Phase2Tests(TestCase):
         output = StringIO()
         call_command("report_fx_onboarding", stdout=output)
         self.assertEqual(
-            {row["state"] for row in json.loads(output.getvalue())["rows"]}, {"not yet ingested"}
+            {row["state"] for row in json.loads(output.getvalue())["rows"]}, {"not_yet_ingested"}
         )
         Instrument.objects.filter(code="USD_JPY").update(active=True)
         with self.assertRaises(CommandError):
@@ -300,7 +300,7 @@ class Phase2Tests(TestCase):
             if row["instrument"] == "USD_JPY"
         }
         self.assertEqual(
-            states, {"H1": "failed", "H4": "quarantined", "D": "disabled", "W": "not yet ingested"}
+            states, {"H1": "failed", "H4": "quarantined", "D": "disabled", "W": "not_yet_ingested"}
         )
 
 

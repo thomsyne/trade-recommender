@@ -1,5 +1,7 @@
 from django.core.management.base import BaseCommand
 
+from market.live_acquisition import LIVE_INTERVALS
+from market.models import Instrument
 from operations.tasks import ingest_oanda
 
 
@@ -7,8 +9,8 @@ class Command(BaseCommand):
     help = "Fetch and validate one OANDA candle range"
 
     def add_arguments(self, parser):
-        parser.add_argument("instrument", choices=("USD_CAD", "GBP_USD", "EUR_GBP", "EUR_USD"))
-        parser.add_argument("granularity", choices=("D", "H4", "H1"))
+        parser.add_argument("instrument", choices=Instrument.Code.values)
+        parser.add_argument("granularity", choices=tuple(LIVE_INTERVALS))
         parser.add_argument("--from", dest="from_time")
         parser.add_argument("--to", dest="to_time")
         parser.add_argument("--days", type=int)

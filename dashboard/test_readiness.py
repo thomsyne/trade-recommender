@@ -742,6 +742,51 @@ class OperationsPageSemanticsTests(TestCase):
         terminal = TaskFailure.objects.get(occurrence__idempotency_key="failed-batch")
         self.assertIn("RECOVERED LATER", self.failure_row(content, terminal))
 
+    def test_oanda_collection_dom_distinguishes_policy_configuration_and_capability(self):
+        from market.models import Instrument, SourceRegistry
+
+        self.client.force_login(self.user)
+        for code in ("EUR_USD", "USD_JPY"):
+            instrument = Instrument.objects.get(code=code)
+            job = ScheduledJob.objects.get(name=f"OANDA {code} H1")
+            for ingestion, source_enabled, token, enabled, state, text in (
+                (False, True, "", False, "disabled_intentional", "Live collection is disabled"),
+                (True, True, "", False, "disabled_configuration", "OANDA_TOKEN is not configured"),
+                (
+                    True,
+                    False,
+                    "mock",
+                    False,
+                    "disabled_capability",
+                    "OANDA source is unavailable or disabled",
+                ),
+                (
+                    True,
+                    True,
+                    "mock",
+                    False,
+                    "disabled_intentional",
+                    "Disabled in the schedule registry",
+                ),
+                (True, True, "mock", True, "scheduled", "Enabled and scheduled"),
+            ):
+                with self.subTest(code=code, state=state, ingestion=ingestion):
+                    Instrument.objects.filter(pk=instrument.pk).update(ingestion_enabled=ingestion)
+                    SourceRegistry.objects.filter(name="OANDA v20").update(enabled=source_enabled)
+                    job.enabled = enabled
+                    job.next_run_at = timezone.now() + timedelta(hours=1)
+                    job.save()
+                    with override_settings(OANDA_TOKEN=token):
+                        response = self.client.get(reverse("operations"))
+                    projected = next(
+                        item for item in response.context["job_states"] if item.job_id == job.pk
+                    )
+                    self.assertEqual(projected.state, state)
+                    self.assertIn(text, projected.reason)
+                    self.assertContains(response, text)
+                    self.assertNotContains(response, "outside the prospective pair scope")
+                    self.assertNotContains(response, "WAITING FOR CREDENTIAL")
+
     def test_operations_page_reports_honest_states_and_accessible_semantics(self):
         self.client.force_login(self.user)
 
@@ -755,7 +800,10 @@ class OperationsPageSemanticsTests(TestCase):
         self.assertContains(response, "DISABLED — CONFIGURATION")
         self.assertContains(response, "Postmortem interpretation is intentionally disabled")
         self.assertContains(response, "unavailable under the current subscription")
-        self.assertContains(response, "outside the prospective pair scope")
+        # All canonical seed rows permit ingestion; absent token is configuration,
+        # even for inactive decision pairs. Policy disable is exercised separately.
+        self.assertNotIn("Live collection is disabled for", content)
+        self.assertNotIn("outside the prospective pair scope", content)
         self.assertContains(response, "OANDA_TOKEN is not configured")
         self.assertNotIn("stuck", content.lower())
         self.assertContains(response, "RECOVERED LATER")

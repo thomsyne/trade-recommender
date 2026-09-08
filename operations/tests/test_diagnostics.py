@@ -321,6 +321,9 @@ class JobStateProjectionTests(TestCase):
         self.assertIn("Overdue", state.reason)
 
     def test_oanda_disabled_reasons_follow_collection_eligibility_for_all_onboarding_pairs(self):
+        from market.models import SourceRegistry
+
+        SourceRegistry.objects.create(name="OANDA v20", enabled=True)
         codes = (
             "USD_JPY",
             "AUD_USD",

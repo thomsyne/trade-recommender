@@ -2,10 +2,12 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.management import call_command
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
+from market.live_acquisition import LIVE_INTERVALS
+from market.live_schedules import duplicate_schedule_errors
 from market.models import Instrument, SourceRegistry
 from operations.models import ScheduledJob
 
@@ -42,6 +44,9 @@ class Command(BaseCommand):
         if connection.vendor == "postgresql":
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_xact_lock(724102)")
+        duplicate_errors = duplicate_schedule_errors()
+        if duplicate_errors:
+            raise CommandError("; ".join(duplicate_errors))
         source, _ = SourceRegistry.objects.get_or_create(
             name="OANDA v20",
             defaults={
@@ -83,19 +88,14 @@ class Command(BaseCommand):
                     "active": code in PROSPECTIVE_INSTRUMENT_CODES,
                 },
             )
-            for granularity, interval in (
-                ("H1", 3_600),
-                ("H4", 14_400),
-                ("D", 86_400),
-                ("W", 604_800),
-            ):
+            for granularity, interval in LIVE_INTERVALS.items():
                 _upsert_job(
                     name=f"OANDA {code} {granularity}",
                     task_name="market.ingest_oanda",
                     parameters={"instrument": code, "granularity": granularity},
                     interval=interval,
                     enabled=bool(source.enabled and instrument.ingestion_enabled),
-                    stagger_slot=(order - 1) * 4 + ("H1", "H4", "D", "W").index(granularity),
+                    stagger_slot=(order - 1) * 4 + tuple(LIVE_INTERVALS).index(granularity),
                 )
 
         _upsert_job(
@@ -146,5 +146,10 @@ def _upsert_job(*, name, task_name, parameters, interval, enabled, stagger_slot=
             "schedule_type": ScheduledJob.ScheduleType.INTERVAL,
             "timezone_name": "UTC",
             "local_time": None,
+            **(
+                {"missed_run_policy": ScheduledJob.MissedRunPolicy.LATEST}
+                if stagger_slot is not None
+                else {}
+            ),
         },
     )

@@ -40,7 +40,8 @@ batches still enumerate exactly the four active pairs. Direct decision creation 
 inactive instruments. Ingestion invokes resolution, paper and review work only for an
 active instrument, rechecked after the fetch. No prompts, recommendation schedules,
 model identity, mechanical strategies, portfolio policy or paper policy are expanded.
-Provider/model spend is unchanged by this phase: no new model calls are introduced.
+Model-provider call volume is unchanged: no new model calls are introduced.
+OANDA candle request volume increases as estimated below.
 
 The frozen six-pair failed-break historical universe, acquisition manifests, terminal
 binders and archived evidence remain unchanged. This Boolean does not govern historical
@@ -56,13 +57,13 @@ behavior, setup detection and abstention are future work; no such strategy exist
 There are 48 canonical candle jobs: 24 new identities relative to the old six-row
 registry, and 32 newly enabled jobs relative to its four enabled pairs. Each enabled
 pair polls 24 + 6 + 1 + 1/7 = 31.143 times per calendar day, including weekends.
-Twelve pairs yield about 373.7 runs/day, versus 124.6 before: +249.1/day. The existing
+Twelve pairs yield approximately 373.714 runs/day, versus 124.6 before: +249.143/day. The existing
 hourly terms job stays 24 runs/day (two HTTP requests/run), with a larger instrument
 payload. Newly created jobs use slot `(display_order-1)*4 + granularity_index`, with
 initial delay `60*(slot+1) + 3600*floor((interval-3600)*(slot+1)/(49*3600))` seconds.
 Distinct minute phases within the hour prevent cross-granularity initial collisions. Thus all new jobs are
-spread within one interval; reseeding does not move existing timestamps. Existing
-missed-run policies remain operationally authoritative; new jobs use latest-only.
+spread within one interval; reseeding does not move existing timestamps. Canonical live jobs require latest-only recovery. Reseeding repairs policy drift
+to latest without moving existing deadlines; the read-only report rejects drift.
 The scheduler retains one latest occurrence per overdue job and unique occurrence keys.
 After downtime, up to 48 candle jobs can still be immediately due; staggering does not
 promise a burst-free recovery. Retries use the existing bounded attempts/backoff, and
@@ -77,7 +78,7 @@ budget repeated payloads, not just new candles. Eight pairs add roughly 69,384
 returned candle records/calendar day at calendar upper bounds, or roughly 50,000
 with ordinary FX closures. Twelve pairs total roughly 104,076 upper-bound records/day.
 This is approximately 250 extra candle HTTP calls/day before retries. Terms add no
-new call cadence. Initial 32-poll onboarding transfers at most about 4,920 candle
+new call cadence. Initial 32-poll onboarding transfers approximately 4,920 candle
 records across eight pairs, distributed over their initial stagger windows.
 
 Ordinary new unique intervals across eight pairs grow by roughly 1,248/week
@@ -92,6 +93,8 @@ run/manifest/audit/occurrence group, operational metadata adds 15–60 MiB/month
 Technicals, revisions, WAL, backups, indexes and table bloat are additional. These are
 planning assumptions, not measured storage guarantees. Repeated payload parsing and
 snapshot calculation can dominate CPU/memory despite modest final row counts.
+Technical-snapshot computation currently may load the full stored series, so its
+cost and peak process RSS must be measured as accumulated history grows.
 
 At a measured 1–10 seconds/run, added worker duty is 4–42 minutes/day, potentially
 higher on the small instance or during provider latency. The largest default H1 page
@@ -110,7 +113,7 @@ availability and forbidden artifact counts. It never prints raw responses or tok
 Registry/schedule or ingestion-only integrity violations exit nonzero. Missing/stale
 collection is reported per series without pretending overall data readiness.
 
-States: `not yet ingested` means no live candle; `fresh` means the existing FX calendar
+States: `not_yet_ingested` means no live candle; `fresh` means the existing FX calendar
 and poll grace are satisfied; `stale` means a completed interval is overdue;
 `failed` reflects a failed live run or latest failed job; `quarantined` reflects the
 latest quarantined run; `disabled` takes priority when collection is disabled. Separate
@@ -167,3 +170,58 @@ reset all jobs. Recheck the report and previous waves before any restart.
 Runtime PostgreSQL superuser and migration 0027 fresh-test bootstrap are accepted/deferred
 Phase 1 exceptions. This phase does not change either. No production schedules, model
 strategies, notifications or trades have been activated by this implementation.
+
+
+## Independent-review remediation: window, coverage and schedule integrity
+
+Live defaults and explicit `from` values are floored deterministically **before** the
+HTTP request and persistence to the existing registered interval grid. H1 is hourly
+UTC; H4 uses the exact UTC instants admitted by the authoritative New York session
+grid (including the existing DST shift). D uses Sunday–Thursday 17:00 New York;
+W uses Friday 17:00 New York. `to` remains the caller/current aware instant; only
+candles completing by that end are admitted. Leading out-of-window candles are
+filtered before storage; migration0029's lineage constraints are unchanged. Later
+pages start at the last accepted candle with `includeFirst=false`; an empty page
+has no accepted boundary and its next request uses `includeFirst=true`. Neither
+path skips the first unobserved boundary. Canonicalizing a start may add up to one
+interval to the approximate default-window payload estimates above.
+
+The report separately exposes registry eligibility, effective collection availability,
+latest-candle freshness, requested-window coverage, technical-snapshot availability,
+and forbidden artifacts. Availability requires the source, token/configuration and
+canonical schedule, as well as instrument eligibility. Deliberately disabled schedules
+remain disabled, with a distinct reason; missing/duplicate/drifted schedules fail
+integrity. A recent candle or a technical snapshot is not coverage evidence.
+
+Coverage compares the latest successful OANDA run's attested window with registered
+complete intervals, observed source keys available by that run's finish, and that
+run's returned count. Previously stored overlap cannot conceal a partial response.
+Output gives expected/observed/returned/missing counts and up to five missing keys.
+The calendar permits registered weekends and New York DST; no holiday closure is
+invented. Expansion is bounded to100,000 expected intervals; larger requests report
+an integrity violation rather than doing unbounded work. It does not change live
+acquisition defaults or frozen historical acquisition contracts.
+
+`state` distinguishes `disabled`, `unavailable`, `not_yet_ingested`, `partial`, `fresh`,
+`stale`, `failed`, `quarantined`, `revised`, `conflicted`, and `integrity_violation`.
+Freshness and coverage remain separate fields even when a higher-priority state is
+shown. Failures/quarantine and revisions/conflicts have separate counts. Missing
+technical snapshots are explicitly false, never inferred from freshness or coverage.
+Integrity violations, incomplete requested coverage, forbidden artifacts, duplicate
+semantic jobs, bad intervals/parameters/tasks, non-latest recovery, unavailable-but-
+enabled schedules, and simultaneous enabled deadlines return nonzero. Intentionally
+disabled schedules and missing credentials alone are operational states, not evidence
+corruption. Do not treat exit0 as wave acceptance; inspect every series and gate.
+
+The schedule identity is `(market.ingest_oanda, canonical instrument, granularity)`,
+not its label. Both enabled and disabled aliases are rejected. Reseeding refuses
+ambiguous semantic duplicates transactionally and leaves all rows unchanged; an
+operator must authorize correction, preserving occurrence/evidence history. Ordinary
+unambiguous canonical metadata/policy repairs remain idempotent and preserve deadlines.
+The report never repairs rows. It diagnoses exact deadline collisions without inventing
+an initial phase anchor for pre-existing schedules or silently resetting their cadence.
+
+The direct `ingest_oanda` command derives its twelve codes and exactly H1/H4/D/W from
+the domain definitions. It still goes through the authoritative task eligibility and
+isolation boundary. These documentation commands confer no production access or
+activation permission.

@@ -106,6 +106,10 @@ class OandaClient:
         if start >= end:
             raise ValueError("start must be before end")
 
+        from market.live_acquisition import canonical_live_start
+        from market.services import live_candle_completion
+
+        start = canonical_live_start(start, granularity)
         step = {
             "W": timedelta(weeks=1),
             "H1": timedelta(hours=1),
@@ -119,6 +123,8 @@ class OandaClient:
         first_request = True
         while cursor < end:
             window_end = min(cursor + window, end)
+            if window_end < end:
+                window_end = canonical_live_start(window_end, granularity)
             params = {
                 "price": "BA",
                 "granularity": granularity,
@@ -137,6 +143,7 @@ class OandaClient:
                 {
                     "url": str(response.request.url),
                     "status": response.status_code,
+                    "includeFirst": first_request,
                     "retrieved_at": _iso(datetime.now(UTC)),
                     "provider_request_id": response.headers.get("RequestID", ""),
                 }
@@ -155,9 +162,25 @@ class OandaClient:
                 parsed = [_parse_live_candle(item) for item in payload["candles"]]
             except (KeyError, TypeError, ValueError, ArithmeticError):
                 raise OandaError("OANDA live candle response is malformed") from None
-            candles.extend(item for item in parsed if item.complete)
-            cursor = window_end
-            first_request = False
+            accepted = [
+                item
+                for item in parsed
+                if item.complete
+                and start <= item.timestamp < end
+                and live_candle_completion(item.timestamp, granularity) <= min(window_end, end)
+                and (item.timestamp >= cursor if first_request else item.timestamp > cursor)
+            ]
+            candles.extend(accepted)
+            if window_end == end:
+                break
+            # Re-request the last accepted interval with includeFirst=false. A
+            # page's exclusive `to` is not a candle already received.
+            if accepted and accepted[-1].timestamp > cursor:
+                cursor = accepted[-1].timestamp
+                first_request = False
+            else:
+                cursor = window_end
+                first_request = True
         manifest = {
             "instrument": instrument,
             "granularity": granularity,
@@ -168,7 +191,7 @@ class OandaClient:
             "alignmentTimezone": "America/New_York",
             "dailyAlignment": 17,
             "weeklyAlignment": "Friday",
-            "includeFirstAfterFirstPage": False,
+            "includeFirstByPage": [request["includeFirst"] for request in requests],
             "requests": requests,
         }
         return candles, manifest

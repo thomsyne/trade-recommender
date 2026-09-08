@@ -68,7 +68,7 @@ class OandaClientTests(SimpleTestCase):
         self.assertEqual(manifest["price"], "BA")
         self.assertFalse(manifest["smooth"])
 
-    def test_later_pagination_windows_exclude_the_shared_boundary(self):
+    def test_empty_pagination_windows_do_not_skip_an_unobserved_boundary(self):
         include_first_values = []
 
         def handler(request):
@@ -77,9 +77,10 @@ class OandaClientTests(SimpleTestCase):
 
         client = OandaClient("test-token", transport=httpx.MockTransport(handler))
         start = datetime(2000, 1, 1, tzinfo=UTC)
-        client.fetch_candles("USD_CAD", "D", start, start + timedelta(days=5001))
+        _, manifest = client.fetch_candles("USD_CAD", "D", start, start + timedelta(days=5001))
 
-        self.assertEqual(include_first_values, ["true", "false"])
+        self.assertEqual(include_first_values, ["true", "true"])
+        self.assertEqual(manifest["includeFirstByPage"], [True, True])
 
     def test_weekly_requests_use_friday_new_york_alignment(self):
         def handler(request):
