@@ -19,12 +19,15 @@ STATE_FILES = {
     "last_attempt": "backup-last-attempt",
     "last_success": "backup-last-success",
     "last_failure": "backup-last-failure",
+    "in_progress": "backup-in-progress",
 }
 LEGACY_MARKER = "last-backup"
 _SAFE_KEY = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 _SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.:/+\-]{0,200}$")
 _ALLOWED_KEYS = {
+    "attempt_id",
     "attempted_at",
+    "started_at",
     "completed_at",
     "failed_at",
     "object_key",
@@ -73,6 +76,7 @@ class BackupState:
     last_attempt: dict | None
     last_success: dict | None
     last_failure: dict | None
+    in_progress: dict | None
     legacy_marker_at: datetime | None
     state_dir: str
 
@@ -103,6 +107,13 @@ class BackupState:
         return "unknown"
 
     @property
+    def in_progress_since(self):
+        """When the current attempt started, from its durable in-progress record."""
+        if self.in_progress:
+            return _parse_timestamp(self.in_progress.get("started_at"))
+        return None
+
+    @property
     def source(self):
         if self.last_success:
             return "state_file"
@@ -114,11 +125,12 @@ class BackupState:
 def read_backup_state(state_dir, marker_path=""):
     """Read the backup state files; tolerate absence, partial writes and legacy markers."""
     directory = Path(state_dir) if state_dir else None
-    last_attempt = last_success = last_failure = None
+    last_attempt = last_success = last_failure = in_progress = None
     if directory is not None:
         last_attempt = _parse_state_file(directory / STATE_FILES["last_attempt"])
         last_success = _parse_state_file(directory / STATE_FILES["last_success"])
         last_failure = _parse_state_file(directory / STATE_FILES["last_failure"])
+        in_progress = _parse_state_file(directory / STATE_FILES["in_progress"])
     legacy_at = None
     marker = (
         Path(marker_path)
@@ -134,22 +146,80 @@ def read_backup_state(state_dir, marker_path=""):
         last_attempt=last_attempt,
         last_success=last_success,
         last_failure=last_failure,
+        in_progress=in_progress,
         legacy_marker_at=legacy_at,
         state_dir=str(directory) if directory is not None else "",
     )
 
 
+def _published_success_is_contradicted(state):
+    """True when the published success belongs to an attempt recorded as failed.
+
+    Pre-fix backup.sh could publish backup-last-success and then have an
+    interrupt overwrite the attempt record with outcome=failure for the same
+    attempt. A success file contradicted by the commit record (the attempt
+    file) or by a failure record of the same attempt is not genuine. Records
+    written since the fix carry an attempt_id, so identities are compared by
+    that id; pre-fix records (no attempt_id) fall back to the attempted_at key
+    they shared.
+    """
+    success = state.last_success
+    if not success:
+        return False
+    attempt = state.last_attempt
+    if attempt and _same_attempt(success, attempt) and attempt.get("outcome") != "success":
+        return True
+    failure = state.last_failure
+    if failure and _same_attempt(success, failure):
+        return True
+    return False
+
+
+def _same_attempt(first, second):
+    """True when two state records describe the same backup attempt.
+
+    Identity is the attempt_id carried by every record the current backup.sh
+    writes. Only when neither record has an id (pre-fix state files) is the
+    second-resolution attempted_at they shared used, so a same-second pair of
+    distinct attempts can never be conflated.
+    """
+    if not second:
+        return False
+    first_id = first.get("attempt_id")
+    second_id = second.get("attempt_id")
+    if first_id or second_id:
+        return bool(first_id and second_id and first_id == second_id)
+    attempted_at = first.get("attempted_at")
+    return bool(attempted_at and attempted_at == second.get("attempted_at"))
+
+
 def backup_assessment(state, *, now, max_age_hours):
-    """Return (ready, safe_detail) from genuine last success, never last attempt."""
-    success_at = state.last_success_at
+    """Return (ready, safe_detail) from genuine last success, never last attempt.
+
+    A durable in-progress record is honest while a backup runs; one older than
+    the readiness window means the attempt died or is stuck without a terminal
+    outcome, and is reported (and fails readiness) like a missing backup.
+    """
+    in_progress_at = state.in_progress_since
     detail = {
         "source": state.source,
         "last_success_age_seconds": None,
         "last_attempt_outcome": state.last_attempt_outcome,
         "last_failure_category": (state.last_failure or {}).get("category"),
         "last_failure_stage": (state.last_failure or {}).get("stage"),
+        "attempt_in_progress": in_progress_at is not None,
         "state": "missing",
     }
+    if in_progress_at is not None:
+        attempt_age = (now - in_progress_at).total_seconds()
+        detail["attempt_started_at"] = in_progress_at
+        if attempt_age > max_age_hours * 3600:
+            detail["state"] = "attempt_stale"
+            return False, detail
+    if _published_success_is_contradicted(state):
+        detail["state"] = "contradicted"
+        return False, detail
+    success_at = state.last_success_at
     if success_at is None:
         return False, detail
     age = (now - success_at).total_seconds()

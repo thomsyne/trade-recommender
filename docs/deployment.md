@@ -264,18 +264,24 @@ The backup container runs `deploy/scripts/backup.sh loop` every six hours
 (`BACKUP_INTERVAL_SECONDS`). Each attempt is a sequence of explicitly checked
 stages — `configure`, `dump`, `compress`, `validate`, `checksum`, `upload`,
 `verify_upload`, `record` — and any failure stops the attempt without touching
-the success state. The script is POSIX `/bin/sh`: `pg_dump`'s own exit status
-is captured through a status file written inside the pipeline (no reliance on
-`pipefail`), the compressed archive must pass `gzip -t`, exceed
-`BACKUP_MIN_BYTES` (default 1024, deliberately conservative), and carry both the
-pg_dump header and the `PostgreSQL database dump complete` trailer; the object
-is uploaded with `--sse AES256` and its size is verified with `head-object`
-before anything is recorded as successful. Dump and upload run as background
-jobs so `SIGTERM`/`SIGINT` interrupt promptly, record an `interrupted` failure,
-and remove the temporary archive (which lives under `BACKUP_WORK_DIR`, default
-`/tmp` inside the container, never on the state volume). `backup.sh once`, used
-before every migration by `remote-deploy.sh`, now exits non-zero on any failed
-stage, so a deployment cannot proceed past a failed pre-migration backup.
+the success state. The script is POSIX `/bin/sh`: `pg_dump` streams into
+`gzip` through a FIFO; both are started in dedicated sessions (`setsid`, when
+available) and terminated as a supervised process group on interrupt, so an
+interrupt kills pg_dump and its whole pipeline (no orphaned dump) and the
+dump's own exit status needs no `pipefail`. The compressed archive must pass
+`gzip -t`, exceed `BACKUP_MIN_BYTES` (default 1024, deliberately
+conservative), and carry both the pg_dump header and the `PostgreSQL database
+dump complete` trailer; the object is uploaded with `--sse AES256` and its
+sha256 attached as user metadata, and `head-object` verifies BOTH the size and
+the checksum before anything is recorded as successful. Dump and upload run
+as background jobs so `SIGTERM`/`SIGINT` interrupt promptly (further signals
+are ignored while the handler runs), record an `interrupted` failure, and
+remove the temporary archive (which lives under `BACKUP_WORK_DIR`, default
+`/tmp` inside the container, never on the state volume). `backup.sh once`,
+used before every migration by `remote-deploy.sh`, exits non-zero on any
+failed stage, so a deployment cannot proceed past a failed pre-migration
+backup; an unwritable state directory or a missing `flock(1)` also aborts
+loudly instead of degrading.
 
 State files under `BACKUP_STATE_DIR` (`/var/lib/trade-recommender`, the shared
 `backup-state` volume) are written atomically and never contain credentials,
@@ -283,27 +289,57 @@ command bodies, or raw error output:
 
 | File | Written | Content |
 |---|---|---|
-| `backup-last-attempt` | every attempt | `attempted_at`, `object_key`, `outcome`, `stage`, `category` |
-| `backup-last-success` | genuine success only | `completed_at`, `attempted_at`, `object_key`, `sha256`, `size_bytes` |
-| `backup-last-failure` | failed attempts | `failed_at`, `attempted_at`, `object_key`, `stage`, `category`, `exit_status` |
+| `backup-in-progress` | while an attempt runs | `attempt_id`, `started_at`, `attempted_at`, `object_key`, `stage`; removed only after a terminal outcome is recorded |
+| `backup-last-attempt` | every terminal attempt | `attempt_id`, `attempted_at`, `object_key`, `outcome`, `stage`, `category` |
+| `backup-last-success` | genuine success only | `attempt_id`, `completed_at`, `attempted_at`, `object_key`, `sha256`, `size_bytes` |
+| `backup-last-failure` | failed attempts | `attempt_id`, `failed_at`, `attempted_at`, `object_key`, `stage`, `category`, `exit_status` |
 | `last-backup` | genuine success only | legacy marker (ISO timestamp) kept for compatibility |
+
+Attempts are serialized with `flock(1)` on a lock file (`.backup-lock` inside
+`BACKUP_STATE_DIR`), so the scheduler's backup loop and a deploy-time
+`backup.sh once` — which run in different containers on the same state volume —
+never overlap. The flock is owned by the kernel, so a crashed holder
+(SIGKILL, host loss) releases the lock automatically; later attempts can never
+deadlock on a stale PID file. Every attempt id is a random UUID (128 bits)
+recorded in every state file *and* embedded in the S3 object key, so two
+attempts can never share an id or overwrite each other's object. The
+`backup-in-progress` record is written once the lock is held and before any
+dump work (its write is mandatory: an attempt that cannot record durable
+state aborts); it is removed only after a terminal outcome has been committed,
+so a stale in-progress file unambiguously means the previous attempt died
+without finishing (SIGKILL or host loss).
+
+An attempt commits when `backup-last-attempt` reports `outcome=success`; the
+record stage runs only after the upload was verified, and the success file and
+legacy marker are best-effort publications made *after* that commit. A signal
+in the publish window therefore never produces contradictory records: the
+failure handler refuses to overwrite an attempt already committed as a success
+for the same `attempt_id`, and a committed-but-unpublished success is simply
+missing until the next run. Readiness compares identities by `attempt_id`
+(falling back to `attempted_at` only for pre-fix files that have no id) and
+distrusts a success file contradicted by a failure or non-success attempt of
+the same attempt, reporting `backup.state = contradicted` until the next
+successful run rewrites it.
 
 Failure categories are stable tokens (`configuration_missing`, `dump_failed`,
 `compression_failed`, `archive_unreadable`, `archive_too_small`,
 `archive_content_invalid`, `checksum_failed`, `upload_failed`,
-`upload_unverified`, `upload_size_mismatch`, `interrupted`, …). Bounded stderr
-excerpts go to the container log only.
+`upload_unverified`, `upload_checksum_mismatch`, `interrupted`, …). Bounded
+stderr excerpts go to the container log only.
 
 Readiness (`/health/ready/`) fails for an unavailable database, unapplied
 migration, stale running job heartbeat, less than 2 GB free disk, or when the
 **last genuine success** is missing or older than eight hours. A failed attempt
 after a fresh success keeps readiness green but is exposed as
-`backup.warning = last_attempt_failed` with the safe failure category. The
-response also carries the running source revision and a small `disk` block;
-it never exposes paths, keys, or checksums. Hosts that predate the state files
-are honoured through the legacy marker's modification time. The Operations
-page shows the full state (object key, checksum, size, last failure) to the
-owner. Liveness deliberately checks only the web process.
+`backup.warning = last_attempt_failed` with the safe failure category. An
+attempt whose durable in-progress record is older than the readiness window
+(died or stuck without a terminal outcome) fails readiness with
+`backup.state = attempt_stale` and is reported as `attempt_in_progress` on the
+Operations page. The response also carries the running source revision and a
+small `disk` block; it never exposes paths, keys, or checksums. Hosts that
+predate the state files are honoured through the legacy marker's modification
+time. The Operations page shows the full state (object key, checksum, size,
+last failure) to the owner. Liveness deliberately checks only the web process.
 
 ### Isolated restore verification
 
@@ -323,7 +359,7 @@ PGHOST=127.0.0.1 PGUSER=trade_recommender PGPASSWORD=… \
 RESTORE_CHECK_DB=phase1_restore_check_$(date +%Y%m%d) \
   deploy/scripts/restore-check.sh --recreate --drop-after \
     --expect-sha256 <sha256 from backup-last-success> \
-    s3://<backup-bucket>/postgres/20260907T120000Z.sql.gz
+    s3://<backup-bucket>/postgres/20260907T120000Z-<attempt_id>.sql.gz
 ```
 
 From the host, the same command runs inside the backup image (it has
@@ -343,7 +379,7 @@ sudo -i
 cd /opt/trade-recommender
 aws s3 ls "s3://$(sed -n 's/^BACKUP_BUCKET=//p' .env)/postgres/"
 CONFIRM_RESTORE=yes ./restore.sh \
-  s3://<backup-bucket>/postgres/20260821T120000Z.sql.gz
+  s3://<backup-bucket>/postgres/20260821T120000Z-<attempt_id>.sql.gz
 curl --fail "https://$(sed -n 's/^PUBLIC_HOST=//p' .env)/health/ready/"
 ```
 

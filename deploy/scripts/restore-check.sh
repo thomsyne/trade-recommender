@@ -176,6 +176,13 @@ BEGIN
       END IF;
     END LOOP;
   END IF;
+  IF EXISTS (SELECT 1 FROM django_migrations WHERE app = 'market'
+             AND name = '0029_candle_observation_lineage') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'market_candleobservation_lineage_validate'
+                   AND NOT tgisinternal) THEN
+      missing := missing || 'market_candleobservation_lineage_validate';
+    END IF;
+  END IF;
   IF array_length(missing, 1) IS NOT NULL THEN
     RAISE EXCEPTION 'missing triggers: %', array_to_string(missing, ',');
   END IF;

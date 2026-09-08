@@ -52,16 +52,35 @@
 2. `(instrument, granularity, timestamp)` is unique. A live candle row is
    frozen at its first accepted complete observation and carries
    `content_sha256`, `observed_at`, and `provenance`; every change in the
-   provider's view of the same interval is appended to `CandleObservation` as
-   a numbered revision superseding the previous one (or `conflict` when frozen
+   recorded view of the same interval is appended to `CandleObservation` as a
+   numbered revision superseding the previous one (or `conflict` when frozen
    downstream evidence references the row and the content differs from it)
-   and never rewrites the candle. Content equal to the current view is a
-   no-op; a return to earlier content (A → B → A) is a new revision, so
-   `Candle.authoritative_observation()` is always the latest provider view and
+   and never rewrites the candle. The chain belongs to the candle, not to a
+   source: revisions are dense per `(instrument, granularity, timestamp)`
+   across all sources, each row's `supersedes` points at revision N-1 of the
+   same candle, and revision 1 is either the observation that created the
+   candle or the first recorded view of a pre-ledger legacy row. Content equal
+   to a source's current view is a no-op; a return to earlier content
+   (A → B → A) is a new revision, so
+   `Candle.authoritative_observation()` is always the latest recorded view and
    re-observation can never fail. PostgreSQL triggers reject UPDATE/DELETE of
-   live candles, observations, and technical snapshots; only development
-   fixture rows may be deleted. Rows written before Phase 1 carry
-   `legacy_unknown` provenance with no fabricated hash.
+   live candles, observations, and technical snapshots, recompute every
+   observation's `content_sha256` at insert, and reject any observation whose
+   source/run/candle are inconsistent, whose chain is not dense, whose
+   timestamp falls outside its run's request window, that references a run
+   recorded as failed/quarantined, whose `interval_end` is not the exact
+   completion of its interval (17:00 America/New_York close for daily/weekly
+   candles), whose `observed_at` is not contemporaneous with its run, whose
+   `kind` contradicts whether frozen evidence references the candle
+   (`conflict` only for referenced candles), or whose `differing_fields`
+   claim does not match the content it supersedes. Initial and late-arrival
+   observations always open the chain with empty `differing_fields`. SQL
+   mirrors the Python canonical price and timestamp formatting (including the
+   leading zero of sub-unit magnitudes and signed-zero normalization), so both
+   sides hash identical content; helper functions pin their `search_path` so no
+   hijack can shadow them. Only development fixture rows may be deleted. Rows
+   written before Phase 1 carry `legacy_unknown` provenance with no fabricated
+   hash.
 2a. Technical snapshots are append-only calculations bound to an exact ordered
    source candle set (`source_candle_set_sha256`) and `algorithm_version`;
    recalculation over changed evidence appends a row, and the authoritative

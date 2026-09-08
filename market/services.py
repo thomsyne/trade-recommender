@@ -541,18 +541,24 @@ def _store_live_observations(source, instrument, granularity, run, candle_data):
         row.timestamp: row for row in series.select_for_update().filter(timestamp__in=timestamps)
     }
     latest_existing = series.order_by("-timestamp").values_list("timestamp", flat=True).first()
+    # The chain head is per candle identity across ALL sources: revision
+    # numbers and supersedes links belong to the candle, not to a source.
+    # ``current`` remains the last observation of THIS source and drives
+    # no-op detection, so a retry of a source's own view stays idempotent.
     current_observations = {}
+    heads = {}
     for observation in (
         CandleObservation.objects.filter(
             instrument=instrument,
             granularity=granularity,
-            source=source,
             timestamp__in=timestamps,
         )
         .order_by("timestamp", "revision")
         .select_for_update()
     ):
-        current_observations[observation.timestamp] = observation
+        heads[observation.timestamp] = observation
+        if observation.source_id == source.pk:
+            current_observations[observation.timestamp] = observation
     observed_at = timezone.now()
     provenance = Candle.Provenance.FIXTURE if fixture_source else Candle.Provenance.OBSERVED
     new_rows = []
@@ -586,10 +592,11 @@ def _store_live_observations(source, instrument, granularity, run, candle_data):
         incoming_payload = _candle_payload(item)
         agrees_with_frozen = prior_payload == incoming_payload
         current = current_observations.get(item.timestamp)
-        # The current provider view is the highest recorded revision, or the
-        # frozen row itself when no observation exists (legacy rows). Content
-        # equal to the current view is a no-op. Any other content supersedes
-        # it as revision N+1 -- including a return to content the provider
+        # This source's current view is its own last recorded revision, or the
+        # frozen row itself when the source has no observation yet (legacy rows
+        # and candles frozen by another source). Content equal to that view is
+        # a no-op. Any other content is appended onto the candle's chain head
+        # as revision head+1 -- including a return to content this source
         # published in an earlier revision (A -> B -> A) or to the frozen
         # content itself -- so the ledger records every change of view and a
         # retry of any batch is idempotent.
@@ -610,7 +617,22 @@ def _store_live_observations(source, instrument, granularity, run, candle_data):
             for field in set(prior_payload) | set(incoming_payload)
             if prior_payload.get(field) != incoming_payload.get(field)
         )
-        revision = CandleObservation(
+        head = heads.get(item.timestamp)
+        if head is None:
+            # No observation exists for this candle: it predates the ledger.
+            # Its first recorded view opens a dense chain at revision 1. Only
+            # legacy rows (no attested content hash) may open a chain.
+            if prior.content_sha256 is not None:
+                raise DatasetQualityError(
+                    f"{instrument.code} {granularity} {item.timestamp.isoformat()} has no "
+                    "observation root; refusing to start a revision chain"
+                )
+            chain_revision = 1
+            supersedes = None
+        else:
+            chain_revision = head.revision + 1
+            supersedes = head
+        observation = CandleObservation(
             instrument=instrument,
             granularity=granularity,
             timestamp=item.timestamp,
@@ -619,15 +641,16 @@ def _store_live_observations(source, instrument, granularity, run, candle_data):
             ingestion_run=run,
             candle=prior,
             kind=kind,
-            revision=(current.revision if current is not None else 1) + 1,
-            supersedes=current,
+            revision=chain_revision,
+            supersedes=supersedes,
             content_sha256=digest,
             differing_fields=differing,
             observed_at=observed_at,
             **{key: value for key, value in item.__dict__.items() if key != "timestamp"},
         )
-        revisions.append(revision)
-        current_observations[item.timestamp] = revision
+        revisions.append(observation)
+        current_observations[item.timestamp] = observation
+        heads[item.timestamp] = observation
         counts[kind] += 1
         if kind == CandleObservation.Kind.CONFLICT:
             conflicts.append(
@@ -706,13 +729,25 @@ def _candle_payload(candle):
         field: (
             value.isoformat()
             if field == "timestamp"
-            else format(value, ".6f")
+            else _canonical_price(value)
             if field.startswith(("bid_", "ask_"))
             else str(value)
         )
         for field in fields
         if (value := getattr(candle, field)) is not None
     }
+
+
+def _canonical_price(value):
+    """Canonical six-decimal price text, identical to the SQL mirror.
+
+    PostgreSQL's numeric type normalizes negative zero away, so a signed zero
+    must hash as '0.000000' on both sides or the Python and SQL digests of one
+    stored row would diverge.
+    """
+    if value == 0:
+        return "0.000000"
+    return format(value, ".6f")
 
 
 def _json_hash(payload):

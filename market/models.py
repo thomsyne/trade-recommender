@@ -803,14 +803,19 @@ class Candle(models.Model):
 
 
 class CandleObservation(ImmutableModel):
-    """Append-only ledger of every change in the provider's view of a live candle.
+    """Append-only ledger of every change in the recorded view of a live candle.
 
-    Identity is (instrument, granularity, interval start, provider source,
-    revision). Revision 1 is the observation that created the frozen
-    ``Candle`` row; every later change of content appends a ``revision``/
-    ``conflict`` row that supersedes the previous authoritative observation
-    without deleting or rewriting anything. Content equal to the current view
-    creates no row. A revision may repeat a content hash recorded in an
+    The chain belongs to the canonical candle identity ``(instrument,
+    granularity, interval start)``, not to a source: ``revision`` is the row's
+    position in that candle's view history across all sources and
+    ``supersedes`` always points at revision N-1 of the same candle. Revision 1
+    rows are either the ``initial``/``late_arrival`` observation that created
+    the frozen ``Candle`` row or the first recorded view of a legacy candle
+    (kind ``revision``/``conflict``). Every later change of content appends a
+    dense ``revision``/``conflict`` row superseding the current chain head
+    without deleting or rewriting anything. ``source`` and ``ingestion_run``
+    are provenance attributes of each observation. Content equal to the current
+    view creates no row. A revision may repeat a content hash recorded in an
     earlier revision: when a provider publishes A, then B, then A again, the
     ledger holds three rows, so the chain stays faithful to what was observed
     and re-observation of any earlier content can never fail.
@@ -855,8 +860,8 @@ class CandleObservation(ImmutableModel):
         ordering = ("instrument", "granularity", "timestamp", "revision")
         constraints = [
             models.UniqueConstraint(
-                fields=("instrument", "granularity", "timestamp", "source", "revision"),
-                name="unique_candle_observation_revision",
+                fields=("candle", "revision"),
+                name="unique_candle_observation_chain",
             ),
             models.CheckConstraint(
                 condition=models.Q(complete=True), name="candle_observation_complete"
@@ -868,7 +873,16 @@ class CandleObservation(ImmutableModel):
                         revision=1,
                         supersedes__isnull=True,
                     )
-                    | models.Q(kind__in=("revision", "conflict"), revision__gt=1)
+                    | models.Q(
+                        kind__in=("revision", "conflict"),
+                        revision=1,
+                        supersedes__isnull=True,
+                    )
+                    | models.Q(
+                        kind__in=("revision", "conflict"),
+                        revision__gt=1,
+                        supersedes__isnull=False,
+                    )
                 ),
                 name="candle_observation_revision_shape",
             ),

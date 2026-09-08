@@ -1,5 +1,6 @@
 """Phase 1.4 — explicit live-candle observation identity and protection."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -415,6 +416,57 @@ class LiveObservationIdentityTests(TestCase):
         ingest(self.source, self.instrument, [item], "hash")
         self.assertEqual(Candle.objects.get().content_sha256, baseline)
 
+    def test_sub_unit_prices_hash_identically_in_python_and_sql(self):
+        # Regression: the SQL hash mirror used to_char without a leading zero,
+        # so a sub-unit magnitude (e.g. AUD/USD near 0.65) produced a different
+        # digest in SQL than in Python and the insert was rejected with
+        # "content_sha256 does not match the stored candle content".
+        from decimal import Decimal as D
+
+        def price_scale(**changes):
+            values = {
+                "bid_open": D("0.650000"),
+                "bid_high": D("0.652000"),
+                "bid_low": D("0.648000"),
+                "bid_close": D("0.651000"),
+                "ask_open": D("0.650020"),
+                "ask_high": D("0.652020"),
+                "ask_low": D("0.648020"),
+                "ask_close": D("0.651020"),
+            }
+            values.update(changes)
+            return candle(START, **values)
+        ingest(self.source, self.instrument, [price_scale()], "sub-unit")
+        row = Candle.objects.get()
+        self.assertEqual(row.content_sha256, candle_content_sha256("USD_CAD", "H1", price_scale()))
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT count(*) FROM market_candleobservation observation
+                 JOIN market_instrument instrument ON instrument.id = observation.instrument_id
+                 WHERE market_candleobservation_content_sha256(
+                         instrument.code, observation.granularity, observation.timestamp,
+                         observation.complete, observation.volume,
+                         observation.bid_open, observation.bid_high, observation.bid_low,
+                         observation.bid_close,
+                         observation.ask_open, observation.ask_high, observation.ask_low,
+                         observation.ask_close)
+                       IS DISTINCT FROM observation.content_sha256
+                """
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)
+        # A revision in the same sub-unit scale still lands on the candle chain.
+        ingest(
+            self.source,
+            self.instrument,
+            [price_scale(bid_close=D("0.650500"))],
+            "sub-unit-2-revision",
+        )
+        self.assertEqual(
+            list(CandleObservation.objects.order_by("revision").values_list("revision", flat=True)),
+            [1, 2],
+        )
+
     def test_direct_rows_carry_honest_unknown_provenance_and_cannot_be_rewritten(self):
         run = IngestionRun.objects.create(
             source=self.source,
@@ -442,7 +494,7 @@ class LiveObservationIdentityTests(TestCase):
         with self.assertRaisesMessage(ValidationError, "append-only"):
             row.delete()
 
-    def test_revision_of_legacy_row_is_recorded_as_revision_two(self):
+    def test_legacy_row_adoption_opens_a_dense_observation_chain(self):
         run = IngestionRun.objects.create(
             source=self.source,
             instrument=self.instrument,
@@ -462,14 +514,70 @@ class LiveObservationIdentityTests(TestCase):
 
         ingest(self.source, self.instrument, [candle(START, volume=7)], "revise-legacy")
 
-        observation = CandleObservation.objects.get()
-        self.assertEqual(observation.candle, legacy)
-        self.assertEqual(observation.revision, 2)
-        self.assertIsNone(observation.supersedes)
-        self.assertEqual(observation.kind, CandleObservation.Kind.REVISION)
+        first = CandleObservation.objects.get()
+        self.assertEqual(first.candle, legacy)
+        self.assertEqual(first.revision, 1)
+        self.assertIsNone(first.supersedes)
+        self.assertEqual(first.kind, CandleObservation.Kind.REVISION)
         legacy.refresh_from_db()
         self.assertEqual(legacy.volume, 100)
         self.assertIsNone(legacy.content_sha256)
+
+        ingest(self.source, self.instrument, [candle(START, volume=8)], "revise-legacy-2")
+
+        observations = list(CandleObservation.objects.order_by("revision"))
+        self.assertEqual([item.revision for item in observations], [1, 2])
+        self.assertEqual(observations[0].supersedes, None)
+        self.assertEqual(observations[1].supersedes, observations[0])
+        self.assertEqual(observations[1].kind, CandleObservation.Kind.REVISION)
+
+    def second_source(self):
+        source, _ = SourceRegistry.objects.get_or_create(
+            name="Secondary provider",
+            defaults={
+                "tier": "established",
+                "base_url": "https://example.invalid",
+                "acquisition_method": "test",
+                "retention_policy": "test only",
+            },
+        )
+        return source
+
+    def test_second_source_revision_chains_onto_the_candle_lineage(self):
+        original = self.series(1)[0]
+        ingest(self.source, self.instrument, [original], "first")
+        frozen = Candle.objects.get()
+        other = self.second_source()
+
+        run = ingest(other, self.instrument, [candle(original.timestamp, volume=200)], "other")
+
+        self.assertEqual(run.status, IngestionRun.Status.SUCCEEDED)
+        self.assertEqual(run.stored_count, 0)
+        self.assertEqual(self.observations_recorded_by(run), {"revision": 1})
+        observations = self.assert_ledger_chain(frozen, [100, 200])
+        self.assertEqual(observations[1].source, other)
+        self.assertEqual(observations[1].kind, CandleObservation.Kind.REVISION)
+        self.assertEqual(observations[1].supersedes, observations[0])
+
+        back = ingest(
+            self.source, self.instrument, [candle(original.timestamp, volume=300)], "back"
+        )
+
+        observations = self.assert_ledger_chain(frozen, [100, 200, 300])
+        self.assertEqual(observations[2].supersedes, observations[1])
+        self.assertEqual(self.observations_recorded_by(back), {"revision": 1})
+
+    def test_second_source_agreeing_with_frozen_content_records_nothing(self):
+        original = self.series(1)[0]
+        ingest(self.source, self.instrument, [original], "first")
+        other = self.second_source()
+
+        run = ingest(other, self.instrument, [original], "other-same")
+
+        self.assertEqual(run.status, IngestionRun.Status.SUCCEEDED)
+        self.assertEqual(run.stored_count, 0)
+        self.assertEqual(CandleObservation.objects.count(), 1)
+        self.assertEqual(self.observations_recorded_by(run), {"duplicate": 1})
 
     def test_no_silent_deletion_across_revisions(self):
         ingest(self.source, self.instrument, self.series(), "first")
@@ -621,3 +729,285 @@ class LiveEvidenceDatabaseProtectionTests(TransactionTestCase):
         self.assertEqual(
             CandleObservation.objects.filter(timestamp__gte=START + timedelta(hours=3)).count(), 3
         )
+
+    def _assert_observation_insert_rejected(self, overrides):
+        """Raw SQL insert of a CandleObservation row must be rejected by the lineage trigger.
+
+        When content columns are overridden the row's content_sha256 is
+        recomputed first, so a probe can target the check under test (chain
+        shape, bounds, differing_fields, ...) instead of failing on the hash.
+        """
+        template = self.observation
+        content_columns = (
+            "complete",
+            "volume",
+            "bid_open",
+            "bid_high",
+            "bid_low",
+            "bid_close",
+            "ask_open",
+            "ask_high",
+            "ask_low",
+            "ask_close",
+        )
+        columns = (
+            "instrument_id",
+            "granularity",
+            "timestamp",
+            "interval_end",
+            *content_columns,
+            "source_id",
+            "ingestion_run_id",
+            "candle_id",
+            "kind",
+            "revision",
+            "supersedes_id",
+            "content_sha256",
+            "differing_fields",
+            "observed_at",
+        )
+        values = {
+            "instrument_id": template.instrument_id,
+            "granularity": template.granularity,
+            "timestamp": template.timestamp,
+            "interval_end": template.interval_end,
+            "complete": True,
+            "volume": template.volume,
+            "bid_open": template.bid_open,
+            "bid_high": template.bid_high,
+            "bid_low": template.bid_low,
+            "bid_close": template.bid_close,
+            "ask_open": template.ask_open,
+            "ask_high": template.ask_high,
+            "ask_low": template.ask_low,
+            "ask_close": template.ask_close,
+            "source_id": template.source_id,
+            "ingestion_run_id": template.ingestion_run_id,
+            "candle_id": template.candle_id,
+            "kind": template.kind,
+            "revision": template.revision + 2,
+            "supersedes_id": None,
+            "content_sha256": template.content_sha256,
+            "differing_fields": json.dumps(template.differing_fields),
+            "observed_at": template.observed_at,
+        }
+        values.update(overrides)
+        if any(column in overrides for column in content_columns):
+            values["content_sha256"] = candle_content_sha256(
+                self.instrument.code,
+                values["granularity"],
+                candle(
+                    values["timestamp"],
+                    **{column: values[column] for column in content_columns},
+                ),
+            )
+        placeholders = ", ".join(["%s"] * len(columns))
+        sql = "INSERT INTO market_candleobservation ({}) VALUES ({})".format(
+            ", ".join(columns), placeholders
+        )
+        params = [values[column] for column in columns]
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute(sql, params)
+
+    def test_observation_insert_with_a_revision_gap_is_rejected(self):
+        head = self.row.authoritative_observation()
+        self._assert_observation_insert_rejected(
+            {"revision": head.revision + 2, "supersedes_id": head.pk}
+        )
+
+    def test_observation_insert_superseding_another_candle_is_rejected(self):
+        other = Candle.objects.order_by("timestamp")[1].authoritative_observation()
+        self._assert_observation_insert_rejected(
+            {"revision": other.revision + 1, "supersedes_id": other.pk}
+        )
+
+    def test_observation_insert_root_on_an_observed_candle_is_rejected(self):
+        # A second candle's initial observation already exists; opening a
+        # revision chain at 1 on a candle with attested content is invalid.
+        other_row = Candle.objects.order_by("timestamp")[1]
+        initial = other_row.authoritative_observation()
+        self._assert_observation_insert_rejected(
+            {
+                "candle_id": other_row.pk,
+                "kind": CandleObservation.Kind.REVISION,
+                "revision": 1,
+                "supersedes_id": None,
+                "content_sha256": initial.content_sha256,
+            }
+        )
+
+    def test_observation_insert_initial_on_an_existing_candle_is_rejected(self):
+        self._assert_observation_insert_rejected(
+            {
+                "kind": CandleObservation.Kind.INITIAL,
+                "revision": 1,
+                "supersedes_id": None,
+            }
+        )
+
+    def test_observation_insert_with_a_tampered_hash_is_rejected(self):
+        self._assert_observation_insert_rejected({"content_sha256": "0" * 64})
+
+    def test_observation_insert_with_a_contradictory_run_source_is_rejected(self):
+        other_source = SourceRegistry.objects.create(
+            name="Secondary provider",
+            tier="established",
+            base_url="https://example.invalid",
+            acquisition_method="test",
+            retention_policy="test",
+        )
+        self._assert_observation_insert_rejected({"source_id": other_source.pk})
+
+    def _run(self, *, status, requested_from, requested_to, source=None, manifest):
+        run = IngestionRun.objects.create(
+            source=source or self.source,
+            instrument=self.instrument,
+            granularity="H1",
+            requested_from=requested_from,
+            requested_to=requested_to,
+            parameters={},
+            request_manifest_hash=manifest,
+            status=status,
+        )
+        # started_at is auto_now_add and the run trigger forbids touching a
+        # terminal row, so pin it via a trigger-free update to sit before the
+        # observation rows these probes copy; the chronology check must not be
+        # the reason a probe is rejected.
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE market_ingestionrun DISABLE TRIGGER market_ingestion_run_enforce")
+            cursor.execute(
+                "UPDATE market_ingestionrun SET started_at = %s WHERE id = %s",
+                [self.observation.observed_at - timedelta(minutes=5), run.pk],
+            )
+            cursor.execute("ALTER TABLE market_ingestionrun ENABLE TRIGGER market_ingestion_run_enforce")
+        return run
+
+    def test_observation_timestamp_outside_run_request_window_is_rejected(self):
+        # A forged attribution would point the observation at a run whose
+        # request window does not contain the candle's timestamp.
+        forged = self._run(
+            status=IngestionRun.Status.SUCCEEDED,
+            requested_from=self.row.timestamp + timedelta(days=10),
+            requested_to=self.row.timestamp + timedelta(days=10, hours=1),
+            manifest="forged-window",
+        )
+        self._assert_observation_insert_rejected(
+            {
+                "ingestion_run_id": forged.pk,
+                "revision": self.observation.revision + 1,
+                "supersedes_id": self.observation.pk,
+            }
+        )
+
+    def test_observation_referencing_a_failed_run_is_rejected(self):
+        # Legitimate observations are recorded by the run that stores them,
+        # which transitions running -> succeeded inside one transaction; a run
+        # already recorded as failed must never acquire observations.
+        failed = self._run(
+            status=IngestionRun.Status.FAILED,
+            requested_from=self.row.timestamp - timedelta(hours=1),
+            requested_to=self.row.timestamp + timedelta(hours=1),
+            manifest="forged-failed-run",
+        )
+        self._assert_observation_insert_rejected(
+            {
+                "ingestion_run_id": failed.pk,
+                "revision": self.observation.revision + 1,
+                "supersedes_id": self.observation.pk,
+            }
+        )
+
+    def test_observation_interval_end_beyond_the_run_window_is_rejected(self):
+        # The provider view a run records must complete inside its requested
+        # window; an interval_end pushed past requested_to is a forged claim.
+        self._assert_observation_insert_rejected(
+            {
+                "interval_end": self.observation.interval_end + timedelta(hours=9),
+                "revision": self.observation.revision + 1,
+                "supersedes_id": self.observation.pk,
+            }
+        )
+
+    def test_observation_interval_end_not_matching_h1_completion_is_rejected(self):
+        self._assert_observation_insert_rejected(
+            {
+                "interval_end": self.observation.timestamp + timedelta(hours=2),
+                "revision": self.observation.revision + 1,
+                "supersedes_id": self.observation.pk,
+            }
+        )
+
+    def test_observation_interval_end_not_matching_daily_completion_is_rejected(self):
+        # Daily candles close at 17:00 America/New_York: the completion is the
+        # registered wall-clock step, not a naive UTC day.
+        daily_start = datetime(2026, 1, 4, 22, tzinfo=UTC)  # Sunday 17:00 NY
+        daily_end = datetime(2026, 1, 6, 22, tzinfo=UTC)
+        ingest(self.source, self.instrument, [candle(daily_start)], "daily-probe",
+               granularity="D", start=daily_start, end=daily_end)
+        daily = Candle.objects.get(granularity="D")
+        head = daily.authoritative_observation()
+        # A forged interval_end one hour early/late must be rejected even though
+        # it stays inside the run request window.
+        self._assert_observation_insert_rejected(
+            {
+                "candle_id": daily.pk,
+                "granularity": "D",
+                "timestamp": daily.timestamp,
+                "interval_end": head.interval_end + timedelta(hours=1),
+                "kind": CandleObservation.Kind.REVISION,
+                "revision": head.revision + 1,
+                "supersedes_id": head.pk,
+                "bid_close": head.bid_close,
+                "differing_fields": json.dumps([]),
+            }
+        )
+
+    def test_observation_observed_at_not_contemporaneous_with_run_is_rejected(self):
+        # A forged attribution records the observation a year before the run
+        # executed; the chronology check must refuse it.
+        stale = self._run(
+            status=IngestionRun.Status.SUCCEEDED,
+            requested_from=self.row.timestamp - timedelta(hours=1),
+            requested_to=self.row.timestamp + timedelta(hours=1),
+            manifest="forged-chronology",
+        )
+        self._assert_observation_insert_rejected(
+            {
+                "ingestion_run_id": stale.pk,
+                "observed_at": self.observation.observed_at - timedelta(days=365),
+                "revision": self.observation.revision + 1,
+                "supersedes_id": self.observation.pk,
+            }
+        )
+
+    def test_observation_with_fabricated_differing_fields_is_rejected(self):
+        # differing_fields is a derived claim; the trigger recomputes it from
+        # the content actually superseded and refuses a row that lies about it.
+        head = self.observation
+        self._assert_observation_insert_rejected(
+            {
+                "bid_close": head.bid_close + Decimal("0.000100"),
+                "differing_fields": json.dumps(["ask_open"]),
+                "revision": head.revision + 1,
+                "supersedes_id": head.pk,
+            }
+        )
+
+    def test_every_content_hash_recomputes_in_sql(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT count(*) FROM market_candleobservation observation
+                 JOIN market_instrument instrument ON instrument.id = observation.instrument_id
+                 WHERE market_candleobservation_content_sha256(
+                         instrument.code, observation.granularity, observation.timestamp,
+                         observation.complete, observation.volume,
+                         observation.bid_open, observation.bid_high, observation.bid_low,
+                         observation.bid_close,
+                         observation.ask_open, observation.ask_high, observation.ask_low,
+                         observation.ask_close)
+                       IS DISTINCT FROM observation.content_sha256
+                """
+            )
+            self.assertEqual(cursor.fetchone()[0], 0)

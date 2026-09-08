@@ -19,6 +19,11 @@ def write_state(directory, name, **values):
             stream.write(f"{key}={value}\n")
 
 
+def attempt_id(seed):
+    """A stable attempt identity; every record of one attempt shares it."""
+    return f"101-{seed}-20260907T120000Z"
+
+
 def iso(delta):
     return (timezone.now() - delta).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -40,6 +45,7 @@ class ReadinessBackupStateTests(TestCase):
         write_state(
             self.directory,
             "backup-last-success",
+            attempt_id=attempt_id(1),
             completed_at=iso(timedelta(hours=1)),
             attempted_at=iso(timedelta(hours=1)),
             object_key="postgres/20260907T120000Z.sql.gz",
@@ -49,6 +55,7 @@ class ReadinessBackupStateTests(TestCase):
         write_state(
             self.directory,
             "backup-last-attempt",
+            attempt_id=attempt_id(1),
             attempted_at=iso(timedelta(hours=1)),
             outcome="success",
         )
@@ -73,10 +80,17 @@ class ReadinessBackupStateTests(TestCase):
         self.assertEqual(response.json()["backup"]["state"], "stale")
 
     def test_recent_failure_after_valid_success_stays_ready_but_is_visible(self):
-        write_state(self.directory, "backup-last-success", completed_at=iso(timedelta(hours=2)))
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(1),
+            completed_at=iso(timedelta(hours=2)),
+            attempted_at=iso(timedelta(hours=2)),
+        )
         write_state(
             self.directory,
             "backup-last-attempt",
+            attempt_id=attempt_id(2),
             attempted_at=iso(timedelta(hours=1)),
             outcome="failure",
             stage="upload",
@@ -85,7 +99,9 @@ class ReadinessBackupStateTests(TestCase):
         write_state(
             self.directory,
             "backup-last-failure",
+            attempt_id=attempt_id(2),
             failed_at=iso(timedelta(hours=1)),
+            attempted_at=iso(timedelta(hours=1)),
             stage="upload",
             category="upload_failed",
             exit_status=1,
@@ -100,11 +116,240 @@ class ReadinessBackupStateTests(TestCase):
         self.assertEqual(body["last_attempt_outcome"], "failure")
         self.assertEqual(body["last_failure_category"], "upload_failed")
 
+    def test_success_contradicted_by_failed_attempt_record_is_not_trusted(self):
+        # Pre-fix backup.sh could publish a success and then have an interrupt
+        # overwrite the same attempt with outcome=failure. Readiness must not
+        # trust the orphaned success timestamp.
+        attempted_at = iso(timedelta(hours=1))
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(1),
+            completed_at=attempted_at,
+            attempted_at=attempted_at,
+            object_key="postgres/20260907T120000Z.sql.gz",
+            sha256="a" * 64,
+            size_bytes=1234,
+        )
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempt_id=attempt_id(1),
+            attempted_at=attempted_at,
+            outcome="failure",
+            stage="record",
+            category="interrupted",
+        )
+        write_state(
+            self.directory,
+            "backup-last-failure",
+            attempt_id=attempt_id(1),
+            failed_at=attempted_at,
+            attempted_at=attempted_at,
+            stage="record",
+            category="interrupted",
+            exit_status=143,
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("backup", response.json()["checks"])
+        self.assertEqual(response.json()["backup"]["state"], "contradicted")
+
+    def test_success_contradicted_by_failure_of_the_same_attempt_is_not_trusted(self):
+        # The failure record alone contradicts the success even when no attempt
+        # record was parsed (e.g. a partially written pre-fix state directory).
+        attempted_at = iso(timedelta(hours=1))
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(1),
+            completed_at=attempted_at,
+            attempted_at=attempted_at,
+            object_key="postgres/20260907T120000Z.sql.gz",
+            sha256="a" * 64,
+            size_bytes=1234,
+        )
+        write_state(
+            self.directory,
+            "backup-last-failure",
+            attempt_id=attempt_id(1),
+            failed_at=attempted_at,
+            attempted_at=attempted_at,
+            stage="record",
+            category="interrupted",
+            exit_status=143,
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("backup", response.json()["checks"])
+        self.assertEqual(response.json()["backup"]["state"], "contradicted")
+
+    def test_same_second_distinct_attempts_are_not_conflated(self):
+        # Two attempts that started in the same second (the pre-fix collision
+        # that corrupted the state protocol) carry distinct attempt_ids: the
+        # older genuine success must not be contradicted by the other attempt's
+        # failure merely because their attempted_at values match.
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(1),
+            completed_at=iso(timedelta(hours=2)),
+            attempted_at=iso(timedelta(hours=2)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            sha256="a" * 64,
+            size_bytes=1234,
+        )
+        same_second = iso(timedelta(hours=1))
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempt_id=attempt_id(2),
+            attempted_at=same_second,
+            outcome="failure",
+            stage="dump",
+            category="dump_failed",
+        )
+        write_state(
+            self.directory,
+            "backup-last-failure",
+            attempt_id=attempt_id(2),
+            failed_at=same_second,
+            attempted_at=same_second,
+            stage="dump",
+            category="dump_failed",
+            exit_status=1,
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["backup"]
+        self.assertEqual(body["state"], "fresh")
+        self.assertEqual(body["warning"], "last_attempt_failed")
+
+    def test_failure_of_a_later_attempt_keeps_an_older_genuine_success(self):
+        # A failed attempt that is newer than the last success is a warning,
+        # not a contradiction: the success and failure belong to different
+        # attempted_at values.
+        write_state(
+            self.directory,
+            "backup-last-success",
+            completed_at=iso(timedelta(hours=2)),
+            attempted_at=iso(timedelta(hours=2)),
+        )
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempted_at=iso(timedelta(hours=1)),
+            outcome="failure",
+            stage="upload",
+            category="upload_failed",
+        )
+        write_state(
+            self.directory,
+            "backup-last-failure",
+            failed_at=iso(timedelta(hours=1)),
+            attempted_at=iso(timedelta(hours=1)),
+            stage="upload",
+            category="upload_failed",
+            exit_status=1,
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["backup"]["state"], "fresh")
+
+    def test_committed_success_without_a_published_success_file_is_missing(self):
+        # The new producer commits the attempt record before publishing the
+        # success file; if it is interrupted inside that window the committed
+        # attempt stands but readiness must not invent a success timestamp.
+        attempted_at = iso(timedelta(hours=1))
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempted_at=attempted_at,
+            object_key="postgres/20260907T120000Z.sql.gz",
+            outcome="success",
+            stage="record",
+            category="none",
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("backup", response.json()["checks"])
+        self.assertEqual(response.json()["backup"]["state"], "missing")
+        self.assertEqual(response.json()["backup"]["last_attempt_outcome"], "success")
+
     def test_no_successful_backup_fails_readiness(self):
         response = self.ready()
         self.assertEqual(response.status_code, 503)
         self.assertIn("backup", response.json()["checks"])
         self.assertEqual(response.json()["backup"]["state"], "missing")
+
+    def test_recent_in_progress_attempt_is_reported_but_not_stale(self):
+        # A backup that started within the readiness window is honest progress:
+        # readiness keeps the last genuine success green and reports the run.
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(1),
+            completed_at=iso(timedelta(hours=1)),
+            attempted_at=iso(timedelta(hours=1)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            sha256="a" * 64,
+            size_bytes=1234,
+        )
+        write_state(
+            self.directory,
+            "backup-in-progress",
+            attempt_id=attempt_id(2),
+            started_at=iso(timedelta(minutes=1)),
+            attempted_at=iso(timedelta(minutes=1)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            stage="dump",
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()["backup"]
+        self.assertEqual(body["state"], "fresh")
+        self.assertTrue(body["attempt_in_progress"])
+
+    def test_stale_in_progress_attempt_fails_readiness(self):
+        # A durable in-progress record older than the readiness window means the
+        # previous attempt died without a terminal outcome; readiness must say so.
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(1),
+            completed_at=iso(timedelta(hours=1)),
+            attempted_at=iso(timedelta(hours=1)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            sha256="a" * 64,
+            size_bytes=1234,
+        )
+        write_state(
+            self.directory,
+            "backup-in-progress",
+            attempt_id=attempt_id(2),
+            started_at=iso(timedelta(hours=20)),
+            attempted_at=iso(timedelta(hours=20)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            stage="upload",
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("backup", response.json()["checks"])
+        self.assertEqual(response.json()["backup"]["state"], "attempt_stale")
 
     def test_legacy_marker_only_is_honoured_for_pre_upgrade_hosts(self):
         marker = os.path.join(self.directory, "last-backup")
