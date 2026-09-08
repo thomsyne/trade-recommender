@@ -51,10 +51,14 @@
    timestamps.
 2. `(instrument, granularity, timestamp)` is unique. A live candle row is
    frozen at its first accepted complete observation and carries
-   `content_sha256`, `observed_at`, and `provenance`; later provider content
-   for the same interval is appended to `CandleObservation` as a numbered
-   revision (or `conflict` when frozen downstream evidence references the row)
-   and never rewrites the candle. PostgreSQL triggers reject UPDATE/DELETE of
+   `content_sha256`, `observed_at`, and `provenance`; every change in the
+   provider's view of the same interval is appended to `CandleObservation` as
+   a numbered revision superseding the previous one (or `conflict` when frozen
+   downstream evidence references the row and the content differs from it)
+   and never rewrites the candle. Content equal to the current view is a
+   no-op; a return to earlier content (A → B → A) is a new revision, so
+   `Candle.authoritative_observation()` is always the latest provider view and
+   re-observation can never fail. PostgreSQL triggers reject UPDATE/DELETE of
    live candles, observations, and technical snapshots; only development
    fixture rows may be deleted. Rows written before Phase 1 carry
    `legacy_unknown` provenance with no fabricated hash.

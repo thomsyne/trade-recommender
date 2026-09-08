@@ -4,9 +4,11 @@
 # is immutable on EC2) and is blocked by prevent_destroy, so keep it stable.
 ssh_public_key = "ssh-ed25519 AAAA... owner@example"
 
-# Default [] = no port-22 ingress at all. Narrow current locations only.
-# Internet-wide CIDRs (0.0.0.0/0, ::/0) are rejected by validation unless
-# allow_public_ssh_break_glass is set to true for a documented emergency.
+# Default [] = no port-22 ingress at all. Narrow current locations only
+# (a /32 per location). Every entry must be /8 or longer: Internet-scale
+# CIDRs (0.0.0.0/0, ::/0, /1 halves, /2 quarters, anything shorter than /8)
+# are rejected by validation unless allow_public_ssh_break_glass is set to
+# true for a documented emergency.
 ssh_cidrs = ["203.0.113.10/32"]
 
 # Leave false. Set true only for a recorded break-glass emergency, then revert.

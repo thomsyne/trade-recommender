@@ -1,4 +1,4 @@
-"""Migration 0028 over representative legacy rows: honest markers, no fabrication, reversible."""
+"""Migration 0028 over representative legacy rows: honest markers, no fabrication; reversible only while no live evidence exists."""
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -182,6 +182,79 @@ class LiveObservationMigrationTests(TransactionTestCase):
         with connection.cursor() as cursor:
             cursor.execute("SELECT count(*) FROM market_candle")
             self.assertEqual(cursor.fetchone()[0], 3)
+
+    def record_live_observation(self):
+        """One provider observation through the real ingestion path at the 0028 schema."""
+        from market.models import Instrument, SourceRegistry
+        from market.services import store_ingestion
+        from market.tests.factories import candle
+
+        instrument = Instrument.objects.create(
+            code="USD_CAD", base_currency="USD", quote_currency="CAD", display_order=1
+        )
+        source = SourceRegistry.objects.create(
+            name="OANDA v20",
+            tier="established",
+            base_url="https://developer.oanda.com",
+            acquisition_method="v20 REST API",
+            retention_policy="migration test",
+        )
+        start = datetime(2026, 1, 5, 8, tzinfo=UTC)
+        run = store_ingestion(
+            source,
+            instrument,
+            "H1",
+            start,
+            start + timedelta(hours=1),
+            [candle(start)],
+            {"batch": "ledger", "requests": []},
+        )
+        self.assertEqual(run.status, "succeeded")
+
+    def assert_schema_untouched_at_0028(self):
+        self.assertEqual(trigger_names(), set(PROTECTIONS))
+        self.assertIn("market_candleobservation", self.tables())
+        self.assertIn("provenance", column_names("market_candle"))
+        self.assertIn("source_candle_set_sha256", column_names("market_technicalsnapshot"))
+        self.assertIn(AFTER[0], MigrationExecutor(connection).loader.applied_migrations)
+
+    def test_reverse_is_refused_while_the_observation_ledger_has_rows(self):
+        from market.models import CandleObservation
+
+        self.record_live_observation()
+        self.assertEqual(CandleObservation.objects.count(), 1)
+
+        with self.assertRaisesMessage(RuntimeError, "forward-only once live observations exist"):
+            MigrationExecutor(connection).migrate(BEFORE)
+
+        # Refused before anything was dropped: no silent deletion, nothing unapplied.
+        self.assert_schema_untouched_at_0028()
+        self.assertEqual(CandleObservation.objects.count(), 1)
+
+    def test_reverse_is_refused_while_appended_snapshots_share_an_as_of(self):
+        from market.models import CandleObservation, Instrument, TechnicalSnapshot
+
+        instrument = Instrument.objects.create(
+            code="USD_CAD", base_currency="USD", quote_currency="CAD", display_order=1
+        )
+        as_of = datetime(2026, 1, 5, 9, tzinfo=UTC)
+        for digest in ("a" * 64, "b" * 64):
+            TechnicalSnapshot.objects.create(
+                instrument=instrument,
+                granularity="H1",
+                as_of=as_of,
+                candle_count=1,
+                algorithm_version=TechnicalSnapshot.ALGORITHM_VERSION,
+                provenance=TechnicalSnapshot.Provenance.OBSERVED,
+                source_candle_set_sha256=digest,
+            )
+        self.assertEqual(CandleObservation.objects.count(), 0)
+
+        with self.assertRaisesMessage(RuntimeError, "unique_technical_snapshot"):
+            MigrationExecutor(connection).migrate(BEFORE)
+
+        self.assert_schema_untouched_at_0028()
+        self.assertEqual(TechnicalSnapshot.objects.count(), 2)
 
     def tables(self):
         with connection.cursor() as cursor:

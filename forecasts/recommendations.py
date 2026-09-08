@@ -347,7 +347,11 @@ def generate_all_recommendations(*, provider=None, generated_at=None, allow_fixt
             )
             size_recommendation(recommendation, sized_at=generated_at)
         except Exception as error:
-            failures.append(f"{instrument.code}: {error}")
+            # The batch summary is persisted as a task-failure record and
+            # rendered on the Operations page, so it carries only the pair
+            # code and the exception type, never the inner message (which may
+            # quote provider responses or credentials).
+            failures.append(f"{instrument.code}: {type(error).__name__}")
         else:
             recommendations.append(recommendation)
     if failures:

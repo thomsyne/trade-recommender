@@ -991,6 +991,9 @@ def operations(request):
     }
     for failure in recent_failures:
         latest_success = latest_success_by_task.get(failure.task_name)
+        # A failed attempt whose own occurrence later succeeded on retry is
+        # recovered, distinct from recovery by a later occurrence of the task.
+        failure.recovered_on_retry = failure.occurrence.status == JobOccurrence.Status.SUCCEEDED
         failure.recovered = bool(
             latest_success and latest_success > failure.occurrence.scheduled_for
         )

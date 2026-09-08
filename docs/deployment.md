@@ -60,9 +60,12 @@ Repository variables:
   `prevent_destroy` blocks. Removing SSH *access* is done through the security
   group (`SSH_CIDRS_JSON`), not the key.
 - `SSH_CIDRS_JSON`: JSON such as `["203.0.113.10/32"]`. It defaults to `[]`,
-  which creates no port-22 ingress at all. Internet-wide entries
-  (`0.0.0.0/0`, `::/0`, any `/0`) fail `terraform` variable validation and the
+  which creates no port-22 ingress at all. Every entry must have a prefix
+  length of `/8` or longer (parsed numerically, so `/00` counts as `/0`);
+  Internet-scale entries (`0.0.0.0/0`, `::/0`, `/1` halves, `/2` quarters,
+  anything shorter than `/8`) fail `terraform` variable validation and the
   security-group precondition unless `SSH_PUBLIC_BREAK_GLASS` is also `true`.
+  `deploy/scripts/test-infra-policy.py` asserts the same floor statically.
 - `SSH_PUBLIC_BREAK_GLASS`: leave unset. Set to `true` only for a recorded
   emergency in which SSM is unusable and a narrow CIDR cannot be determined;
   revert immediately afterwards. Password, keyboard-interactive, and root SSH
@@ -403,5 +406,17 @@ or defaulted columns and new tables, so the previous image starts against the
 new schema. One behaviour is intentionally not backward compatible: technical
 snapshots are append-only at the database level, so a rolled-back image's
 in-place `update_or_create` of a snapshot fails visibly during live ingestion
-until the Phase 1 image is redeployed (or `market.0028` is reversed while no
-observation rows exist). Nothing is corrupted by that failure.
+until the Phase 1 image is redeployed. Nothing is corrupted by that failure.
+
+`market.0028` is **forward-only once live observations exist**. Unapplying it
+would drop `market_candleobservation` (the append-only provider-view ledger)
+and would fail while re-creating `unique_technical_snapshot` once appended
+recalculations share an `as_of`. Its reverse preflight therefore refuses with
+an explicit `RuntimeError` while the ledger holds any row or while any
+`(instrument, granularity, as_of)` holds more than one snapshot, before any
+object is dropped: the schema stays at 0028 and nothing is unapplied. Never
+run `manage.py migrate market 0027` on a database that has ingested live
+candles under Phase 1; the only rollback path for the application is
+redeploying the Phase 1 image. Reversal remains possible only on a database
+with an empty ledger and unique snapshot `as_of` values (for example a fresh
+test database).

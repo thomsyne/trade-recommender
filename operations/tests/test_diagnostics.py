@@ -55,6 +55,60 @@ class RedactionTests(TestCase):
         self.assertEqual(redact(None), "")
         self.assertEqual(redact("word " * 200)[-1], "…")
 
+    def test_canonical_credential_shapes_are_redacted(self):
+        # Each shape carries a marker that must never survive redaction, whether
+        # redacted directly or carried inside a classified provider message.
+        shapes = {
+            "authorization_bearer_short": ("Authorization: Bearer short-BEARER456", "BEARER456"),
+            "authorization_bearer_symbols": (
+                "Authorization: Bearer ab+cd/ef=BEARER457==",
+                "BEARER457",
+            ),
+            "authorization_basic": (
+                "Authorization: Basic dXNlcjpCQVNJQzQ1OA==",
+                "dXNlcjpCQVNJQzQ1OA",
+            ),
+            "authorization_equals": ("authorization=Bearer BEARER459", "BEARER459"),
+            "proxy_authorization": ("Proxy-Authorization: Basic UFJPWFk0NjA=", "UFJPWFk0NjA"),
+            "bearer_without_header": ("Bearer BEARER461", "BEARER461"),
+            "key": ("key=should-not-appear-KEY111", "KEY111"),
+            "pwd": ("pwd=PWD222", "PWD222"),
+            "pass": ("pass=PASS333", "PASS333"),
+            "client_secret": ("client_secret=CS444", "CS444"),
+            "access_token_query": ("https://api.example.com/v1?access_token=AT555", "AT555"),
+            "mixed_case_env": ("Postgres_Password=PGP666", "PGP666"),
+            "url_userinfo_token_only": (
+                "https://ghp_should-not-appear-GHP222@github.com/x",
+                "GHP222",
+            ),
+            "url_userinfo_password": ("https://alice:pa55w0rd-PW789@host/x", "PW789"),
+            "short_sk": ("sk-abc", "sk-abc"),
+            "aws_secret_with_slash": (
+                "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "wJalrXUtnFEMI",
+            ),
+            "bare_aws_secret": ("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMI"),
+            "x_api_key_header": ("x-api-key: XAPI777", "XAPI777"),
+            "json_api_key": ('{"api_key": "JSON888"}', "JSON888"),
+            "token_colon": ("token: TOK999", "TOK999"),
+            "cookie_header": ("Cookie: sessionid=SESS000", "SESS000"),
+            "upper_env": ("OANDA_TOKEN=should-not-appear-ENV000", "ENV000"),
+        }
+        for name, (shape, marker) in shapes.items():
+            with self.subTest(name):
+                self.assertIn(marker, shape)
+                direct = redact(f"failed: {shape} then continued")
+                self.assertNotIn(marker, direct, direct)
+                self.assertIn("[redacted]", direct)
+                classified = classify_failure(
+                    OandaError(f"OANDA returned HTTP 401: {shape}", failure_kind="auth")
+                ).summary
+                self.assertNotIn(marker, classified, classified)
+        # Benign provider text with no separator or credential is left readable.
+        benign = "OANDA returned HTTP 401: Insufficient authorization to perform request."
+        self.assertEqual(redact(benign), benign)
+        self.assertIn("api.example.com", redact("https://api.example.com/v1?access_token=x"))
+
     def test_known_exception_types_map_to_stable_codes(self):
         cases = (
             (ValueError("OANDA_TOKEN is not configured"), "configuration_missing", False),

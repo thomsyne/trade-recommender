@@ -176,6 +176,31 @@ class LiveObservationIdentityTests(TestCase):
         self.assertEqual(Candle.objects.count(), 1)
         self.assertEqual(Candle.objects.get().bid_low, original.bid_low)
 
+    def assert_ledger_chain(self, row, expected_volumes):
+        """Dense revisions, an unbroken ``supersedes`` chain, latest row authoritative."""
+        observations = list(row.observations.order_by("revision"))
+        self.assertEqual(
+            [item.revision for item in observations], list(range(1, len(observations) + 1))
+        )
+        self.assertEqual([item.volume for item in observations], expected_volumes)
+        self.assertIsNone(observations[0].supersedes)
+        for previous, observation in zip(observations, observations[1:], strict=False):
+            self.assertEqual(observation.supersedes, previous)
+        self.assertEqual(row.authoritative_observation(), observations[-1])
+        return observations
+
+    def ledger_rows(self):
+        return list(
+            CandleObservation.objects.order_by("id").values_list(
+                "id", "revision", "content_sha256", "supersedes_id", "kind", "volume"
+            )
+        )
+
+    def observations_recorded_by(self, run):
+        return AuditEvent.objects.get(
+            subject_id=str(run.pk), event_type="market.ingestion_succeeded"
+        ).payload["observations"]
+
     def test_out_of_order_and_repeated_revisions_are_idempotent(self):
         original = self.series(1)[0]
         revision_a = candle(original.timestamp, volume=101)
@@ -185,25 +210,114 @@ class LiveObservationIdentityTests(TestCase):
 
         repeat = ingest(self.source, self.instrument, [revision_a], "a-again")
         back_to_original = ingest(self.source, self.instrument, [original], "original-again")
+        original_repeated = ingest(self.source, self.instrument, [original], "original-twice")
         newer = ingest(self.source, self.instrument, [revision_b], "b")
 
+        self.assertEqual(self.observations_recorded_by(repeat), {"duplicate_revision": 1})
+        # Returning to the frozen content is a change of the provider's view and
+        # is recorded, so the latest view is never misreported as revision A.
+        self.assertEqual(self.observations_recorded_by(back_to_original), {"revision": 1})
+        self.assertEqual(self.observations_recorded_by(original_repeated), {"duplicate": 1})
+        self.assertEqual(self.observations_recorded_by(newer), {"revision": 1})
+        frozen = Candle.objects.get()
+        observations = self.assert_ledger_chain(frozen, [100, 101, 100, 102])
+        self.assertEqual(observations[2].content_sha256, frozen.content_sha256)
+        self.assertEqual(observations[2].differing_fields, [])
+        self.assertEqual(observations[2].kind, CandleObservation.Kind.REVISION)
+        self.assertEqual(frozen.volume, 100)
+
+    def test_reobserving_a_superseded_revision_appends_instead_of_failing(self):
+        # Provider content A -> B -> A: the third view equals an earlier, superseded revision.
+        original = self.series(1)[0]
+        ingest(self.source, self.instrument, [original], "first")
+        ingest(self.source, self.instrument, [candle(START, volume=200)], "a")
+        ingest(self.source, self.instrument, [candle(START, volume=300)], "b")
+        frozen = Candle.objects.get()
+        before = self.ledger_rows()
+
+        run = ingest(self.source, self.instrument, [candle(START, volume=200)], "a-again")
+
+        self.assertEqual(run.status, IngestionRun.Status.SUCCEEDED)
+        self.assertEqual(run.stored_count, 0)
+        self.assertEqual(self.observations_recorded_by(run), {"revision": 1})
+        observations = self.assert_ledger_chain(frozen, [100, 200, 300, 200])
+        self.assertEqual(observations[3].content_sha256, observations[1].content_sha256)
+        self.assertEqual(observations[3].kind, CandleObservation.Kind.REVISION)
+        self.assertEqual(observations[3].differing_fields, ["volume"])
+        self.assertEqual(observations[3].ingestion_run, run)
+        # Nothing already in the ledger was deleted or rewritten.
+        self.assertEqual(self.ledger_rows()[: len(before)], before)
+        frozen.refresh_from_db()
+        self.assertEqual(frozen.volume, 100)
+        self.assertEqual(frozen.content_sha256, candle_content_sha256("USD_CAD", "H1", original))
+
+    def test_alternating_revisions_record_every_change_of_view(self):
+        # A -> B -> A -> B, then back to the frozen content.
+        original = self.series(1)[0]
+        ingest(self.source, self.instrument, [original], "first")
+        for batch, volume in (("a", 200), ("b", 300), ("a2", 200), ("b2", 300)):
+            run = ingest(self.source, self.instrument, [candle(START, volume=volume)], batch)
+            self.assertEqual(run.status, IngestionRun.Status.SUCCEEDED, batch)
+            self.assertEqual(self.observations_recorded_by(run), {"revision": 1}, batch)
+        frozen = Candle.objects.get()
+        observations = self.assert_ledger_chain(frozen, [100, 200, 300, 200, 300])
+        self.assertEqual(observations[3].content_sha256, observations[1].content_sha256)
+        self.assertEqual(observations[4].content_sha256, observations[2].content_sha256)
         self.assertEqual(
-            AuditEvent.objects.get(subject_id=str(repeat.pk)).payload["observations"],
-            {"duplicate_revision": 1},
+            [item.kind for item in observations[1:]], [CandleObservation.Kind.REVISION] * 4
         )
-        self.assertEqual(
-            AuditEvent.objects.get(subject_id=str(back_to_original.pk)).payload["observations"],
-            {"duplicate": 1},
+
+        reverted = ingest(self.source, self.instrument, [original], "back-to-frozen")
+
+        observations = self.assert_ledger_chain(frozen, [100, 200, 300, 200, 300, 100])
+        self.assertEqual(observations[5].content_sha256, frozen.content_sha256)
+        self.assertEqual(observations[5].differing_fields, [])
+        self.assertEqual(self.observations_recorded_by(reverted), {"revision": 1})
+        self.assertEqual(Candle.objects.count(), 1)
+        self.assertFalse(
+            AuditEvent.objects.filter(event_type="market.live_candle_conflict").exists()
         )
-        self.assertEqual(
-            AuditEvent.objects.get(subject_id=str(newer.pk)).payload["observations"],
-            {"revision": 1},
-        )
-        self.assertEqual(
-            list(CandleObservation.objects.order_by("revision").values_list("volume", flat=True)),
-            [100, 101, 102],
-        )
-        self.assertEqual(Candle.objects.get().volume, 100)
+
+    def test_flip_flopped_candle_and_new_candle_in_one_batch_store_the_new_candle(self):
+        original = self.series(1)[0]
+        ingest(self.source, self.instrument, [original], "first")
+        ingest(self.source, self.instrument, [candle(START, volume=200)], "a")
+        ingest(self.source, self.instrument, [candle(START, volume=300)], "b")
+        window = [candle(START, volume=200), candle(START + timedelta(hours=1))]
+
+        run = ingest(self.source, self.instrument, window, "poll-window")
+
+        self.assertEqual(run.status, IngestionRun.Status.SUCCEEDED)
+        self.assertEqual(run.stored_count, 1)
+        self.assertEqual(self.observations_recorded_by(run), {"revision": 1, "initial": 1})
+        rows = list(Candle.objects.order_by("timestamp"))
+        self.assertEqual([row.timestamp for row in rows], [START, START + timedelta(hours=1)])
+        self.assert_ledger_chain(rows[0], [100, 200, 300, 200])
+        new_observation = self.assert_ledger_chain(rows[1], [100])[0]
+        self.assertEqual(new_observation.kind, CandleObservation.Kind.INITIAL)
+        self.assertEqual(new_observation.ingestion_run, run)
+
+    def test_retry_of_a_flip_flop_batch_is_a_no_op(self):
+        original = self.series(1)[0]
+        ingest(self.source, self.instrument, [original], "first")
+        ingest(self.source, self.instrument, [candle(START, volume=200)], "a")
+        ingest(self.source, self.instrument, [candle(START, volume=300)], "b")
+        window = [candle(START, volume=200), candle(START + timedelta(hours=1))]
+        ingest(self.source, self.instrument, window, "poll-window")
+        before = self.ledger_rows()
+
+        retry = ingest(self.source, self.instrument, window, "poll-window-retry")
+        retry_again = ingest(self.source, self.instrument, window, "poll-window-retry-2")
+
+        for run in (retry, retry_again):
+            self.assertEqual(run.status, IngestionRun.Status.SUCCEEDED)
+            self.assertEqual(run.stored_count, 0)
+            self.assertEqual(
+                self.observations_recorded_by(run), {"duplicate_revision": 1, "duplicate": 1}
+            )
+        self.assertEqual(self.ledger_rows(), before)
+        self.assertEqual(Candle.objects.count(), 2)
+        self.assert_ledger_chain(Candle.objects.get(timestamp=START), [100, 200, 300, 200])
 
     def test_late_historical_arrival_is_labelled_not_interpolated(self):
         later = [candle(START + timedelta(hours=index)) for index in (2, 3)]

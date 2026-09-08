@@ -9,7 +9,9 @@ technical snapshots were updated in place. This migration:
   source is the development fixture generator, otherwise ``legacy_unknown``.
   No hash or observation timestamp is fabricated for legacy rows. Governed rows
   keep NULL provenance because the dataset registration owns their provenance;
-* creates the append-only ``market_candleobservation`` ledger;
+* creates the append-only ``market_candleobservation`` ledger (unique per
+  ``(series, source, revision)``; a revision may repeat an earlier content
+  hash because the ledger records every change of the provider's view);
 * versions ``market_technicalsnapshot`` by algorithm and exact source candle set.
   Existing rows receive ``algorithm_version='technicals-v1'`` (deterministic:
   market/technicals.py has never changed) and ``legacy_unknown`` provenance;
@@ -19,6 +21,12 @@ technical snapshots were updated in place. This migration:
 
 The governed-candle trigger function installed by earlier gates is not touched:
 later migrations pin its body hash.
+
+Reversal is forward-only once live evidence exists: unapplying would drop the
+observation ledger (silent deletion of append-only evidence) and would fail
+while re-creating ``unique_technical_snapshot`` once appended recalculations
+share an ``as_of``. The reverse preflight refuses in both cases before any
+object is dropped, following the refusal pattern of migration 0027.
 """
 
 import django.db.models.deletion
@@ -123,6 +131,39 @@ def create_protection(apps, schema_editor):
 def drop_protection(apps, schema_editor):
     if schema_editor.connection.vendor == "postgresql":
         schema_editor.execute(DROP_PROTECTION_SQL)
+
+
+def refuse_reverse_with_live_evidence(apps, schema_editor):
+    """Refuse to unapply while reversal would delete or fail on live evidence.
+
+    Runs first on reverse (it is the last operation). Nothing below it has
+    executed yet, so a refusal leaves the schema exactly at 0028.
+    """
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM market_candleobservation")
+        observations = cursor.fetchone()[0]
+        if observations:
+            raise RuntimeError(
+                "market.0028 is forward-only once live observations exist: "
+                f"market_candleobservation holds {observations} row(s) and reversing "
+                "would delete the append-only observation ledger"
+            )
+        cursor.execute(
+            """
+            SELECT count(*) FROM (
+                SELECT 1 FROM market_technicalsnapshot
+                 GROUP BY instrument_id, granularity, as_of
+                HAVING count(*) > 1
+            ) AS duplicated
+            """
+        )
+        duplicated = cursor.fetchone()[0]
+        if duplicated:
+            raise RuntimeError(
+                "market.0028 is forward-only once appended technical snapshots exist: "
+                f"{duplicated} (instrument, granularity, as_of) group(s) hold more than one "
+                "calculation and reversing could not restore unique_technical_snapshot"
+            )
 
 
 class Migration(migrations.Migration):
@@ -344,16 +385,6 @@ class Migration(migrations.Migration):
                 ],
                 "constraints": [
                     models.UniqueConstraint(
-                        fields=(
-                            "instrument",
-                            "granularity",
-                            "timestamp",
-                            "source",
-                            "content_sha256",
-                        ),
-                        name="unique_candle_observation_content",
-                    ),
-                    models.UniqueConstraint(
                         fields=("instrument", "granularity", "timestamp", "source", "revision"),
                         name="unique_candle_observation_revision",
                     ),
@@ -380,4 +411,5 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.RunPython(create_protection, drop_protection),
+        migrations.RunPython(migrations.RunPython.noop, refuse_reverse_with_live_evidence),
     ]

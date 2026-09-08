@@ -803,13 +803,17 @@ class Candle(models.Model):
 
 
 class CandleObservation(ImmutableModel):
-    """Append-only ledger of every distinct live candle observation.
+    """Append-only ledger of every change in the provider's view of a live candle.
 
     Identity is (instrument, granularity, interval start, provider source,
-    content hash). Revision 1 is the observation that created the frozen
-    ``Candle`` row; later distinct contents append ``revision``/``conflict``
-    rows that supersede the previous authoritative observation without
-    deleting or rewriting anything. Exact duplicates create no row.
+    revision). Revision 1 is the observation that created the frozen
+    ``Candle`` row; every later change of content appends a ``revision``/
+    ``conflict`` row that supersedes the previous authoritative observation
+    without deleting or rewriting anything. Content equal to the current view
+    creates no row. A revision may repeat a content hash recorded in an
+    earlier revision: when a provider publishes A, then B, then A again, the
+    ledger holds three rows, so the chain stays faithful to what was observed
+    and re-observation of any earlier content can never fail.
     """
 
     class Kind(models.TextChoices):
@@ -850,10 +854,6 @@ class CandleObservation(ImmutableModel):
     class Meta:
         ordering = ("instrument", "granularity", "timestamp", "revision")
         constraints = [
-            models.UniqueConstraint(
-                fields=("instrument", "granularity", "timestamp", "source", "content_sha256"),
-                name="unique_candle_observation_content",
-            ),
             models.UniqueConstraint(
                 fields=("instrument", "granularity", "timestamp", "source", "revision"),
                 name="unique_candle_observation_revision",

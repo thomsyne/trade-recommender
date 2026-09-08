@@ -19,25 +19,39 @@ REDACTED = "[redacted]"
 SUMMARY_LIMIT = 240
 STAGE_ATTRIBUTE = "_task_stage"
 
+# Any identifier containing one of these words, in any case and with any prefix
+# or suffix (aws_secret_access_key, Postgres_Password, client_secret, pwd, pass).
+_CREDENTIAL_WORDS = r"secret|token|password|passwd|pwd|pass|key|cookie|session|credential"
+
 _REDACTION_PATTERNS = (
-    # URL userinfo: scheme://user:password@host
-    (re.compile(r"(?<=://)[^/\s@]+:[^/\s@]+@"), f"{REDACTED}@"),
-    # Bearer / token-style assignments: "Authorization: Bearer x", "token=x", "api_key: x"
+    # HTTP authorization headers, whole value including the scheme word:
+    # "Authorization: Bearer x", "Authorization: Basic dXNlcjpwYXNz", "authorization=Token x"
     (
-        re.compile(
-            r"(?i)\b(authorization|bearer|token|api[_-]?key|apikey|secret|password|passwd|"
-            r"pgpassword|x-api-key|access[_-]?key|session|cookie)\b\s*[:=]?\s*[^\s,;]+"
-        ),
+        re.compile(r"(?i)\bauthorization\s*[:=]\s*(?:bearer|basic|token|digest)?\s*\S+"),
+        f"authorization={REDACTED}",
+    ),
+    # Scheme-prefixed credential without a header name: "Bearer x"
+    (re.compile(r"(?i)\bbearer\s*[:=]?\s*\S+"), f"bearer={REDACTED}"),
+    # URL userinfo with or without a password: scheme://user:password@host, scheme://token@host
+    (re.compile(r"(?<=://)[^/\s@]+@"), f"{REDACTED}@"),
+    # Credential-like assignments regardless of surrounding word characters or case,
+    # with an optional quote around the name or value: token=x, "api_key": "x",
+    # client_secret=x, x-api-key: x, ?access_token=x, aws_secret_access_key=x
+    (
+        re.compile(rf"(?i)\b(\w*(?:{_CREDENTIAL_WORDS})\w*)[\"']?\s*[:=]\s*[\"']?[^\s,;\"']+"),
         rf"\1={REDACTED}",
     ),
     # Environment-like assignments: NAME=value
     (re.compile(r"\b[A-Z][A-Z0-9_]{2,}=[^\s,;]+"), f"[env]={REDACTED}"),
     # Well-known credential shapes
-    (re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"), REDACTED),
+    (re.compile(r"\bsk-[A-Za-z0-9_\-]{3,}"), REDACTED),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), REDACTED),
     (re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"), REDACTED),
-    # Long opaque tokens
-    (re.compile(r"\b[A-Za-z0-9_\-]{40,}\b"), REDACTED),
+    # Long opaque tokens, including base64 / AWS secret-key alphabets ("/", "+", "=")
+    (
+        re.compile(r"(?<![A-Za-z0-9_\-/+=])[A-Za-z0-9_\-/+=]{40,}(?![A-Za-z0-9_\-/+=])"),
+        REDACTED,
+    ),
 )
 
 

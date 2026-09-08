@@ -584,16 +584,25 @@ def _store_live_observations(source, instrument, granularity, run, candle_data):
             continue
         prior_payload = _candle_payload(prior)
         incoming_payload = _candle_payload(item)
-        if prior_payload == incoming_payload:
-            counts["duplicate"] += 1
-            continue
+        agrees_with_frozen = prior_payload == incoming_payload
         current = current_observations.get(item.timestamp)
-        if current is not None and current.content_sha256 == digest:
-            counts["duplicate_revision"] += 1
+        # The current provider view is the highest recorded revision, or the
+        # frozen row itself when no observation exists (legacy rows). Content
+        # equal to the current view is a no-op. Any other content supersedes
+        # it as revision N+1 -- including a return to content the provider
+        # published in an earlier revision (A -> B -> A) or to the frozen
+        # content itself -- so the ledger records every change of view and a
+        # retry of any batch is idempotent.
+        if current is None:
+            matches_current = agrees_with_frozen
+        else:
+            matches_current = current.content_sha256 == digest
+        if matches_current:
+            counts["duplicate" if agrees_with_frozen else "duplicate_revision"] += 1
             continue
         kind = (
             CandleObservation.Kind.CONFLICT
-            if candle_is_referenced(prior)
+            if not agrees_with_frozen and candle_is_referenced(prior)
             else CandleObservation.Kind.REVISION
         )
         differing = sorted(

@@ -37,7 +37,7 @@ variable "ssh_public_key" {
 }
 
 variable "ssh_cidrs" {
-  description = "CIDRs allowed to use key-only SSH. Empty by default (SSM Session Manager is the administration path). Internet-wide CIDRs (0.0.0.0/0, ::/0 or any /0) are rejected unless allow_public_ssh_break_glass is explicitly true."
+  description = "CIDRs allowed to use key-only SSH. Empty by default (SSM Session Manager is the administration path). Every entry must have a prefix length of at least /8; Internet-scale entries (0.0.0.0/0, ::/0, /1 halves, /2 quarters, anything shorter than /8) are rejected unless allow_public_ssh_break_glass is explicitly true."
   type        = list(string)
   default     = []
 
@@ -47,10 +47,12 @@ variable "ssh_cidrs" {
   }
 
   validation {
-    condition = var.allow_public_ssh_break_glass || length([
-      for cidr in var.ssh_cidrs : cidr if endswith(cidr, "/0")
-    ]) == 0
-    error_message = "ssh_cidrs must not contain an Internet-wide CIDR (0.0.0.0/0 or ::/0). Use narrow CIDRs or SSM; set allow_public_ssh_break_glass = true only as a documented emergency exception."
+    # The prefix length is parsed numerically so "/00" normalises to 0 and a
+    # malformed entry (no "/", non-numeric prefix) evaluates to -1 and fails.
+    condition = var.allow_public_ssh_break_glass || alltrue([
+      for cidr in var.ssh_cidrs : try(tonumber(element(split("/", cidr), 1)), -1) >= 8
+    ])
+    error_message = "ssh_cidrs entries must be narrow: prefix length /8 or longer. 0.0.0.0/0, ::/0, /1 halves, /2 quarters and any prefix shorter than /8 are Internet-scale. Use narrow CIDRs (a /32 for the current location) or SSM; set allow_public_ssh_break_glass = true only as a documented emergency exception."
   }
 }
 

@@ -176,6 +176,52 @@ class OperationsPageSemanticsTests(TestCase):
             status=JobOccurrence.Status.SUCCEEDED,
             attempts=1,
         )
+        # Attempt 1 failed, attempt 2 of the same occurrence succeeded.
+        retried = JobOccurrence.objects.create(
+            idempotency_key="retried-batch",
+            scheduled_job=job,
+            task_name=job.task_name,
+            scheduled_for=now - timedelta(minutes=30),
+            available_at=now - timedelta(minutes=30),
+            status=JobOccurrence.Status.SUCCEEDED,
+            attempts=2,
+            max_attempts=3,
+        )
+        cls.retried_failure = TaskFailure.objects.create(
+            occurrence=retried,
+            attempt_number=1,
+            task_name=job.task_name,
+            error_code="provider_timeout",
+            category="network",
+            stage="provider_fetch",
+            exception_type="ReadTimeout",
+            summary="ReadTimeout: provider request timed out",
+            terminal=False,
+            occurred_at=now - timedelta(minutes=29),
+        )
+
+    def failure_row(self, content, failure):
+        rows = [
+            chunk for chunk in content.split("<tr>") if f"#{failure.occurrence_id}</small>" in chunk
+        ]
+        self.assertEqual(len(rows), 1, failure.occurrence_id)
+        return rows[0]
+
+    def test_failure_recovered_within_its_own_occurrence_is_labelled_recovered_on_retry(self):
+        self.client.force_login(self.user)
+
+        response = self.client.get(reverse("operations"))
+        content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        row = self.failure_row(content, self.retried_failure)
+        self.assertIn("RECOVERED ON RETRY", row)
+        self.assertNotIn("RETRYABLE", row)
+        self.assertNotIn("RECOVERED LATER", row)
+        self.assertNotIn("TERMINAL", row)
+        # The terminal failure recovered by a later occurrence keeps its own label.
+        terminal = TaskFailure.objects.get(occurrence__idempotency_key="failed-batch")
+        self.assertIn("RECOVERED LATER", self.failure_row(content, terminal))
 
     def test_operations_page_reports_honest_states_and_accessible_semantics(self):
         self.client.force_login(self.user)

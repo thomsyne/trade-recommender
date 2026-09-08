@@ -125,10 +125,12 @@ resource "aws_security_group" "instance" {
 
   lifecycle {
     precondition {
-      condition = var.allow_public_ssh_break_glass || length([
-        for cidr in var.ssh_cidrs : cidr if endswith(cidr, "/0")
-      ]) == 0
-      error_message = "Refusing to open port 22 to the Internet without allow_public_ssh_break_glass."
+      # Mirrors the ssh_cidrs validation: every entry must be /8 or longer
+      # (prefix parsed numerically) unless break-glass is acknowledged.
+      condition = var.allow_public_ssh_break_glass || alltrue([
+        for cidr in var.ssh_cidrs : try(tonumber(element(split("/", cidr), 1)), -1) >= 8
+      ])
+      error_message = "Refusing to open port 22 to an Internet-scale CIDR (prefix shorter than /8) without allow_public_ssh_break_glass."
     }
   }
 
