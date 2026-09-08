@@ -76,6 +76,37 @@ class JobOccurrence(models.Model):
         indexes = [models.Index(fields=("status", "available_at"))]
 
 
+class TaskFailure(models.Model):
+    """Append-only, credential-free record of one failed task attempt."""
+
+    occurrence = models.ForeignKey(JobOccurrence, on_delete=models.PROTECT, related_name="failures")
+    attempt_number = models.PositiveSmallIntegerField()
+    task_name = models.CharField(max_length=120)
+    error_code = models.CharField(max_length=80)
+    category = models.CharField(max_length=40)
+    stage = models.CharField(max_length=80, blank=True)
+    exception_type = models.CharField(max_length=120, blank=True)
+    summary = models.CharField(max_length=240, blank=True)
+    terminal = models.BooleanField()
+    occurred_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ("-occurred_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("occurrence", "attempt_number"), name="unique_task_failure_attempt"
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Task failure records are append-only")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Task failure records are append-only")
+
+
 class OutboxMessage(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
@@ -147,6 +178,13 @@ class ProviderBudgetReservation(models.Model):
         RELEASED = "released", "Released"
         UNCERTAIN = "uncertain", "Uncertain"
 
+    class Outcome(models.TextChoices):
+        PENDING = "pending", "Pending validation"
+        VALIDATED = "validated", "Validated"
+        REJECTED = "rejected", "Rejected response"
+        CAP_EXCEEDED = "cap_exceeded", "Per-run cap exceeded"
+        PROVIDER_FAILED = "provider_failed", "Provider failed"
+
     budget = models.ForeignKey(
         ProviderBudget, on_delete=models.PROTECT, related_name="reservations"
     )
@@ -154,6 +192,13 @@ class ProviderBudgetReservation(models.Model):
     estimated_usd = models.DecimalField(max_digits=12, decimal_places=6)
     actual_usd = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
     status = models.CharField(max_length=12, choices=Status, default=Status.RESERVED)
+    # Validation outcome is distinct from the money status; blank means the
+    # row predates outcome recording and is never rewritten.
+    outcome = models.CharField(max_length=16, choices=Outcome, blank=True, default="")
+    requested_model = models.CharField(max_length=120, blank=True)
+    returned_model = models.CharField(max_length=120, blank=True)
+    pricing_version = models.CharField(max_length=80, blank=True)
+    usage_identity = models.CharField(max_length=160, blank=True)
     budget_at = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

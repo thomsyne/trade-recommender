@@ -32,8 +32,8 @@ from forecasts.recommendations import generate_recommendation, resolve_recommend
 from forecasts.reviews import build_due_review_cohort
 from forecasts.tests.test_recommendations import FakeProvider, evidence, rising_candle
 from market.models import Instrument, SourceRegistry
-from market.services import store_ingestion
 from market.tests.factories import candle
+from market.tests.timeline import EvidenceTimeline
 from operations.models import OwnerNotification, ProviderBudget, ProviderBudgetReservation
 
 
@@ -118,34 +118,31 @@ class BoundedInterpretationTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        reference_at = timezone.now() - timedelta(days=1)
-        store_ingestion(
+        self.timeline = EvidenceTimeline(daily=7)
+        reference_run = self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            reference_at,
-            reference_at + timedelta(days=1),
-            [candle(reference_at)],
-            {"test": "interpretation-reference", "requests": []},
+            [candle(self.timeline.session(0))],
+            manifest={"test": "interpretation-reference", "requests": []},
         )
-        self.generated_at = timezone.now() + timedelta(seconds=2)
+        self.generated_at = self.timeline.after(reference_run, seconds=2)
         evidence(self.instrument, self.generated_at)
-        self.recommendation = generate_recommendation(
-            self.instrument,
-            provider=FakeProvider(),
-            generated_at=self.generated_at,
-        )
-        start = self.recommendation.reference_candle.timestamp + timedelta(days=1)
-        store_ingestion(
+        with self.timeline.at(self.generated_at):
+            self.recommendation = generate_recommendation(
+                self.instrument,
+                provider=FakeProvider(),
+                generated_at=self.generated_at,
+            )
+        thesis_run = self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            start,
-            start + timedelta(days=5),
-            [rising_candle(start + timedelta(days=index)) for index in range(5)],
-            {"test": "interpretation-thesis", "requests": []},
+            [rising_candle(value) for value in self.timeline.sessions[1:6]],
+            manifest={"test": "interpretation-thesis", "requests": []},
         )
-        resolve_recommendation(self.recommendation)
+        with self.timeline.at(self.timeline.after(thesis_run)):
+            resolve_recommendation(self.recommendation)
         self.cohort = build_due_review_cohort(cutoff_at=self.generated_at + timedelta(days=10))
         self.member = (
             self.cohort.members.select_related("recommendation__instrument")

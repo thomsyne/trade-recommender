@@ -40,7 +40,7 @@ class IngestionServiceTests(TestCase):
         )
 
     def test_valid_ingestion_is_idempotent_and_calculates_snapshot(self):
-        start = datetime(2026, 1, 5, tzinfo=UTC)
+        start = datetime(2026, 1, 5, 6, tzinfo=UTC)  # 01:00 New York: an H4 session start
         end = start + timedelta(hours=24)
         candles = [candle(start + timedelta(hours=4 * index)) for index in range(6)]
         manifest = {"request": "fixed", "requests": []}
@@ -55,7 +55,7 @@ class IngestionServiceTests(TestCase):
         self.assertEqual(AuditEvent.objects.get().event_type, "market.ingestion_succeeded")
 
     def test_invalid_batch_fails_closed_and_stores_no_candles(self):
-        start = datetime(2026, 1, 5, tzinfo=UTC)
+        start = datetime(2026, 1, 5, 6, tzinfo=UTC)  # 01:00 New York: an H4 session start
         bad = candle(start, complete=False)
 
         run = store_ingestion(
@@ -100,7 +100,7 @@ class IngestionServiceTests(TestCase):
             source=self.source,
             manifest={"fixture": "cross-manifest-gap"},
         )
-        start = datetime(2026, 1, 5, tzinfo=UTC)
+        start = datetime(2026, 1, 5, 6, tzinfo=UTC)  # 01:00 New York: an H4 session start
         for index, timestamp in enumerate((start, start + timedelta(hours=2))):
             run = store_ingestion(
                 self.source,
@@ -129,7 +129,7 @@ class IngestionServiceTests(TestCase):
             source=self.source,
             manifest={"fixture": "bounded-window"},
         )
-        start = datetime(2026, 1, 5, tzinfo=UTC)
+        start = datetime(2026, 1, 5, 6, tzinfo=UTC)  # 01:00 New York: an H4 session start
         store_ingestion(
             self.source,
             self.instrument,
@@ -168,7 +168,7 @@ class IngestionServiceTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        start = datetime(2026, 1, 5, tzinfo=UTC)
+        start = datetime(2026, 1, 5, 6, tzinfo=UTC)  # 01:00 New York: an H4 session start
         end = start + timedelta(hours=24)
         candles = [candle(start + timedelta(hours=4 * index)) for index in range(6)]
         store_ingestion(
@@ -212,7 +212,7 @@ class IngestionServiceTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        start = datetime(2026, 1, 5, tzinfo=UTC)
+        start = datetime(2026, 1, 5, 6, tzinfo=UTC)  # 01:00 New York: an H4 session start
         candles = [candle(start)]
         store_ingestion(
             oanda,
@@ -252,7 +252,7 @@ class IngestionServiceTests(TestCase):
             event.delete()
 
     def test_governed_conflict_quarantines_batch_but_child_can_correct(self):
-        start = datetime(2026, 1, 5, tzinfo=UTC)
+        start = datetime(2026, 1, 5, 6, tzinfo=UTC)  # 01:00 New York: an H4 session start
         parent = DatasetVersion.objects.create(
             name="oanda",
             version="v1",

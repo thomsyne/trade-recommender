@@ -29,8 +29,9 @@ from forecasts.recommendations import (
 )
 from forecasts.sizing import size_recommendation
 from market.models import AuditEvent, Instrument, SourceRegistry
-from market.services import store_ingestion
+from market.services import live_candle_completion, store_ingestion
 from market.tests.factories import candle
+from market.tests.timeline import EvidenceTimeline
 from research.models import PairEvidenceSnapshot
 
 
@@ -195,22 +196,28 @@ class RecommendationTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        reference_at = timezone.now() - timedelta(days=1)
-        store_ingestion(
+        # One canonical timeline supplies every timestamp: completed New York
+        # sessions for the evidence, and a decision instant after the run that
+        # ingested it.
+        self.timeline = EvidenceTimeline(daily=7)
+        self.sessions = self.timeline.sessions
+        reference_at = self.timeline.session(0)
+        reference_run = self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            reference_at,
-            reference_at + timedelta(days=1),
             [candle(reference_at)],
-            {"test": "recommendation-reference", "requests": []},
+            manifest={"test": "recommendation-reference", "requests": []},
         )
-        self.now = timezone.now() + timedelta(seconds=1)
+        self.now = self.timeline.after(reference_run)
         self.snapshot = evidence(self.instrument, self.now)
 
     def admit(self, recommendation):
-        size_recommendation(recommendation, sized_at=recommendation.generated_at)
-        assess_recommendation_batch([recommendation], generated_at=recommendation.generated_at)
+        # Sizing and admission are part of the decision, so they are recorded at
+        # the instant the recommendation was issued.
+        with self.timeline.at(recommendation.generated_at):
+            size_recommendation(recommendation, sized_at=recommendation.generated_at)
+            assess_recommendation_batch([recommendation], generated_at=recommendation.generated_at)
 
     def test_generation_is_bounded_immutable_audited_and_idempotent(self):
         provider = FakeProvider()
@@ -326,26 +333,22 @@ class RecommendationTests(TestCase):
             provider=FakeProvider(),
             generated_at=self.now + timedelta(seconds=1),
         )
-        start = recommendation.reference_candle.timestamp + timedelta(days=1)
-        store_ingestion(
+        four = self.sessions[1:5]
+        self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            start,
-            start + timedelta(days=4),
-            [rising_candle(start + timedelta(days=index)) for index in range(4)],
-            {"test": "recommendation-future-four", "requests": []},
+            [rising_candle(value) for value in four],
+            manifest={"test": "recommendation-future-four", "requests": []},
         )
         self.assertIsNone(resolve_recommendation(recommendation))
 
-        store_ingestion(
+        self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            start + timedelta(days=4),
-            start + timedelta(days=5),
-            [rising_candle(start + timedelta(days=4))],
-            {"test": "recommendation-future-five", "requests": []},
+            [rising_candle(self.sessions[5])],
+            manifest={"test": "recommendation-future-five", "requests": []},
         )
         resolution = resolve_recommendation(recommendation)
 
@@ -453,30 +456,24 @@ class RecommendationTests(TestCase):
         self.assertEqual(result.gross_pips, Decimal("-100.000"))
 
     def test_paper_trade_waits_when_hourly_coverage_does_not_start_after_generation(self):
-        local_now = self.now.astimezone(ZoneInfo("America/New_York"))
-        days_until_friday = (4 - local_now.weekday()) % 7
-        generated_at = (local_now + timedelta(days=days_until_friday)).replace(
-            hour=18, minute=30, second=0, microsecond=0
-        )
-        if generated_at <= local_now:
-            generated_at += timedelta(days=7)
-        generated_at = generated_at.astimezone(self.now.tzinfo)
-        evidence(self.instrument, generated_at)
-        recommendation = generate_recommendation(
-            self.instrument,
-            provider=FakeProvider(),
-            generated_at=generated_at,
-        )
+        generated_at = self.now + timedelta(seconds=1)
+        with self.timeline.at(generated_at):
+            recommendation = generate_recommendation(
+                self.instrument,
+                provider=FakeProvider(),
+                generated_at=generated_at,
+            )
         self.admit(recommendation)
-        late = recommendation.generated_at + timedelta(hours=2)
-        store_ingestion(
+        # Coverage begins two market hours late, so the hour immediately after
+        # generation is missing and the trade cannot be adjudicated yet.
+        hours = self.timeline.hours_after(recommendation.generated_at, 3)
+        self.timeline.ingest(
             self.source,
             self.instrument,
             "H1",
-            recommendation.generated_at - timedelta(hours=1),
-            late + timedelta(hours=1),
-            [hourly_candle(late)],
-            {"test": "paper-incomplete-coverage", "requests": []},
+            [hourly_candle(hours[2])],
+            manifest={"test": "paper-incomplete-coverage", "requests": []},
+            requested_from=recommendation.generated_at - timedelta(hours=1),
         )
 
         self.assertIsNone(resolve_paper_trade(recommendation))
@@ -518,25 +515,19 @@ class RecommendationTests(TestCase):
             generated_at=self.now + timedelta(seconds=1),
         )
         self.admit(recommendation)
-        first_daily = (recommendation.reference_candle.timestamp + timedelta(days=1)).replace(
-            minute=0, second=0, microsecond=0
-        )
-        new_york = ZoneInfo("America/New_York")
-        first_daily += timedelta(days=-first_daily.astimezone(new_york).weekday() % 7)
-        future_daily = [rising_candle(first_daily + timedelta(days=index)) for index in range(5)]
-        store_ingestion(
+        future_sessions = self.sessions[1:6]
+        self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            first_daily,
-            first_daily + timedelta(days=5),
-            future_daily,
-            {"test": "paper-expiry-daily", "requests": []},
+            [rising_candle(value) for value in future_sessions],
+            manifest={"test": "paper-expiry-daily", "requests": []},
         )
-        horizon = future_daily[-1].timestamp
-        local_horizon = horizon.astimezone(new_york)
-        self.assertEqual(local_horizon.weekday(), 4)
-        expiry = (local_horizon + timedelta(days=1)).astimezone(horizon.tzinfo)
+        horizon = future_sessions[-1]
+        # The setup expires at the horizon session's own close, which is the
+        # canonical New York boundary rather than a hand-computed weekday.
+        expiry = live_candle_completion(horizon, "D")
+        self.assertEqual(expiry.astimezone(ZoneInfo("America/New_York")).hour, 17)
         hours = open_market_hours(recommendation.generated_at, expiry)
         no_touch = [
             hourly_candle(
@@ -552,14 +543,13 @@ class RecommendationTests(TestCase):
             )
             for timestamp in hours
         ]
-        hourly_run = store_ingestion(
+        hourly_run = self.timeline.ingest(
             self.source,
             self.instrument,
             "H1",
-            recommendation.generated_at - timedelta(hours=1),
-            expiry,
             no_touch,
-            {"test": "paper-expiry-hourly", "requests": []},
+            manifest={"test": "paper-expiry-hourly", "requests": []},
+            requested_from=recommendation.generated_at - timedelta(hours=1),
         )
         self.assertEqual(hourly_run.status, "succeeded")
         self.assertEqual(hourly_run.candles.count(), len(no_touch))
@@ -623,21 +613,24 @@ class RecommendationDatabaseTests(TransactionTestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        reference_at = timezone.now() - timedelta(days=1)
-        store_ingestion(
+        timeline = EvidenceTimeline(daily=7)
+        self.timeline = timeline
+        sessions = timeline.sessions
+        reference_at = timeline.session(0)
+        reference_run = timeline.ingest(
             source,
             instrument,
             "D",
-            reference_at,
-            reference_at + timedelta(days=1),
             [candle(reference_at)],
-            {"test": "database-reference", "requests": []},
+            manifest={"test": "database-reference", "requests": []},
         )
-        now = timezone.now() + timedelta(seconds=1)
+        now = timeline.after(reference_run)
         evidence(instrument, now)
-        recommendation = generate_recommendation(
-            instrument, provider=FakeProvider(), generated_at=now + timedelta(seconds=1)
-        )
+        decided_at = now + timedelta(seconds=1)
+        with timeline.at(decided_at):
+            recommendation = generate_recommendation(
+                instrument, provider=FakeProvider(), generated_at=decided_at
+            )
 
         def size_once(_):
             close_old_connections()
@@ -653,7 +646,8 @@ class RecommendationDatabaseTests(TransactionTestCase):
         self.assertEqual(
             PositionSizeAdvice.objects.filter(recommendation=recommendation).count(), 1
         )
-        assess_recommendation_batch([recommendation], generated_at=recommendation.generated_at)
+        with timeline.at(recommendation.generated_at):
+            assess_recommendation_batch([recommendation], generated_at=recommendation.generated_at)
 
         with self.assertRaises(DatabaseError), transaction.atomic():
             Recommendation.objects.filter(pk=recommendation.pk).update(confidence_percent=99)
@@ -664,12 +658,10 @@ class RecommendationDatabaseTests(TransactionTestCase):
         first_hour = open_market_hours(
             recommendation.generated_at, recommendation.generated_at + timedelta(days=4)
         )[0]
-        store_ingestion(
+        timeline.ingest(
             source,
             instrument,
             "H1",
-            recommendation.generated_at - timedelta(hours=1),
-            first_hour + timedelta(hours=1),
             [
                 hourly_candle(
                     first_hour,
@@ -681,7 +673,8 @@ class RecommendationDatabaseTests(TransactionTestCase):
                     ask_low=Decimal("1.3392"),
                 )
             ],
-            {"test": "database-paper-result", "requests": []},
+            manifest={"test": "database-paper-result", "requests": []},
+            requested_from=recommendation.generated_at - timedelta(hours=1),
         )
         paper_result = resolve_paper_trade(recommendation)
         with self.assertRaises(DatabaseError), transaction.atomic():
@@ -696,15 +689,12 @@ class RecommendationDatabaseTests(TransactionTestCase):
         paper_result.refresh_from_db()
         self.assertEqual(paper_result.gross_pips, Decimal("-100.000"))
 
-        start = recommendation.reference_candle.timestamp + timedelta(days=1)
-        store_ingestion(
+        timeline.ingest(
             source,
             instrument,
             "D",
-            start,
-            start + timedelta(days=5),
-            [rising_candle(start + timedelta(days=index)) for index in range(5)],
-            {"test": "database-resolution", "requests": []},
+            [rising_candle(value) for value in sessions[1:6]],
+            manifest={"test": "database-resolution", "requests": []},
         )
         resolution = resolve_recommendation(recommendation)
         with self.assertRaises(DatabaseError), transaction.atomic():

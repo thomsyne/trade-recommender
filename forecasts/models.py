@@ -256,6 +256,8 @@ class Recommendation(ImmutableModel):
     )
     provider = models.CharField(max_length=40)
     model = models.CharField(max_length=100)
+    returned_model = models.CharField(max_length=120, blank=True)
+    pricing_version = models.CharField(max_length=80, blank=True)
     contract_version = models.PositiveSmallIntegerField(default=1)
     generated_at = models.DateTimeField(default=timezone.now)
     information_cutoff = models.DateTimeField()

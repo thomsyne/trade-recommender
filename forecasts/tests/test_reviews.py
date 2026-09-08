@@ -6,7 +6,6 @@ from django.contrib.auth import get_user_model
 from django.db import DatabaseError, transaction
 from django.test import TestCase
 from django.urls import reverse
-from django.utils import timezone
 
 from forecasts.models import (
     DeterministicReview,
@@ -23,13 +22,12 @@ from forecasts.tests.test_recommendations import (
     FakeProvider,
     evidence,
     hourly_candle,
-    open_market_hours,
     output,
     rising_candle,
 )
 from market.models import Instrument, SourceRegistry
-from market.services import store_ingestion
 from market.tests.factories import candle
+from market.tests.timeline import EvidenceTimeline
 
 
 class DeterministicReviewTests(TestCase):
@@ -44,52 +42,48 @@ class DeterministicReviewTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        reference_at = timezone.now() - timedelta(days=1)
-        store_ingestion(
+        self.timeline = EvidenceTimeline(daily=7)
+        reference_run = self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            reference_at,
-            reference_at + timedelta(days=1),
-            [candle(reference_at)],
-            {"test": "review-reference", "requests": []},
+            [candle(self.timeline.session(0))],
+            manifest={"test": "review-reference", "requests": []},
         )
-        self.generated_at = timezone.now() + timedelta(seconds=2)
+        self.generated_at = self.timeline.after(reference_run, seconds=2)
         evidence(self.instrument, self.generated_at)
 
     def recommendation(self):
-        recommendation = generate_recommendation(
-            self.instrument,
-            provider=FakeProvider(),
-            generated_at=self.generated_at,
-        )
-        size_recommendation(recommendation, sized_at=self.generated_at)
-        assess_recommendation_batch([recommendation], generated_at=self.generated_at)
+        with self.timeline.at(self.generated_at):
+            recommendation = generate_recommendation(
+                self.instrument,
+                provider=FakeProvider(),
+                generated_at=self.generated_at,
+            )
+            size_recommendation(recommendation, sized_at=self.generated_at)
+            assess_recommendation_batch([recommendation], generated_at=self.generated_at)
         return recommendation
 
     def resolve_thesis(self, recommendation):
-        start = recommendation.reference_candle.timestamp + timedelta(days=1)
-        store_ingestion(
+        run = self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            start,
-            start + timedelta(days=5),
-            [rising_candle(start + timedelta(days=index)) for index in range(5)],
-            {"test": "review-thesis", "requests": []},
+            [rising_candle(value) for value in self.timeline.sessions[1:6]],
+            manifest={"test": "review-thesis", "requests": []},
         )
-        return resolve_recommendation(recommendation)
+        # Adjudication is stamped from the clock, so it happens when the fifth
+        # session became available -- not at the real wall clock, which would
+        # place the resolution after every cutoff derived from the timeline.
+        with self.timeline.at(self.timeline.after(run)):
+            return resolve_recommendation(recommendation)
 
     def resolve_target(self, recommendation):
-        first = open_market_hours(
-            recommendation.generated_at, recommendation.generated_at + timedelta(days=4)
-        )[0]
-        store_ingestion(
+        first = self.timeline.hours_after(recommendation.generated_at, 1)[0]
+        run = self.timeline.ingest(
             self.source,
             self.instrument,
             "H1",
-            recommendation.generated_at - timedelta(hours=1),
-            first + timedelta(hours=2),
             [
                 hourly_candle(first),
                 hourly_candle(
@@ -98,9 +92,11 @@ class DeterministicReviewTests(TestCase):
                     ask_high=Decimal("1.3604"),
                 ),
             ],
-            {"test": "review-execution", "requests": []},
+            manifest={"test": "review-execution", "requests": []},
+            requested_from=recommendation.generated_at - timedelta(hours=1),
         )
-        return resolve_paper_trade(recommendation)
+        with self.timeline.at(self.timeline.after(run)):
+            return resolve_paper_trade(recommendation)
 
     def test_frozen_cohort_is_idempotent_and_correction_supersedes_changed_facts(self):
         recommendation = self.recommendation()

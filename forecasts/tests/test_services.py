@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
@@ -13,8 +13,8 @@ from forecasts.services import (
     resolve_forecast,
 )
 from market.models import Instrument, SourceRegistry
-from market.services import store_ingestion
 from market.tests.factories import candle
+from market.tests.timeline import EvidenceTimeline
 
 
 class ForecastServiceTests(TestCase):
@@ -30,9 +30,13 @@ class ForecastServiceTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        cls.start = datetime(2026, 1, 1, 22, tzinfo=UTC)
+        # 30 real New York sessions: the fixture indexes sessions, not calendar
+        # days, so weekends never masquerade as trading days.
+        cls.timeline = EvidenceTimeline(daily=30)
+        cls.sessions = cls.timeline.sessions
+        cls.start = cls.sessions[0]
         cls._store_daily_batch(
-            cls.start,
+            0,
             20,
             "initial",
             bid_close=Decimal("1.1010"),
@@ -40,21 +44,25 @@ class ForecastServiceTests(TestCase):
         )
 
     @classmethod
-    def _store_daily_batch(cls, start, count, manifest, **changes):
-        data = [candle(start + timedelta(days=index), **changes) for index in range(count)]
-        return store_ingestion(
+    def _store_daily_batch(cls, index, count, manifest, **changes):
+        """Store ``count`` sessions starting at session ``index``."""
+        starts = cls.sessions[index : index + count]
+        return cls.timeline.ingest(
             cls.source,
             cls.instrument,
             "D",
-            start,
-            start + timedelta(days=count),
-            data,
-            {"test": manifest, "requests": []},
+            [candle(start, **changes) for start in starts],
+            manifest={"test": manifest, "requests": []},
         )
+
+    @classmethod
+    def _issued_after(cls, index):
+        """An issuance instant just after session ``index`` closed."""
+        return cls.timeline.poll_instant([cls.sessions[index]], "D")
 
     def test_contracts_and_baselines_are_versioned_parented_and_idempotent(self):
         contracts = ensure_target_contracts()
-        issued_at = self.start + timedelta(days=20)
+        issued_at = self._issued_after(19)
 
         first = issue_baselines(self.instrument, issued_at)
         second = issue_baselines(self.instrument, issued_at + timedelta(hours=1))
@@ -72,16 +80,13 @@ class ForecastServiceTests(TestCase):
             tactical.probability_up + tactical.probability_neutral + tactical.probability_down,
             Decimal("1.0000"),
         )
-        self.assertEqual(
-            tactical.evidence_snapshot.anchor_candle.timestamp, self.start + timedelta(days=19)
-        )
+        self.assertEqual(tactical.evidence_snapshot.anchor_candle.timestamp, self.sessions[19])
         self.assertEqual(tactical.information_cutoff, issued_at)
 
     def test_resolution_waits_for_five_later_sessions_then_scores_golden_outcome(self):
-        _, tactical = issue_baselines(self.instrument, self.start + timedelta(days=20))
-        future_start = self.start + timedelta(days=20)
+        _, tactical = issue_baselines(self.instrument, self._issued_after(19))
         self._store_daily_batch(
-            future_start,
+            20,
             4,
             "future-four",
             bid_close=Decimal("1.1200"),
@@ -93,7 +98,7 @@ class ForecastServiceTests(TestCase):
         self.assertIsNone(resolve_forecast(tactical))
 
         self._store_daily_batch(
-            future_start + timedelta(days=4),
+            24,
             1,
             "future-five",
             bid_close=Decimal("1.1200"),
@@ -111,7 +116,7 @@ class ForecastServiceTests(TestCase):
         self.assertEqual(resolve_forecast(tactical), resolution)
 
     def test_conditional_entry_records_touch_without_claiming_a_fill(self):
-        macro, tactical = issue_baselines(self.instrument, self.start + timedelta(days=20))
+        macro, tactical = issue_baselines(self.instrument, self._issued_after(19))
         conditional = Forecast.objects.create(
             instrument=self.instrument,
             target_contract=tactical.target_contract,
@@ -136,7 +141,7 @@ class ForecastServiceTests(TestCase):
             rationale="Golden contract fixture.",
             idempotency_key="golden-conditional-fixture",
         )
-        self._store_daily_batch(self.start + timedelta(days=20), 5, "conditional-future")
+        self._store_daily_batch(20, 5, "conditional-future")
 
         resolution = resolve_forecast(conditional)
 
@@ -159,10 +164,10 @@ class ForecastServiceTests(TestCase):
         with self.assertRaisesMessage(
             ValidationError, "Refusing to issue a prospective baseline from development fixtures"
         ):
-            issue_baselines(self.instrument, self.start + timedelta(days=20))
+            issue_baselines(self.instrument, self._issued_after(19))
 
     def test_python_layer_rejects_forecast_mutation(self):
-        _, forecast = issue_baselines(self.instrument, self.start + timedelta(days=20))
+        _, forecast = issue_baselines(self.instrument, self._issued_after(19))
         forecast.rationale = "changed after issuance"
         with self.assertRaises(ValidationError):
             forecast.save()
@@ -180,18 +185,17 @@ class ForecastDatabaseInvariantTests(TransactionTestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        start = datetime(2026, 1, 1, 22, tzinfo=UTC)
-        data = [candle(start + timedelta(days=index)) for index in range(20)]
-        store_ingestion(
+        timeline = EvidenceTimeline(daily=20)
+        timeline.ingest(
             source,
             instrument,
             "D",
-            start,
-            start + timedelta(days=20),
-            data,
-            {"test": "database-trigger", "requests": []},
+            [candle(start) for start in timeline.sessions],
+            manifest={"test": "database-trigger", "requests": []},
         )
-        _, forecast = issue_baselines(instrument, start + timedelta(days=20))
+        _, forecast = issue_baselines(
+            instrument, timeline.poll_instant([timeline.sessions[-1]], "D")
+        )
 
         with self.assertRaises(DatabaseError), transaction.atomic():
             Forecast.objects.filter(pk=forecast.pk).update(rationale="mutated")

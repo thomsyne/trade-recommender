@@ -37,9 +37,29 @@ variable "ssh_public_key" {
 }
 
 variable "ssh_cidrs" {
-  description = "CIDRs allowed to use key-only SSH. Empty by default. Set [\"0.0.0.0/0\"] explicitly only when travel requires it; prefer narrow CIDRs and SSM."
+  description = "CIDRs allowed to use key-only SSH. Empty by default (SSM Session Manager is the administration path). Every entry must have a prefix length of at least /8; Internet-scale entries (0.0.0.0/0, ::/0, /1 halves, /2 quarters, anything shorter than /8) are rejected unless allow_public_ssh_break_glass is explicitly true."
   type        = list(string)
   default     = []
+
+  validation {
+    condition     = alltrue([for cidr in var.ssh_cidrs : can(cidrhost(cidr, 0))])
+    error_message = "Every ssh_cidrs entry must be a valid IPv4 or IPv6 CIDR."
+  }
+
+  validation {
+    # The prefix length is parsed numerically so "/00" normalises to 0 and a
+    # malformed entry (no "/", non-numeric prefix) evaluates to -1 and fails.
+    condition = var.allow_public_ssh_break_glass || alltrue([
+      for cidr in var.ssh_cidrs : try(tonumber(element(split("/", cidr), 1)), -1) >= 8
+    ])
+    error_message = "ssh_cidrs entries must be narrow: prefix length /8 or longer. 0.0.0.0/0, ::/0, /1 halves, /2 quarters and any prefix shorter than /8 are Internet-scale. Use narrow CIDRs (a /32 for the current location) or SSM; set allow_public_ssh_break_glass = true only as a documented emergency exception."
+  }
+}
+
+variable "allow_public_ssh_break_glass" {
+  description = "Emergency-only acknowledgement that ssh_cidrs may contain an Internet-wide CIDR. Leave false. Record the reason and revert to narrow CIDRs or [] afterwards."
+  type        = bool
+  default     = false
 }
 
 variable "backup_retention_days" {

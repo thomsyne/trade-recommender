@@ -120,8 +120,19 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_security_group" "instance" {
   name        = "${var.name_prefix}-instance"
-  description = "Public HTTPS and optional key-only owner SSH"
+  description = "Public HTTP/HTTPS; SSH only for explicit narrow CIDRs (SSM is the admin path)"
   vpc_id      = aws_vpc.main.id
+
+  lifecycle {
+    precondition {
+      # Mirrors the ssh_cidrs validation: every entry must be /8 or longer
+      # (prefix parsed numerically) unless break-glass is acknowledged.
+      condition = var.allow_public_ssh_break_glass || alltrue([
+        for cidr in var.ssh_cidrs : try(tonumber(element(split("/", cidr), 1)), -1) >= 8
+      ])
+      error_message = "Refusing to open port 22 to an Internet-scale CIDR (prefix shorter than /8) without allow_public_ssh_break_glass."
+    }
+  }
 
   ingress {
     description = "HTTP for ACME redirect"
@@ -189,7 +200,10 @@ resource "aws_iam_role_policy" "instance" {
     Statement = [
       { Effect = "Allow", Action = ["ecr:GetAuthorizationToken"], Resource = "*" },
       { Effect = "Allow", Action = ["ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"], Resource = aws_ecr_repository.app.arn },
-      { Effect = "Allow", Action = ["s3:GetObject"], Resource = ["${aws_s3_bucket.backups.arn}/deployment/*", "${aws_s3_bucket.backups.arn}/postgres/*"] },
+      # GetObjectVersion is what lets a backup verify the exact object version
+      # it just wrote (head-object --version-id), instead of trusting whatever
+      # currently sits at the key.
+      { Effect = "Allow", Action = ["s3:GetObject", "s3:GetObjectVersion", "s3:GetObjectVersionAttributes"], Resource = ["${aws_s3_bucket.backups.arn}/deployment/*", "${aws_s3_bucket.backups.arn}/postgres/*"] },
       { Effect = "Allow", Action = ["s3:PutObject", "s3:AbortMultipartUpload"], Resource = "${aws_s3_bucket.backups.arn}/postgres/*" },
       { Effect = "Allow", Action = ["s3:ListBucket"], Resource = aws_s3_bucket.backups.arn, Condition = { StringLike = { "s3:prefix" = ["deployment/*", "postgres/*"] } } },
       { Effect = "Allow", Action = ["ssm:GetParameter"], Resource = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.production_env_parameter}" }

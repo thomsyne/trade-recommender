@@ -56,6 +56,8 @@ jobs:
           .venv/bin/python deploy/scripts/check-deploy-iam-policy.py
           bash deploy/scripts/test-bootstrap-host.sh
           bash deploy/scripts/test-remote-deploy.sh
+          bash deploy/scripts/test-backup.sh
+          .venv/bin/python deploy/scripts/test-infra-policy.py
       # The Django suite is paused for the remainder of the strategy programme. It
       # runs for over an hour and dominates every CI run, so it is gated rather
       # than deleted: set FULL_TEST_SUITE_ENABLED to 'true' to restore it. The
@@ -110,6 +112,8 @@ jobs:
       ROUTE53_ZONE_ID: ${{ vars.ROUTE53_ZONE_ID }}
       SSH_PUBLIC_KEY: ${{ vars.SSH_PUBLIC_KEY }}
       SSH_CIDRS_JSON: ${{ vars.SSH_CIDRS_JSON }}
+      # Emergency-only. Any value other than 'true' keeps Internet-wide SSH rejected.
+      SSH_PUBLIC_BREAK_GLASS: ${{ vars.SSH_PUBLIC_BREAK_GLASS }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install Terraform and initialize encrypted remote state
@@ -133,8 +137,9 @@ jobs:
           zone_id = os.environ.get("ROUTE53_ZONE_ID", "").strip()
           if not zone_id:
               raise SystemExit("ROUTE53_ZONE_ID repository variable is required")
+          break_glass = os.environ.get("SSH_PUBLIC_BREAK_GLASS", "").strip().lower() == "true"
           with open("infra/owner.auto.tfvars.json", "w") as stream:
-              json.dump({"route53_zone_id": zone_id, "public_hostname": os.environ["PUBLIC_HOSTNAME"], "ssh_public_key": os.environ.get("SSH_PUBLIC_KEY", ""), "ssh_cidrs": cidrs}, stream)
+              json.dump({"route53_zone_id": zone_id, "public_hostname": os.environ["PUBLIC_HOSTNAME"], "ssh_public_key": os.environ.get("SSH_PUBLIC_KEY", ""), "ssh_cidrs": cidrs, "allow_public_ssh_break_glass": break_glass}, stream)
           PY
           terraform -chdir=infra init -input=false \
             -backend-config="bucket=${state_bucket}" -backend-config="key=production/terraform.tfstate" \
@@ -150,7 +155,14 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$registry"
           docker run --privileged --rm tonistiigi/binfmt:qemu-v8.1.5 --install arm64
           docker buildx create --use
-          docker buildx build --platform linux/arm64 --tag "${repository}:${GITHUB_SHA}" --push .
+          docker buildx build --platform linux/arm64 \
+            --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
+            --build-arg "BUILD_CREATED=$(date -u +%FT%TZ)" \
+            --build-arg "SOURCE_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --build-arg "IMAGE_VERSION=${GITHUB_SHA}" \
+            --tag "${repository}:${GITHUB_SHA}" --push .
+          # The immutable digest is the deployable identity; record it in the job log.
+          docker buildx imagetools inspect "${repository}:${GITHUB_SHA}" --format '{{json .Manifest.Digest}}'
       - name: Apply infrastructure
         id: apply
         run: |

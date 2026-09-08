@@ -1,13 +1,12 @@
-import shutil
+import json
 from datetime import timedelta
-from pathlib import Path
 
 from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
-from django.db.models import F, Prefetch, Q
+from django.db.models import Count, F, Max, Prefetch, Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -34,6 +33,7 @@ from forecasts.models import (
     ReviewCohortMember,
 )
 from forecasts.portfolio import cohort_is_open, select_portfolio_cohort
+from market.freshness import all_series_freshness
 from market.models import (
     AuditEvent,
     Candle,
@@ -43,7 +43,22 @@ from market.models import (
     SourceRegistry,
     TechnicalSnapshot,
 )
-from operations.models import JobOccurrence, OutboxMessage, OwnerNotification, ScheduledJob
+from operations.accounting import OUTCOME_LABELS, provider_accounts
+from operations.host_health import (
+    backup_assessment,
+    disk_status,
+    memory_status,
+    process_status,
+    read_backup_state,
+)
+from operations.job_state import project_all_job_states
+from operations.models import (
+    JobOccurrence,
+    OutboxMessage,
+    OwnerNotification,
+    ScheduledJob,
+    TaskFailure,
+)
 from research.models import (
     EconomicEvent,
     MacroSeries,
@@ -67,15 +82,48 @@ def live(request):
     return JsonResponse({"status": "ok"})
 
 
+def _occurrence_identity(row):
+    """The identity of the recurring work an occurrence belongs to.
+
+    A scheduled job is the identity when there is one; ad-hoc occurrences fall
+    back to their task and the exact parameters they ran with, so a success for
+    USD_CAD H1 never marks a EUR_USD H4 failure recovered. Parameters are
+    canonicalised with sorted keys so key order cannot split an identity, while
+    absent parameters stay distinct from explicitly empty ones.
+    """
+    if row.get("scheduled_job_id"):
+        return ("job", row["scheduled_job_id"])
+    return ("task", row.get("task_name"), json.dumps(row.get("parameters"), sort_keys=True))
+
+
+def migration_status():
+    """Unapplied migration plan and the latest applied migration per app."""
+    executor = MigrationExecutor(connection)
+    plan = executor.migration_plan(executor.loader.graph.leaf_nodes())
+    applied = {}
+    for app_label, name in executor.loader.applied_migrations:
+        if app_label in {"market", "forecasts", "operations", "research", "dashboard"}:
+            applied[app_label] = max(applied.get(app_label, ""), name)
+    return {
+        "up_to_date": not plan,
+        "unapplied_count": len(plan),
+        "unapplied": [f"{migration.app_label}.{migration.name}" for migration, _ in plan][:10],
+        "latest_applied": dict(sorted(applied.items())),
+    }
+
+
 def ready(request):
+    """Readiness: database, migrations, worker heartbeats, disk, genuine last backup."""
+    now = timezone.now()
     failures = []
+    detail = {}
     try:
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1")
-        executor = MigrationExecutor(connection)
-        if executor.migration_plan(executor.loader.graph.leaf_nodes()):
+        migrations = migration_status()
+        if not migrations["up_to_date"]:
             failures.append("migrations")
-        stale_before = timezone.now() - timedelta(minutes=10)
+        stale_before = now - timedelta(minutes=10)
         if (
             JobOccurrence.objects.filter(status=JobOccurrence.Status.RUNNING)
             .filter(Q(heartbeat_at__isnull=True) | Q(heartbeat_at__lt=stale_before))
@@ -84,21 +132,33 @@ def ready(request):
             failures.append("stale_jobs")
     except Exception:
         failures.append("database")
-    try:
-        free_gb = shutil.disk_usage(settings.READINESS_DISK_PATH).free / (1024**3)
-        if free_gb < settings.READINESS_MIN_FREE_GB:
-            failures.append("disk")
-    except OSError:
+    disk = disk_status(
+        settings.READINESS_DISK_PATH,
+        min_free_gb=settings.READINESS_MIN_FREE_GB,
+        warning_free_gb=settings.CAPACITY_DISK_WARNING_FREE_GB,
+    )
+    if disk["level"] in {"critical", "unavailable"}:
         failures.append("disk")
-    if settings.READINESS_BACKUP_MARKER:
-        marker = Path(settings.READINESS_BACKUP_MARKER)
-        if not marker.exists() or timezone.now().timestamp() - marker.stat().st_mtime > (
-            settings.READINESS_BACKUP_MAX_AGE_HOURS * 3600
-        ):
+    detail["disk"] = {"level": disk["level"], "free_gb": disk["free_gb"]}
+    if settings.READINESS_BACKUP_MARKER or settings.READINESS_BACKUP_STATE_DIR:
+        state = read_backup_state(
+            settings.READINESS_BACKUP_STATE_DIR, settings.READINESS_BACKUP_MARKER
+        )
+        backup_ok, backup_detail = backup_assessment(
+            state, now=now, max_age_hours=settings.READINESS_BACKUP_MAX_AGE_HOURS
+        )
+        if not backup_ok:
             failures.append("backup")
+        detail["backup"] = backup_detail
     status = 503 if failures else 200
     return JsonResponse(
-        {"status": "unhealthy" if failures else "ok", "checks": failures}, status=status
+        {
+            "status": "unhealthy" if failures else "ok",
+            "checks": failures,
+            "revision": settings.APP_SOURCE_REVISION,
+            **detail,
+        },
+        status=status,
     )
 
 
@@ -913,22 +973,94 @@ def select_cohort(request, cohort_id):
     return redirect("inbox")
 
 
+def _image_tag(image_uri):
+    """Only the tag part of IMAGE_URI is shown; the registry hostname carries the account id."""
+    if not image_uri:
+        return ""
+    return image_uri.rsplit(":", 1)[-1] if ":" in image_uri.rsplit("/", 1)[-1] else ""
+
+
 @owner_required
 def operations(request):
+    now = timezone.now()
     recommendation_run = JobOccurrence.objects.filter(
         task_name="forecast.generate_recommendations"
     ).first()
+    recommendation_failure = (
+        TaskFailure.objects.filter(occurrence=recommendation_run).first()
+        if recommendation_run
+        else None
+    )
     failed_recommendation_runs = JobOccurrence.objects.filter(
         task_name="forecast.generate_recommendations",
         status=JobOccurrence.Status.FAILED,
-        created_at__gte=timezone.now() - timedelta(hours=24),
+        created_at__gte=now - timedelta(hours=24),
     ).count()
+    job_states = project_all_job_states(now=now)
+    recent_failures = list(TaskFailure.objects.select_related("occurrence__scheduled_job")[:20])
+    # Recovery is correlated by the identity of the work, not by the task name
+    # alone: two scheduled jobs run the same task for different instruments or
+    # granularities, and one pair succeeding says nothing about another pair.
+    latest_success_by_identity = {}
+    for row in (
+        JobOccurrence.objects.filter(status=JobOccurrence.Status.SUCCEEDED)
+        .values("scheduled_job_id", "task_name", "parameters")
+        .annotate(latest=Max("scheduled_for"))
+    ):
+        # The query groups by parameters, so one scheduled job can produce
+        # several rows. Collapsing them to the job identity has to keep the
+        # newest success: a dict comprehension would keep whichever row the
+        # database happened to return last.
+        key = _occurrence_identity(row)
+        current = latest_success_by_identity.get(key)
+        if current is None or row["latest"] > current:
+            latest_success_by_identity[key] = row["latest"]
+    for failure in recent_failures:
+        latest_success = latest_success_by_identity.get(
+            _occurrence_identity(
+                {
+                    "scheduled_job_id": failure.occurrence.scheduled_job_id,
+                    "task_name": failure.occurrence.task_name,
+                    "parameters": failure.occurrence.parameters,
+                }
+            )
+        )
+        # A failed attempt whose own occurrence later succeeded on retry is
+        # recovered, distinct from recovery by a later occurrence of the task.
+        failure.recovered_on_retry = failure.occurrence.status == JobOccurrence.Status.SUCCEEDED
+        failure.recovered = bool(
+            latest_success and latest_success > failure.occurrence.scheduled_for
+        )
+    backup_state = read_backup_state(
+        settings.READINESS_BACKUP_STATE_DIR, settings.READINESS_BACKUP_MARKER
+    )
+    backup_ok, backup_detail = backup_assessment(
+        backup_state, now=now, max_age_hours=settings.READINESS_BACKUP_MAX_AGE_HOURS
+    )
+    experiment_era = (
+        ExperimentEra.objects.select_related("method").order_by("-starts_at", "-id").first()
+    )
+    migrations = migration_status()
+    from market.models import CandleObservation
+
+    observation_counts = {
+        row["kind"]: row["count"]
+        for row in CandleObservation.objects.values("kind")
+        .order_by("kind")
+        .annotate(count=Count("id"))
+    }
+    accounts = provider_accounts(now=now)
+    for account in accounts:
+        for row in account.rows[:10]:
+            row.outcome_label = OUTCOME_LABELS.get(row.outcome, row.outcome)
     return render(
         request,
         "dashboard/operations.html",
         {
             "jobs": ScheduledJob.objects.all(),
+            "job_states": job_states,
             "occurrences": JobOccurrence.objects.select_related("scheduled_job")[:20],
+            "recent_failures": recent_failures,
             "runs": IngestionRun.objects.select_related("instrument", "source")[:20],
             "events": AuditEvent.objects.all()[:20],
             "sources": SourceRegistry.objects.all(),
@@ -937,9 +1069,34 @@ def operations(request):
                 :20
             ],
             "recommendation_run": recommendation_run,
+            "recommendation_failure": recommendation_failure,
             "failed_recommendation_runs": failed_recommendation_runs,
             "active_pair_count": Instrument.objects.filter(active=True).count(),
             "outbox_messages": OutboxMessage.objects.all()[:20],
             "email_delivery_enabled": settings.EMAIL_DELIVERY_ENABLED,
+            "freshness_rows": all_series_freshness(now=now),
+            "backup_state": backup_state,
+            "backup_ok": backup_ok,
+            "backup_detail": backup_detail,
+            "backup_max_age_hours": settings.READINESS_BACKUP_MAX_AGE_HOURS,
+            "disk": disk_status(
+                settings.READINESS_DISK_PATH,
+                min_free_gb=settings.READINESS_MIN_FREE_GB,
+                warning_free_gb=settings.CAPACITY_DISK_WARNING_FREE_GB,
+            ),
+            "memory": memory_status(
+                settings.CAPACITY_MEMINFO_PATH,
+                warning_percent=settings.CAPACITY_MEMORY_WARNING_PERCENT,
+                critical_percent=settings.CAPACITY_MEMORY_CRITICAL_PERCENT,
+            ),
+            "process": process_status(now=now),
+            "revision": settings.APP_SOURCE_REVISION,
+            "build_created": settings.APP_BUILD_CREATED,
+            "image_tag": _image_tag(settings.APP_IMAGE_URI),
+            "migrations": migrations,
+            "experiment_era": experiment_era,
+            "observation_counts": observation_counts,
+            "provider_accounts": accounts,
+            "now": now,
         },
     )

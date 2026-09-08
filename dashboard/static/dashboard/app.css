@@ -2131,3 +2131,33 @@ td small {
   .experiment-gates small,
   .experiment-era-list header small { font-size: 10px; }
 }
+
+/* Phase 1 operations: accessible captions and state chips keep text semantics. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.table-panel td .state + small.quiet {
+  display: block;
+  margin-top: 4px;
+  max-width: 34ch;
+}
+.table-panel th[scope="row"] {
+  text-align: left;
+  font-weight: 600;
+}
+.capacity-panel h3 {
+  margin: 18px 0 6px;
+  font-size: 15px;
+}
+.health-facts strong .state {
+  margin-left: 8px;
+  vertical-align: middle;
+}

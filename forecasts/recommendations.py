@@ -24,6 +24,7 @@ from market.models import AuditEvent, Candle, IngestionRun, Instrument, Technica
 from operations.models import ProviderBudget, ProviderBudgetReservation
 from operations.services import (
     mark_provider_budget_uncertain,
+    record_reservation_outcome,
     reserve_provider_budget,
     settle_provider_budget,
 )
@@ -96,6 +97,7 @@ class ProviderResult:
     response_id: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
+    returned_model: str = ""
 
 
 class RecommendationProvider(Protocol):
@@ -159,6 +161,7 @@ class AnthropicProvider:
             response_id=body.get("id", ""),
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),
+            returned_model=str(body.get("model") or ""),
         )
 
 
@@ -217,12 +220,25 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
         result = provider.generate(input_payload)
     except Exception:
         mark_provider_budget_uncertain(reservation)
+        record_reservation_outcome(reservation, ProviderBudgetReservation.Outcome.PROVIDER_FAILED)
         raise
     cost_usd = _cost(result.input_tokens, result.output_tokens)
-    settle_provider_budget(reservation, cost_usd)
+    returned_model = getattr(result, "returned_model", "") or ""
+    settle_provider_budget(
+        reservation,
+        cost_usd,
+        returned_model=returned_model,
+        usage_identity=result.response_id,
+        pricing_version=settings.RECOMMENDATION_PRICING_VERSION,
+    )
     if cost_usd > settings.RECOMMENDATION_MAX_RUN_COST_USD:
+        record_reservation_outcome(reservation, ProviderBudgetReservation.Outcome.CAP_EXCEEDED)
         raise ValidationError("Recommendation response exceeded the per-run spend cap")
-    output = _validate_output(result.output, allowed_ids)
+    try:
+        output = _validate_output(result.output, allowed_ids)
+    except ValidationError:
+        record_reservation_outcome(reservation, ProviderBudgetReservation.Outcome.REJECTED)
+        raise
     probabilities = _probabilities(output)
     confidence_percent = {
         Recommendation.Action.BUY: output["probability_up_percent"],
@@ -260,6 +276,8 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
             control_forecast=control,
             provider=provider.name,
             model=provider.model,
+            returned_model=returned_model,
+            pricing_version=settings.RECOMMENDATION_PRICING_VERSION,
             contract_version=CONTRACT_VERSION,
             generated_at=generated_at,
             information_cutoff=snapshot.information_cutoff,
@@ -298,6 +316,11 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
                 "request_sha256": request_sha256,
                 "provider": provider.name,
                 "model": provider.model,
+                "returned_model": returned_model,
+                "model_identity_mismatch": bool(returned_model)
+                and returned_model != provider.model,
+                "pricing_version": settings.RECOMMENDATION_PRICING_VERSION,
+                "reference_candle_content_sha256": reference_candle.content_sha256,
                 "action": recommendation.action,
                 "confidence_percent": recommendation.confidence_percent,
                 "cost_usd": str(recommendation.cost_usd),
@@ -305,6 +328,7 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
                 "setup_levels_owner": "deterministic-local-policy-v1",
             },
         )
+        record_reservation_outcome(reservation, ProviderBudgetReservation.Outcome.VALIDATED)
         assign_recommendation(recommendation, method)
     return recommendation
 
@@ -323,7 +347,11 @@ def generate_all_recommendations(*, provider=None, generated_at=None, allow_fixt
             )
             size_recommendation(recommendation, sized_at=generated_at)
         except Exception as error:
-            failures.append(f"{instrument.code}: {error}")
+            # The batch summary is persisted as a task-failure record and
+            # rendered on the Operations page, so it carries only the pair
+            # code and the exception type, never the inner message (which may
+            # quote provider responses or credentials).
+            failures.append(f"{instrument.code}: {type(error).__name__}")
         else:
             recommendations.append(recommendation)
     if failures:
@@ -359,6 +387,8 @@ def _reserve_recommendation_budget(provider, key, input_payload, *, generated_at
         f"recommendation:{key}",
         estimated_cost,
         now=generated_at,
+        requested_model=provider.model,
+        pricing_version=settings.RECOMMENDATION_PRICING_VERSION,
     )
     if reservation is None:
         raise ValidationError("Recommendation provider spend cap reached")
@@ -705,6 +735,10 @@ def resolve_recommendation(recommendation):
             "outcome_contract_version": 1,
             "observed_as_of": observed_as_of.isoformat(),
             "candle_ids": [candle.pk for candle in later_candles],
+            "candle_content_sha256s": [candle.content_sha256 for candle in later_candles],
+            "horizon_candle_content_sha256": endpoint.content_sha256,
+            "reference_candle_content_sha256": recommendation.reference_candle.content_sha256,
+            "candle_revision_policy": "first-complete-observation-v1",
             "ingestion_run_ids": sorted({candle.ingestion_run_id for candle in later_candles}),
             "setup_performance_not_measured": True,
         },

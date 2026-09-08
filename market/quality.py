@@ -20,6 +20,45 @@ REGISTERED_STEPS = {
     "H1": timedelta(hours=1),
 }
 
+# The one authoritative statement of when a candle interval may start, in
+# America/New_York wall-clock terms. ``expected_candle_timestamps`` (the
+# historical calendar) and ``live_interval_is_aligned`` (the live ledger) both
+# read these, and migration 0029's SQL mirror is bound to them by
+# market.tests.test_observation_lineage's parity test, so the Python and SQL
+# rules cannot drift apart silently.
+SESSION_CLOSE = time(17)
+#: Python ``weekday()`` values whose 17:00 close opens a daily candle (Sun-Thu).
+DAILY_SESSION_WEEKDAYS = frozenset({6, 0, 1, 2, 3})
+#: Python ``weekday()`` value whose 17:00 close opens a weekly candle (Friday).
+WEEKLY_SESSION_WEEKDAY = 4
+#: New York local hours that open a four-hour candle.
+FOUR_HOUR_SESSION_HOURS = frozenset({1, 5, 9, 13, 17, 21})
+#: The finite set of granularities the live observation ledger supports.
+LIVE_GRANULARITIES = frozenset({"H1", "H4", "D", "W"})
+
+
+def live_interval_is_aligned(timestamp, granularity):
+    """Whether ``timestamp`` may open a live candle of ``granularity``.
+
+    H1 and H4 are absolute-duration intervals on the New York session grid; D
+    and W start at the 17:00 America/New_York close, daily on Sunday through
+    Thursday and weekly on Friday. Unsupported granularities are never aligned.
+    """
+    if granularity not in LIVE_GRANULARITIES:
+        return False
+    local = timestamp.astimezone(NEW_YORK)
+    if local.minute or local.second or local.microsecond:
+        return False
+    if granularity == "H1":
+        return True
+    if granularity == "H4":
+        return local.hour in FOUR_HOUR_SESSION_HOURS
+    if local.time() != SESSION_CLOSE:
+        return False
+    if granularity == "D":
+        return local.weekday() in DAILY_SESSION_WEEKDAYS
+    return local.weekday() == WEEKLY_SESSION_WEEKDAY
+
 
 def final_registered_completion_before(boundary, granularity):
     """Return the last frozen-calendar completion strictly before ``boundary``."""
@@ -77,11 +116,13 @@ def expected_candle_timestamps(start, end, granularity):
     local = start.astimezone(NEW_YORK)
     aligned = local.minute == local.second == local.microsecond == 0
     if granularity == "W":
-        aligned = aligned and local.weekday() == 4 and local.time() == time(17)
+        aligned = aligned and local.weekday() == WEEKLY_SESSION_WEEKDAY
+        aligned = aligned and local.time() == SESSION_CLOSE
     elif granularity == "D":
-        aligned = aligned and local.weekday() in {6, 0, 1, 2, 3} and local.time() == time(17)
+        aligned = aligned and local.weekday() in DAILY_SESSION_WEEKDAYS
+        aligned = aligned and local.time() == SESSION_CLOSE
     elif granularity == "H4":
-        aligned = aligned and local.hour in {1, 5, 9, 13, 17, 21} and _market_is_open(local)
+        aligned = aligned and local.hour in FOUR_HOUR_SESSION_HOURS and _market_is_open(local)
     else:
         aligned = aligned and _market_is_open(local)
     if not aligned:

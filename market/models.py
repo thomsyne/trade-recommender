@@ -657,6 +657,21 @@ class HistoricalDataContract(ImmutableModel):
 
 
 class Candle(models.Model):
+    """One completed bid/ask interval.
+
+    Governed rows (``dataset_version`` set) are owned by an immutable historical
+    dataset. Live rows (``dataset_version`` NULL) are frozen at their first
+    accepted complete observation: ``content_sha256``/``observed_at`` bind that
+    identity, later provider revisions are appended to ``CandleObservation``
+    and never rewrite this row. Rows written before Phase 1 carry the honest
+    ``legacy_unknown`` provenance marker with no fabricated hash or timestamp.
+    """
+
+    class Provenance(models.TextChoices):
+        OBSERVED = "observed", "Observed live candle"
+        FIXTURE = "fixture", "Development fixture"
+        LEGACY_UNKNOWN = "legacy_unknown", "Legacy row; provenance not recorded"
+
     instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
     ingestion_run = models.ForeignKey(
         IngestionRun, on_delete=models.PROTECT, related_name="candles"
@@ -676,6 +691,9 @@ class Candle(models.Model):
     ask_high = models.DecimalField(max_digits=12, decimal_places=6)
     ask_low = models.DecimalField(max_digits=12, decimal_places=6)
     ask_close = models.DecimalField(max_digits=12, decimal_places=6)
+    content_sha256 = models.CharField(max_length=64, null=True, blank=True)
+    observed_at = models.DateTimeField(null=True, blank=True)
+    provenance = models.CharField(max_length=16, choices=Provenance, null=True, blank=True)
 
     class Meta:
         ordering = ("timestamp",)
@@ -719,6 +737,20 @@ class Candle(models.Model):
                 ),
                 name="candle_bid_not_above_ask",
             ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(dataset_version__isnull=False, provenance__isnull=True)
+                    | models.Q(dataset_version__isnull=True, provenance__isnull=False)
+                ),
+                name="candle_provenance_matches_ownership",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(provenance="observed")
+                    | models.Q(content_sha256__isnull=False, observed_at__isnull=False)
+                ),
+                name="candle_observed_rows_carry_identity",
+            ),
         ]
         indexes = [models.Index(fields=("instrument", "granularity", "-timestamp"))]
 
@@ -738,15 +770,128 @@ class Candle(models.Model):
     def midpoint_low(self):
         return (self.bid_low + self.ask_low) / 2
 
+    @property
+    def is_live(self):
+        return self.dataset_version_id is None
+
+    def authoritative_observation(self):
+        """Latest provider view of this interval: the highest recorded revision.
+
+        The evidence contract stays bound to this row (revision 1); a higher
+        revision here means the provider later published different content and
+        that revision is retained for inspection rather than adopted silently.
+        """
+        return self.observations.order_by("-revision", "-id").first()
+
     def save(self, *args, **kwargs):
         if self.pk and self.dataset_version_id:
             raise ValidationError("governed dataset candles are immutable")
+        if self.pk:
+            raise ValidationError("live candles are append-only; record a revision instead")
+        if self.dataset_version_id is None and self.provenance is None:
+            # A live row written outside the observation path carries no
+            # attested provenance; say so instead of inventing one.
+            self.provenance = self.Provenance.LEGACY_UNKNOWN
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
         if self.dataset_version_id:
             raise ValidationError("governed dataset candles are immutable")
+        if self.provenance != self.Provenance.FIXTURE:
+            raise ValidationError("live candles are append-only")
         return super().delete(*args, **kwargs)
+
+
+class CandleObservation(ImmutableModel):
+    """Append-only ledger of every change in the recorded view of a live candle.
+
+    The chain belongs to the canonical candle identity ``(instrument,
+    granularity, interval start)``, not to a source: ``revision`` is the row's
+    position in that candle's view history across all sources and
+    ``supersedes`` always points at revision N-1 of the same candle. Revision 1
+    rows are either the ``initial``/``late_arrival`` observation that created
+    the frozen ``Candle`` row or the first recorded view of a legacy candle
+    (kind ``revision``/``conflict``). Every later change of content appends a
+    dense ``revision``/``conflict`` row superseding the current chain head
+    without deleting or rewriting anything. ``source`` and ``ingestion_run``
+    are provenance attributes of each observation. Content equal to the current
+    view creates no row. A revision may repeat a content hash recorded in an
+    earlier revision: when a provider publishes A, then B, then A again, the
+    ledger holds three rows, so the chain stays faithful to what was observed
+    and re-observation of any earlier content can never fail.
+    """
+
+    class Kind(models.TextChoices):
+        INITIAL = "initial", "First observation"
+        LATE_ARRIVAL = "late_arrival", "First observation arriving after later candles"
+        REVISION = "revision", "Provider revision of an unreferenced candle"
+        CONFLICT = "conflict", "Provider revision of a candle bound to frozen evidence"
+
+    instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
+    granularity = models.CharField(max_length=3, choices=GRANULARITIES)
+    timestamp = models.DateTimeField(help_text="UTC interval-start timestamp")
+    interval_end = models.DateTimeField(help_text="UTC interval completion under live semantics")
+    complete = models.BooleanField()
+    volume = models.PositiveIntegerField()
+    bid_open = models.DecimalField(max_digits=12, decimal_places=6)
+    bid_high = models.DecimalField(max_digits=12, decimal_places=6)
+    bid_low = models.DecimalField(max_digits=12, decimal_places=6)
+    bid_close = models.DecimalField(max_digits=12, decimal_places=6)
+    ask_open = models.DecimalField(max_digits=12, decimal_places=6)
+    ask_high = models.DecimalField(max_digits=12, decimal_places=6)
+    ask_low = models.DecimalField(max_digits=12, decimal_places=6)
+    ask_close = models.DecimalField(max_digits=12, decimal_places=6)
+    source = models.ForeignKey(SourceRegistry, on_delete=models.PROTECT)
+    ingestion_run = models.ForeignKey(
+        IngestionRun, on_delete=models.PROTECT, related_name="candle_observations"
+    )
+    candle = models.ForeignKey(Candle, on_delete=models.PROTECT, related_name="observations")
+    kind = models.CharField(max_length=16, choices=Kind)
+    revision = models.PositiveIntegerField()
+    supersedes = models.ForeignKey(
+        "self", on_delete=models.PROTECT, null=True, blank=True, related_name="superseded_by"
+    )
+    content_sha256 = models.CharField(max_length=64)
+    differing_fields = models.JSONField(default=list)
+    observed_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("instrument", "granularity", "timestamp", "revision")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("candle", "revision"),
+                name="unique_candle_observation_chain",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(complete=True), name="candle_observation_complete"
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        kind__in=("initial", "late_arrival"),
+                        revision=1,
+                        supersedes__isnull=True,
+                    )
+                    | models.Q(
+                        kind__in=("revision", "conflict"),
+                        revision=1,
+                        supersedes__isnull=True,
+                    )
+                    | models.Q(
+                        kind__in=("revision", "conflict"),
+                        revision__gt=1,
+                        supersedes__isnull=False,
+                    )
+                ),
+                name="candle_observation_revision_shape",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(timestamp__lt=models.F("interval_end")),
+                name="candle_observation_increasing_interval",
+            ),
+        ]
+        indexes = [models.Index(fields=("candle", "-revision"), name="candle_observation_rev_idx")]
 
 
 class IngestionManifest(ImmutableModel):
@@ -903,6 +1048,24 @@ class DatasetRegistration(ImmutableModel):
 
 
 class TechnicalSnapshot(models.Model):
+    """One deterministic technical calculation over an exact candle set.
+
+    Snapshots are append-only: a recalculation whose source candle set or
+    algorithm differs appends a new row instead of rewriting the one that
+    existing evidence snapshots and recommendations already reference. The
+    authoritative snapshot for (instrument, granularity, as_of) is the most
+    recently calculated row. Legacy rows carry ``legacy_unknown`` provenance
+    and no source-set hash; their algorithm version is recorded as
+    ``technicals-v1`` because the calculation module has never changed.
+    """
+
+    ALGORITHM_VERSION = "technicals-v1"
+
+    class Provenance(models.TextChoices):
+        OBSERVED = "observed", "Calculated from observed candles"
+        FIXTURE = "fixture", "Calculated from development fixtures"
+        LEGACY_UNKNOWN = "legacy_unknown", "Legacy row; source binding not recorded"
+
     instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
     granularity = models.CharField(max_length=3, choices=GRANULARITIES)
     as_of = models.DateTimeField()
@@ -913,15 +1076,47 @@ class TechnicalSnapshot(models.Model):
     prior_low = models.DecimalField(max_digits=12, decimal_places=6, null=True)
     support = models.DecimalField(max_digits=12, decimal_places=6, null=True)
     resistance = models.DecimalField(max_digits=12, decimal_places=6, null=True)
+    algorithm_version = models.CharField(max_length=40, default=ALGORITHM_VERSION)
+    source_candle_set_sha256 = models.CharField(max_length=64, null=True, blank=True)
+    provenance = models.CharField(
+        max_length=16, choices=Provenance, default=Provenance.LEGACY_UNKNOWN
+    )
     calculated_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=("instrument", "granularity", "as_of"), name="unique_technical_snapshot"
-            )
+                fields=(
+                    "instrument",
+                    "granularity",
+                    "as_of",
+                    "algorithm_version",
+                    "source_candle_set_sha256",
+                ),
+                name="unique_technical_snapshot_calculation",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(provenance="legacy_unknown", source_candle_set_sha256__isnull=True)
+                    | models.Q(
+                        provenance__in=("observed", "fixture"),
+                        source_candle_set_sha256__isnull=False,
+                    )
+                ),
+                name="technical_snapshot_binding_matches_provenance",
+            ),
         ]
-        ordering = ("-as_of",)
+        ordering = ("-as_of", "-calculated_at", "-id")
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("technical snapshots are append-only")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.provenance != self.Provenance.FIXTURE:
+            raise ValidationError("technical snapshots are append-only")
+        return super().delete(*args, **kwargs)
 
 
 class OandaInstrumentTermsSnapshot(models.Model):

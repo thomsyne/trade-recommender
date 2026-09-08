@@ -1,7 +1,7 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-readonly BOOTSTRAP_VERSION="2026-08-22.1"
+readonly BOOTSTRAP_VERSION="2026-09-07.1"
 readonly COMPOSE_VERSION="2.39.2"
 readonly COMPOSE_SHA256="54488fffb60782f3c8787a48b95ed15f49f5a3a85f4105304bd46db5edd9db61"
 readonly ROOT="${BOOTSTRAP_ROOT:-}"
@@ -96,6 +96,9 @@ EOF
   sshd -t
   systemctl restart sshd
   install -d -m 700 "$APP_DIR" "$STATE_DIR"
+  # Empty, world-readable directory bind-mounted read-only into the web
+  # container as its only host-filesystem capacity signal.
+  install -d -m 755 "${STATE_DIR}/host-health"
   printf '%s\n' "$BOOTSTRAP_VERSION" >"${STATE_DIR}/bootstrap-version"
 }
 

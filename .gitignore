@@ -14,3 +14,4 @@ staticfiles/
 *.auto.tfvars
 *.auto.tfvars.json
 *.bundle
+.commandcode*

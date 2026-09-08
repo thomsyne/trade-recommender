@@ -1,15 +1,17 @@
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 from market.models import (
     AuditEvent,
     Candle,
     CandleConflict,
+    CandleObservation,
     DataQualityIncident,
     IngestionManifest,
     IngestionRun,
@@ -384,27 +386,8 @@ def store_ingestion(
             run.save()
             return run
 
-    series = Candle.objects.filter(
-        instrument=instrument, granularity=granularity, dataset_version=dataset_version
-    )
-    fixture_rows = series.filter(ingestion_run__source__name="Development fixtures")
-    replaced_fixture_count = 0
-    discard_fixture_batch = (
-        source.name == "Development fixtures"
-        and series.exclude(ingestion_run__source=source).exists()
-    )
-    if source.name != "Development fixtures":
-        replaced_fixture_count = fixture_rows.count()
-        if replaced_fixture_count:
-            fixture_rows.delete()
-            TechnicalSnapshot.objects.filter(
-                instrument=instrument, granularity=granularity
-            ).delete()
-
-    rows = (
-        []
-        if discard_fixture_batch
-        else [
+    if dataset_version is not None:
+        rows = [
             Candle(
                 instrument=instrument,
                 ingestion_run=run,
@@ -413,15 +396,33 @@ def store_ingestion(
                 **item.__dict__,
             )
             for item in candle_data
-            if not dataset_version or item.timestamp not in existing_by_key
+            if item.timestamp not in existing_by_key
         ]
-    )
-    before = series.count()
-    Candle.objects.bulk_create(rows, ignore_conflicts=dataset_version is None)
-    after = series.count()
+        Candle.objects.bulk_create(rows)
+        run.status = IngestionRun.Status.SUCCEEDED
+        run.fetched_count = len(candle_data)
+        run.stored_count = len(rows)
+        run.finished_at = timezone.now()
+        run.save()
+        AuditEvent.objects.create(
+            event_type="market.ingestion_succeeded",
+            actor="market.services.store_ingestion",
+            subject_type="IngestionRun",
+            subject_id=str(run.pk),
+            payload={
+                "fetched": run.fetched_count,
+                "stored": run.stored_count,
+                "manifest": digest,
+                "replaced_fixture_candles": 0,
+                "discarded_fixture_batch": False,
+            },
+        )
+        return run
+
+    outcome = _store_live_observations(source, instrument, granularity, run, candle_data)
     run.status = IngestionRun.Status.SUCCEEDED
     run.fetched_count = len(candle_data)
-    run.stored_count = after - before
+    run.stored_count = outcome["stored"]
     run.finished_at = timezone.now()
     run.save()
     AuditEvent.objects.create(
@@ -433,13 +434,281 @@ def store_ingestion(
             "fetched": run.fetched_count,
             "stored": run.stored_count,
             "manifest": digest,
-            "replaced_fixture_candles": replaced_fixture_count,
-            "discarded_fixture_batch": discard_fixture_batch,
+            "replaced_fixture_candles": outcome["replaced_fixture_candles"],
+            "discarded_fixture_batch": outcome["discarded_fixture_batch"],
+            "observations": outcome["observations"],
         },
     )
-    if dataset_version is None:
-        calculate_and_store_snapshot(instrument, granularity)
+    if outcome["conflicts"]:
+        AuditEvent.objects.create(
+            event_type="market.live_candle_conflict",
+            actor="market.services.store_ingestion",
+            subject_type="IngestionRun",
+            subject_id=str(run.pk),
+            payload={
+                "instrument": instrument.code,
+                "granularity": granularity,
+                "conflicts": outcome["conflicts"],
+            },
+        )
+    calculate_and_store_snapshot(instrument, granularity)
     return run
+
+
+LIVE_STEPS = {
+    "W": timedelta(weeks=1),
+    "D": timedelta(days=1),
+    "H4": timedelta(hours=4),
+    "H1": timedelta(hours=1),
+}
+
+
+def live_candle_completion(timestamp, granularity):
+    """Completion instant of one live provider candle.
+
+    H1/H4 candles are absolute-duration intervals (the provider never merges
+    two hours into one during a DST transition), so completion is exact UTC
+    arithmetic. Daily and weekly candles are aligned to the 17:00
+    America/New_York close and therefore complete one local day/week later.
+    """
+    if granularity in {"H1", "H4"}:
+        return timestamp + LIVE_STEPS[granularity]
+    return registered_candle_completion(timestamp, granularity)
+
+
+def candle_content_sha256(instrument_code, granularity, candle):
+    """Deterministic identity of one candle's evidence content."""
+    return _json_hash(
+        {
+            "instrument": instrument_code,
+            "granularity": granularity,
+            **_candle_payload(candle),
+        }
+    )
+
+
+def candle_is_referenced(candle):
+    """True when frozen evidence outside the market app points at this candle row."""
+    for relation in Candle._meta.related_objects:
+        model = relation.related_model
+        if model._meta.app_label == "market":
+            continue
+        if model._default_manager.filter(**{relation.field.name: candle}).exists():
+            return True
+    return False
+
+
+def _serialize_live_series(instrument, granularity):
+    """Serialize concurrent live ingestion for one series inside the transaction."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            [f"live-candles:{instrument.pk}:{granularity}"],
+        )
+
+
+def _store_live_observations(source, instrument, granularity, run, candle_data):
+    _serialize_live_series(instrument, granularity)
+    series = Candle.objects.filter(
+        instrument=instrument, granularity=granularity, dataset_version=None
+    )
+    fixture_source = source.name == "Development fixtures"
+    discard_fixture_batch = fixture_source and series.exclude(ingestion_run__source=source).exists()
+    replaced_fixture_count = 0
+    if not fixture_source:
+        fixture_rows = series.filter(provenance=Candle.Provenance.FIXTURE)
+        replaced_fixture_count = fixture_rows.count()
+        if replaced_fixture_count:
+            fixture_rows.delete()
+            TechnicalSnapshot.objects.filter(
+                instrument=instrument,
+                granularity=granularity,
+                provenance=TechnicalSnapshot.Provenance.FIXTURE,
+            ).delete()
+    counts = Counter()
+    conflicts = []
+    if discard_fixture_batch:
+        return {
+            "stored": 0,
+            "replaced_fixture_candles": replaced_fixture_count,
+            "discarded_fixture_batch": True,
+            "observations": dict(counts),
+            "conflicts": conflicts,
+        }
+
+    timestamps = [item.timestamp for item in candle_data]
+    existing_by_key = {
+        row.timestamp: row for row in series.select_for_update().filter(timestamp__in=timestamps)
+    }
+    latest_existing = series.order_by("-timestamp").values_list("timestamp", flat=True).first()
+    # The chain head is per candle identity across ALL sources: revision
+    # numbers and supersedes links belong to the candle, not to a source.
+    # ``current`` remains the last observation of THIS source and drives
+    # no-op detection, so a retry of a source's own view stays idempotent.
+    current_observations = {}
+    heads = {}
+    for observation in (
+        CandleObservation.objects.filter(
+            instrument=instrument,
+            granularity=granularity,
+            timestamp__in=timestamps,
+        )
+        .order_by("timestamp", "revision")
+        .select_for_update()
+    ):
+        heads[observation.timestamp] = observation
+        if observation.source_id == source.pk:
+            current_observations[observation.timestamp] = observation
+    observed_at = timezone.now()
+    provenance = Candle.Provenance.FIXTURE if fixture_source else Candle.Provenance.OBSERVED
+    new_rows = []
+    new_kinds = []
+    revisions = []
+    for item in candle_data:
+        digest = candle_content_sha256(instrument.code, granularity, item)
+        prior = existing_by_key.get(item.timestamp)
+        if prior is None:
+            kind = (
+                CandleObservation.Kind.LATE_ARRIVAL
+                if latest_existing is not None and item.timestamp < latest_existing
+                else CandleObservation.Kind.INITIAL
+            )
+            new_rows.append(
+                Candle(
+                    instrument=instrument,
+                    ingestion_run=run,
+                    dataset_version=None,
+                    granularity=granularity,
+                    content_sha256=digest,
+                    observed_at=observed_at,
+                    provenance=provenance,
+                    **item.__dict__,
+                )
+            )
+            new_kinds.append(kind)
+            counts[kind] += 1
+            continue
+        prior_payload = _candle_payload(prior)
+        incoming_payload = _candle_payload(item)
+        agrees_with_frozen = prior_payload == incoming_payload
+        current = current_observations.get(item.timestamp)
+        # This source's current view is its own last recorded revision, or the
+        # frozen row itself when the source has no observation yet (legacy rows
+        # and candles frozen by another source). Content equal to that view is
+        # a no-op. Any other content is appended onto the candle's chain head
+        # as revision head+1 -- including a return to content this source
+        # published in an earlier revision (A -> B -> A) or to the frozen
+        # content itself -- so the ledger records every change of view and a
+        # retry of any batch is idempotent.
+        if current is None:
+            matches_current = agrees_with_frozen
+        else:
+            matches_current = current.content_sha256 == digest
+        if matches_current:
+            counts["duplicate" if agrees_with_frozen else "duplicate_revision"] += 1
+            continue
+        kind = (
+            CandleObservation.Kind.CONFLICT
+            if not agrees_with_frozen and candle_is_referenced(prior)
+            else CandleObservation.Kind.REVISION
+        )
+        differing = sorted(
+            field
+            for field in set(prior_payload) | set(incoming_payload)
+            if prior_payload.get(field) != incoming_payload.get(field)
+        )
+        head = heads.get(item.timestamp)
+        if head is None:
+            # No observation exists for this candle: it predates the ledger.
+            # Its first recorded view opens a dense chain at revision 1. Only
+            # legacy rows (no attested content hash) may open a chain.
+            if prior.content_sha256 is not None:
+                raise DatasetQualityError(
+                    f"{instrument.code} {granularity} {item.timestamp.isoformat()} has no "
+                    "observation root; refusing to start a revision chain"
+                )
+            chain_revision = 1
+            supersedes = None
+        else:
+            chain_revision = head.revision + 1
+            supersedes = head
+        observation = CandleObservation(
+            instrument=instrument,
+            granularity=granularity,
+            timestamp=item.timestamp,
+            interval_end=live_candle_completion(item.timestamp, granularity),
+            source=source,
+            ingestion_run=run,
+            candle=prior,
+            kind=kind,
+            revision=chain_revision,
+            supersedes=supersedes,
+            content_sha256=digest,
+            differing_fields=differing,
+            observed_at=observed_at,
+            **{key: value for key, value in item.__dict__.items() if key != "timestamp"},
+        )
+        revisions.append(observation)
+        current_observations[item.timestamp] = observation
+        heads[item.timestamp] = observation
+        counts[kind] += 1
+        if kind == CandleObservation.Kind.CONFLICT:
+            conflicts.append(
+                {
+                    "candle_id": prior.pk,
+                    "interval_start": item.timestamp.isoformat(),
+                    "frozen_content_sha256": prior.content_sha256,
+                    "incoming_content_sha256": digest,
+                    "differing_fields": differing,
+                }
+            )
+    Candle.objects.bulk_create(new_rows)
+    if fixture_source:
+        # Development fixtures are not provider observations: they never enter
+        # the append-only observation ledger and remain deletable on replacement.
+        return {
+            "stored": len(new_rows),
+            "replaced_fixture_candles": replaced_fixture_count,
+            "discarded_fixture_batch": False,
+            "observations": dict(counts),
+            "conflicts": conflicts,
+        }
+    initial_observations = [
+        CandleObservation(
+            instrument=instrument,
+            granularity=granularity,
+            timestamp=row.timestamp,
+            interval_end=live_candle_completion(row.timestamp, granularity),
+            complete=row.complete,
+            volume=row.volume,
+            bid_open=row.bid_open,
+            bid_high=row.bid_high,
+            bid_low=row.bid_low,
+            bid_close=row.bid_close,
+            ask_open=row.ask_open,
+            ask_high=row.ask_high,
+            ask_low=row.ask_low,
+            ask_close=row.ask_close,
+            source=source,
+            ingestion_run=run,
+            candle=row,
+            kind=kind,
+            revision=1,
+            supersedes=None,
+            content_sha256=row.content_sha256,
+            differing_fields=[],
+            observed_at=observed_at,
+        )
+        for row, kind in zip(new_rows, new_kinds, strict=True)
+    ]
+    CandleObservation.objects.bulk_create(initial_observations + revisions)
+    return {
+        "stored": len(new_rows),
+        "replaced_fixture_candles": replaced_fixture_count,
+        "discarded_fixture_batch": False,
+        "observations": dict(counts),
+        "conflicts": conflicts,
+    }
 
 
 def _candle_payload(candle):
@@ -460,7 +729,7 @@ def _candle_payload(candle):
         field: (
             value.isoformat()
             if field == "timestamp"
-            else format(value, ".6f")
+            else _canonical_price(value)
             if field.startswith(("bid_", "ask_"))
             else str(value)
         )
@@ -469,24 +738,65 @@ def _candle_payload(candle):
     }
 
 
+def _canonical_price(value):
+    """Canonical six-decimal price text, identical to the SQL mirror.
+
+    PostgreSQL's numeric type normalizes negative zero away, so a signed zero
+    must hash as '0.000000' on both sides or the Python and SQL digests of one
+    stored row would diverge.
+    """
+    if value == 0:
+        return "0.000000"
+    return format(value, ".6f")
+
+
 def _json_hash(payload):
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
+def technical_source_set_sha256(instrument_code, granularity, candles):
+    """Identity of the exact ordered candle evidence a technical calculation consumed."""
+    return _json_hash(
+        {
+            "instrument": instrument_code,
+            "granularity": granularity,
+            "algorithm_version": TechnicalSnapshot.ALGORITHM_VERSION,
+            "candles": [
+                {
+                    "content_sha256": candle.content_sha256
+                    or candle_content_sha256(instrument_code, granularity, candle),
+                    "provenance": candle.provenance,
+                }
+                for candle in candles
+            ],
+        }
+    )
+
+
 def calculate_and_store_snapshot(instrument, granularity):
+    """Append the technical calculation for the current candle set; never rewrite one."""
     candles = list(
-        Candle.objects.filter(instrument=instrument, granularity=granularity).order_by("timestamp")
+        Candle.objects.filter(instrument=instrument, granularity=granularity).order_by(
+            "timestamp", "id"
+        )
     )
     if not candles:
         return None
     values = calculate_technicals(candles)
-    snapshot, _ = TechnicalSnapshot.objects.update_or_create(
+    provenance = (
+        TechnicalSnapshot.Provenance.FIXTURE
+        if any(candle.provenance == Candle.Provenance.FIXTURE for candle in candles)
+        else TechnicalSnapshot.Provenance.OBSERVED
+    )
+    snapshot, _ = TechnicalSnapshot.objects.get_or_create(
         instrument=instrument,
         granularity=granularity,
         as_of=candles[-1].timestamp,
-        defaults={"candle_count": len(candles), **values.__dict__},
+        algorithm_version=TechnicalSnapshot.ALGORITHM_VERSION,
+        source_candle_set_sha256=technical_source_set_sha256(instrument.code, granularity, candles),
+        defaults={"candle_count": len(candles), "provenance": provenance, **values.__dict__},
     )
     return snapshot
 

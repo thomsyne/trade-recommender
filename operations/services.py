@@ -7,6 +7,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from market.models import AuditEvent
+from operations.diagnostics import record_task_failure
 from operations.models import (
     DeliveryAttempt,
     JobOccurrence,
@@ -14,6 +15,7 @@ from operations.models import (
     ProviderBudget,
     ProviderBudgetReservation,
     ScheduledJob,
+    TaskFailure,
 )
 
 LEASE_DURATION = timedelta(minutes=5)
@@ -103,13 +105,29 @@ def claim_next_job(worker_id="legacy-worker", now=None, lease_duration=LEASE_DUR
         stale.heartbeat_at = None
         stale.error_code = "lease_expired"
         stale.error_summary = "Worker lease expired"
-        if stale.attempts >= stale.max_attempts:
+        terminal = stale.attempts >= stale.max_attempts
+        if terminal:
             stale.status = JobOccurrence.Status.FAILED
             stale.finished_at = now
         else:
             stale.status = JobOccurrence.Status.QUEUED
             stale.available_at = now
         stale.save()
+        if stale.attempts:
+            TaskFailure.objects.get_or_create(
+                occurrence=stale,
+                attempt_number=stale.attempts,
+                defaults={
+                    "task_name": stale.task_name,
+                    "error_code": "lease_expired",
+                    "category": "worker",
+                    "stage": "lease",
+                    "exception_type": "",
+                    "summary": "Worker lease expired before the attempt reported an outcome",
+                    "terminal": terminal,
+                    "occurred_at": now,
+                },
+            )
     occurrence = (
         JobOccurrence.objects.select_for_update(skip_locked=True)
         .filter(status=JobOccurrence.Status.QUEUED, available_at__lte=now)
@@ -160,14 +178,40 @@ def finish_job(occurrence, worker_id=None, error=None, error_code="task_failed")
     row.lease_owner = ""
     row.lease_expires_at = None
     row.heartbeat_at = None
-    if error and row.attempts < row.max_attempts:
+    terminal = bool(error) and row.attempts >= row.max_attempts
+    if error and not terminal:
         row.status = row.Status.QUEUED
         row.available_at = now + timedelta(seconds=30 * (2 ** (row.attempts - 1)))
     else:
         row.status = row.Status.FAILED if error else row.Status.SUCCEEDED
         row.finished_at = now
-    row.error_code = error_code if error else ""
-    row.error_summary = "Task execution failed" if error else ""
+    diagnostic = None
+    if error:
+        if isinstance(error, BaseException):
+            _, diagnostic = record_task_failure(
+                row, error, attempt_number=row.attempts, terminal=terminal, now=now
+            )
+        else:
+            TaskFailure.objects.get_or_create(
+                occurrence=row,
+                attempt_number=row.attempts,
+                defaults={
+                    "task_name": row.task_name,
+                    "error_code": error_code,
+                    "category": "unclassified",
+                    "stage": "",
+                    "exception_type": "",
+                    "summary": "Task execution failed",
+                    "terminal": terminal,
+                    "occurred_at": now,
+                },
+            )
+    if diagnostic is not None:
+        row.error_code = diagnostic.code
+        row.error_summary = diagnostic.summary
+    else:
+        row.error_code = error_code if error else ""
+        row.error_summary = "Task execution failed" if error else ""
     row.save()
     if row.status in (row.Status.FAILED, row.Status.SUCCEEDED):
         AuditEvent.objects.create(
@@ -175,7 +219,12 @@ def finish_job(occurrence, worker_id=None, error=None, error_code="task_failed")
             actor="operations.worker",
             subject_type="JobOccurrence",
             subject_id=str(row.pk),
-            payload={"task": row.task_name, "attempts": row.attempts},
+            payload={
+                "task": row.task_name,
+                "attempts": row.attempts,
+                "error_code": row.error_code,
+                "stage": diagnostic.stage if diagnostic else "",
+            },
         )
     return True
 
@@ -270,7 +319,16 @@ def _reservation_amount(row):
 
 
 @transaction.atomic
-def reserve_provider_budget(provider, purpose, idempotency_key, estimated_usd, now=None):
+def reserve_provider_budget(
+    provider,
+    purpose,
+    idempotency_key,
+    estimated_usd,
+    now=None,
+    *,
+    requested_model="",
+    pricing_version="",
+):
     existing = ProviderBudgetReservation.objects.filter(idempotency_key=idempotency_key).first()
     if existing:
         existing._was_created = False
@@ -296,18 +354,44 @@ def reserve_provider_budget(provider, purpose, idempotency_key, estimated_usd, n
         idempotency_key=idempotency_key,
         estimated_usd=estimate,
         budget_at=now,
+        outcome=ProviderBudgetReservation.Outcome.PENDING,
+        requested_model=requested_model[:120],
+        pricing_version=pricing_version[:80],
     )
     reservation._was_created = True
     return reservation
 
 
 @transaction.atomic
-def settle_provider_budget(reservation, actual_usd):
+def settle_provider_budget(
+    reservation, actual_usd, *, returned_model=None, usage_identity=None, pricing_version=None
+):
     row = ProviderBudgetReservation.objects.select_for_update().get(pk=reservation.pk)
     if row.status != row.Status.RESERVED:
         return False
     row.status, row.actual_usd = row.Status.SETTLED, Decimal(actual_usd)
+    if returned_model is not None:
+        row.returned_model = str(returned_model)[:120]
+    if usage_identity is not None:
+        row.usage_identity = str(usage_identity)[:160]
+    if pricing_version is not None and not row.pricing_version:
+        row.pricing_version = str(pricing_version)[:80]
     row.save()
+    return True
+
+
+@transaction.atomic
+def record_reservation_outcome(reservation, outcome):
+    """Record the validation outcome once; never rewrite a recorded outcome."""
+    row = ProviderBudgetReservation.objects.select_for_update().get(pk=reservation.pk)
+    if row.outcome not in {"", ProviderBudgetReservation.Outcome.PENDING}:
+        return False
+    if row.outcome == "":
+        # Legacy rows predate outcome recording; leave them honest rather than
+        # retro-fitting an outcome they never carried.
+        return False
+    row.outcome = outcome
+    row.save(update_fields=("outcome", "updated_at"))
     return True
 
 
