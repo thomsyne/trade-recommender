@@ -5,7 +5,6 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.test import TestCase
-from django.utils import timezone
 
 from forecasts.models import PaperTradeEntry, PaperTradeResult, Recommendation
 from forecasts.paper import resolve_paper_trade
@@ -19,12 +18,11 @@ from forecasts.tests.test_recommendations import (
     FakeProvider,
     evidence,
     hourly_candle,
-    open_market_hours,
     output,
 )
 from market.models import AuditEvent, Candle, CandleObservation, Instrument, SourceRegistry
-from market.services import store_ingestion
 from market.tests.factories import candle
+from market.tests.timeline import EvidenceTimeline
 from operations.models import ProviderBudgetReservation
 
 
@@ -52,29 +50,27 @@ class FrozenEvidenceTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        # Mirrors forecasts.tests.test_recommendations: the reference candle is
-        # yesterday's completed session; later sessions carry future interval
-        # starts, which is legitimate for stored evidence.
-        self.reference_at = timezone.now() - timedelta(days=1)
-        self.daily(self.reference_at, "reference")
-        self.now = timezone.now() + timedelta(seconds=1)
+        # One canonical timeline: the reference is a completed New York daily
+        # session, and the decision follows the run that ingested it.
+        self.timeline = EvidenceTimeline(daily=7)
+        self.reference_at = self.timeline.session(0)
+        reference_run = self.daily(self.reference_at, "reference")
+        self.now = self.timeline.after(reference_run)
         self.snapshot = evidence(self.instrument, self.now)
 
     def daily(self, timestamp, batch, **changes):
-        return store_ingestion(
+        return self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            timestamp,
-            timestamp + timedelta(days=1),
             [candle(timestamp, **changes)],
-            {"test": batch, "requests": []},
+            manifest={"test": batch, "requests": []},
         )
 
     def resolve_after_five_sessions(self, recommendation):
         endpoint = None
         for index in range(1, 6):
-            run = self.daily(self.reference_at + timedelta(days=index), f"session-{index}")
+            run = self.daily(self.timeline.session(index), f"session-{index}")
             endpoint = run
         return resolve_recommendation(recommendation), endpoint
 
@@ -182,7 +178,7 @@ class FrozenEvidenceTests(TestCase):
         )
 
     def test_unreferenced_candle_revision_is_a_plain_revision(self):
-        run = self.daily(self.reference_at + timedelta(days=1), "unreferenced")
+        run = self.daily(self.timeline.session(1), "unreferenced")
         row = Candle.objects.get(ingestion_run=run)
         self.daily(row.timestamp, "unreferenced-revision", volume=3)
         self.assertEqual(
@@ -194,14 +190,17 @@ class FrozenEvidenceTests(TestCase):
         from forecasts.portfolio import assess_recommendation_batch
         from forecasts.sizing import size_recommendation
 
-        recommendation = generate_recommendation(
-            self.instrument, provider=FakeProvider(), generated_at=self.now + timedelta(seconds=1)
-        )
-        size_recommendation(recommendation, sized_at=recommendation.generated_at)
-        assess_recommendation_batch([recommendation], generated_at=recommendation.generated_at)
-        hours = open_market_hours(
-            recommendation.generated_at, recommendation.generated_at + timedelta(days=2)
-        )[:6]
+        decided_at = self.now + timedelta(seconds=1)
+        # The decision, its sizing and its portfolio admission all happen at the
+        # instant the recommendation was issued: portfolio policy activation is
+        # stamped from the clock, and a recommendation cannot precede it.
+        with self.timeline.at(decided_at):
+            recommendation = generate_recommendation(
+                self.instrument, provider=FakeProvider(), generated_at=decided_at
+            )
+            size_recommendation(recommendation, sized_at=recommendation.generated_at)
+            assess_recommendation_batch([recommendation], generated_at=recommendation.generated_at)
+        hours = self.timeline.hours_after(recommendation.generated_at, 6)
         # The default hourly candle already satisfies the at-or-below ask entry on
         # the first hour; the target is touched three hours later.
         target_hour = hours[3]
@@ -211,14 +210,13 @@ class FrozenEvidenceTests(TestCase):
             else hourly_candle(hour)
             for hour in hours
         ]
-        store_ingestion(
+        self.timeline.ingest(
             self.source,
             self.instrument,
             "H1",
-            recommendation.generated_at,
-            hours[-1] + timedelta(hours=1),
             candles,
-            {"test": "hourly", "requests": []},
+            manifest={"test": "hourly", "requests": []},
+            requested_from=recommendation.generated_at,
         )
 
         result = resolve_paper_trade(recommendation)
@@ -234,14 +232,12 @@ class FrozenEvidenceTests(TestCase):
         )
         frozen = (result.exit_price, result.gross_pips, entry.fill_price)
 
-        store_ingestion(
+        self.timeline.ingest(
             self.source,
             self.instrument,
             "H1",
-            target_hour,
-            target_hour + timedelta(hours=1),
             [hourly_candle(target_hour, bid_high=Decimal("1.3650"), ask_high=Decimal("1.3652"))],
-            {"test": "hourly-revision", "requests": []},
+            manifest={"test": "hourly-revision", "requests": []},
         )
 
         self.assertEqual(
@@ -261,7 +257,7 @@ class FrozenEvidenceTests(TestCase):
         snapshot = macro.evidence_snapshot.technical_snapshot
         self.assertEqual(snapshot.provenance, TechnicalSnapshot.Provenance.OBSERVED)
         for index in range(1, 6):
-            self.daily(self.reference_at + timedelta(days=index), f"forecast-session-{index}")
+            self.daily(self.timeline.session(index), f"forecast-session-{index}")
         resolution = resolve_forecast(tactical)
         self.assertIsNotNone(resolution)
         self.daily(anchor.timestamp, "anchor-revision", volume=2)

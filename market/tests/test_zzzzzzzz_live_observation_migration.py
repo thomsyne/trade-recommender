@@ -15,12 +15,17 @@ from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
 from market.models import Candle, CandleObservation, IngestionRun
-from market.services import _candle_payload, _json_hash
+from market.services import _candle_payload, _json_hash, live_candle_completion
+from market.tests.timeline import POLL_DELAY
 
 BEFORE = [("market", "0027_gate8i_final_dataset_acceptance")]
 AFTER = [("market", "0028_live_candle_observation_identity")]
 AFTER_0029 = [("market", "0029_candle_observation_lineage")]
 START_TS = datetime(2026, 1, 5, 8, tzinfo=UTC)
+# A provider reports a candle after it closes, never before: these fixtures are
+# built to the same contract market.tests.timeline states and 0029 enforces.
+CANDLE_A_OBSERVED = live_candle_completion(START_TS, "H1") + POLL_DELAY
+OBSERVED_CEILING = datetime(2026, 1, 5, 11, tzinfo=UTC)
 PROTECTIONS = (
     "market_live_candle_protect",
     "market_technicalsnapshot_protect",
@@ -53,7 +58,10 @@ class LiveObservationMigrationTests(TransactionTestCase):
         MigrationExecutor(connection).migrate(AFTER)
 
     def tearDown(self):
-        MigrationExecutor(connection).migrate(AFTER)
+        # Restore the head state, not the 0028 state this class migrates back
+        # to: leaving the shared database behind head would silently run every
+        # later test without the 0029 lineage protections.
+        MigrationExecutor(connection).migrate(AFTER_0029)
         super().tearDown()
 
     def seed_legacy_rows(self):
@@ -429,7 +437,7 @@ class LineageRenumberMigrationTests(TransactionTestCase):
             volume=100,
             provenance=Candle.Provenance.OBSERVED,
             content_sha256=None,
-            observed_at=datetime(2026, 1, 5, 8, 0, 1, tzinfo=UTC),
+            observed_at=CANDLE_A_OBSERVED,
             **content(),
         )
         candle_a.content_sha256 = self._content_hash(candle_a)
@@ -524,8 +532,9 @@ class LineageRenumberMigrationTests(TransactionTestCase):
                     supersedes_id,
                     self._content_hash(row),
                     json.dumps(differing_fields),
-                    observed_at or datetime(2026, 1, 5, 9, 30, 0, tzinfo=UTC),
-                    datetime(2026, 1, 5, 9, 30, 0, tzinfo=UTC),
+                    observed_at
+                    or (live_candle_completion(candle_row.timestamp, "H1") + POLL_DELAY),
+                    OBSERVED_CEILING,
                 ]
                 cursor.execute(insert, values)
                 return cursor.fetchone()[0]

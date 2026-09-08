@@ -31,8 +31,8 @@ from forecasts.models import (
 from forecasts.recommendations import generate_recommendation
 from forecasts.tests.test_recommendations import FakeProvider, evidence
 from market.models import Instrument, SourceRegistry
-from market.services import store_ingestion
 from market.tests.factories import candle
+from market.tests.timeline import EvidenceTimeline
 
 
 @override_settings(
@@ -52,15 +52,13 @@ class ExperimentHealthTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        reference_at = timezone.now() - timedelta(days=2)
-        store_ingestion(
+        self.timeline = EvidenceTimeline(daily=2)
+        self.timeline.ingest(
             self.source,
             self.instrument,
             "D",
-            reference_at,
-            reference_at + timedelta(days=1),
-            [candle(reference_at)],
-            {"test": "experiment-reference", "requests": []},
+            [candle(self.timeline.session(0))],
+            manifest={"test": "experiment-reference", "requests": []},
         )
         self.started_at = (timezone.now() + timedelta(days=1)).replace(
             hour=12, minute=0, second=0, microsecond=0
