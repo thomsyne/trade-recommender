@@ -2,8 +2,10 @@
 
 from datetime import timedelta
 from decimal import Decimal
+from importlib import import_module
 
 from django.core.exceptions import ValidationError
+from django.db import connection
 from django.test import TestCase
 
 from forecasts.models import PaperTradeEntry, PaperTradeResult, Recommendation
@@ -268,3 +270,42 @@ class FrozenEvidenceTests(TestCase):
         snapshot.refresh_from_db()
         self.assertEqual(macro.evidence_snapshot.technical_snapshot_id, snapshot.pk)
         self.assertEqual(resolve_forecast(tactical), resolution)
+
+    def test_migration_accepts_a_revision_recorded_during_generation(self):
+        """A revision recorded while the provider was still generating stays one.
+
+        ``Recommendation.generated_at`` is fixed before ``provider.generate()``
+        is called and the row is inserted only after it returns, so a revision
+        recorded inside that window is legitimately a revision even though the
+        recommendation that later appears carries an earlier generated_at.
+        Migration 0029 must not read that business timestamp as visibility.
+        """
+        # The provider call is under way from self.now; the revision lands part
+        # way through it, while nothing yet cites the candle.
+        observed_during_call = self.now + timedelta(minutes=5)
+        self.timeline.ingest(
+            self.source,
+            self.instrument,
+            "D",
+            [candle(self.reference_at, volume=250)],
+            manifest={"test": "revised-during-generation", "requests": []},
+            at=observed_during_call,
+        )
+        revised = Candle.objects.get(timestamp=self.reference_at)
+        head = revised.authoritative_observation()
+        self.assertEqual(head.kind, CandleObservation.Kind.REVISION)
+
+        # The row is only inserted once the provider returns, but it carries the
+        # generated_at fixed before the call -- earlier than the revision.
+        with self.timeline.at(observed_during_call + timedelta(minutes=1)):
+            recommendation = generate_recommendation(
+                self.instrument, provider=FakeProvider(), generated_at=self.now
+            )
+        self.assertLess(recommendation.generated_at, head.observed_at)
+        self.assertEqual(recommendation.reference_candle_id, revised.pk)
+
+        lineage = import_module("market.migrations.0029_candle_observation_lineage")
+        with connection.cursor() as cursor:
+            for statement, message in lineage.POST_RENUMBER_CHECKS:
+                cursor.execute(statement)
+                self.assertEqual(cursor.fetchone()[0], 0, f"0029 would have refused: {message}")

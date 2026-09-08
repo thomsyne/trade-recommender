@@ -311,69 +311,6 @@ END;
 $$;
 """
 
-# Whether frozen evidence referenced a candle AS OF a given instant. The
-# present-tense function above is right for a live INSERT, where "now" is the
-# moment the view is recorded, but it is wrong for judging rows written long
-# ago: a revision that was entirely correct when it was recorded would be
-# re-read as a conflict merely because a recommendation cited that candle
-# afterwards. Returns NULL when the historical state cannot be reconstructed --
-# a referencing row whose own timestamp is unknown -- so the caller can
-# preserve the recorded kind instead of guessing at it.
-CREATE_CANDLE_REFERENCED_AS_OF_SQL = r"""
-CREATE FUNCTION market_candleobservation_candle_referenced_as_of(
-    target_candle bigint,
-    as_of timestamptz
-) RETURNS boolean
-LANGUAGE plpgsql
-STABLE
-SET search_path = pg_catalog
-AS $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM public.market_candleconflict
-                WHERE existing_candle_id = target_candle AND created_at <= as_of)
-       OR EXISTS (SELECT 1 FROM public.forecasts_evidencesnapshot
-                   WHERE anchor_candle_id = target_candle AND captured_at <= as_of)
-       OR EXISTS (SELECT 1 FROM public.forecasts_forecastresolution
-                   WHERE horizon_candle_id = target_candle AND resolved_at <= as_of)
-       OR EXISTS (SELECT 1 FROM public.forecasts_recommendation
-                   WHERE reference_candle_id = target_candle AND generated_at <= as_of)
-       OR EXISTS (SELECT 1 FROM public.forecasts_recommendationresolution
-                   WHERE horizon_candle_id = target_candle AND resolved_at <= as_of)
-       OR EXISTS (SELECT 1 FROM public.forecasts_papertradeentry
-                   WHERE candle_id = target_candle AND entered_at <= as_of)
-       OR EXISTS (SELECT 1 FROM public.forecasts_papertraderesult
-                   WHERE (horizon_candle_id = target_candle OR exit_candle_id = target_candle)
-                     AND resolved_at <= as_of)
-    THEN
-        RETURN TRUE;
-    END IF;
-    IF EXISTS (SELECT 1 FROM public.market_candleconflict
-                WHERE existing_candle_id = target_candle AND created_at IS NULL)
-       OR EXISTS (SELECT 1 FROM public.forecasts_evidencesnapshot
-                   WHERE anchor_candle_id = target_candle AND captured_at IS NULL)
-       OR EXISTS (SELECT 1 FROM public.forecasts_forecastresolution
-                   WHERE horizon_candle_id = target_candle AND resolved_at IS NULL)
-       OR EXISTS (SELECT 1 FROM public.forecasts_recommendation
-                   WHERE reference_candle_id = target_candle AND generated_at IS NULL)
-       OR EXISTS (SELECT 1 FROM public.forecasts_recommendationresolution
-                   WHERE horizon_candle_id = target_candle AND resolved_at IS NULL)
-       OR EXISTS (SELECT 1 FROM public.forecasts_papertradeentry
-                   WHERE candle_id = target_candle AND entered_at IS NULL)
-       OR EXISTS (SELECT 1 FROM public.forecasts_papertraderesult
-                   WHERE (horizon_candle_id = target_candle OR exit_candle_id = target_candle)
-                     AND resolved_at IS NULL)
-    THEN
-        RETURN NULL;
-    END IF;
-    RETURN FALSE;
-END;
-$$;
-"""
-
-DROP_CANDLE_REFERENCED_AS_OF_SQL = (
-    "DROP FUNCTION IF EXISTS market_candleobservation_candle_referenced_as_of(bigint, timestamptz);"
-)
-
 DROP_CANDLE_REFERENCED_SQL = (
     "DROP FUNCTION IF EXISTS market_candleobservation_candle_is_referenced(bigint);"
 )
@@ -383,6 +320,50 @@ DROP_DIFFERING_FIELDS_SQL = (
     "market_candleobservation, boolean, integer, numeric, numeric, numeric, "
     "numeric, numeric, numeric, numeric, numeric);"
 )
+
+# A live observed candle must attest its own content at the database boundary.
+# Without this a row could be inserted with fields A while carrying the digest
+# of B -- application save() and ORM validation are not a boundary, raw SQL
+# reaches straight past them -- and everything downstream that binds a candle by
+# its hash would be binding a forgery. Governed historical rows keep their own
+# dataset contract, and fixtures and legacy rows keep theirs: only rows claiming
+# to be observed live evidence are held to this.
+CREATE_CANDLE_ATTESTATION_SQL = r"""
+CREATE FUNCTION market_candle_attest_content() RETURNS trigger AS $$
+DECLARE
+    recomputed text;
+BEGIN
+    IF NEW.dataset_version_id IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.provenance IS DISTINCT FROM 'observed' THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.content_sha256 IS NULL THEN
+        RAISE EXCEPTION 'an observed live candle must carry its content hash';
+    END IF;
+    recomputed := market_candleobservation_content_sha256(
+        (SELECT code FROM public.market_instrument WHERE id = NEW.instrument_id),
+        NEW.granularity, NEW.timestamp, NEW.complete, NEW.volume,
+        NEW.bid_open, NEW.bid_high, NEW.bid_low, NEW.bid_close,
+        NEW.ask_open, NEW.ask_high, NEW.ask_low, NEW.ask_close);
+    IF recomputed IS DISTINCT FROM NEW.content_sha256 THEN
+        RAISE EXCEPTION
+            'candle content_sha256 does not recompute from its own content';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+SET search_path = pg_catalog, public;
+CREATE TRIGGER market_candle_attest_content
+BEFORE INSERT ON market_candle
+FOR EACH ROW EXECUTE FUNCTION market_candle_attest_content();
+"""
+
+DROP_CANDLE_ATTESTATION_SQL = r"""
+DROP TRIGGER IF EXISTS market_candle_attest_content ON market_candle;
+DROP FUNCTION IF EXISTS market_candle_attest_content();
+"""
 
 CREATE_LINEAGE_VALIDATION_SQL = r"""
 CREATE FUNCTION market_candleobservation_lineage_validate() RETURNS trigger AS $$
@@ -666,13 +647,21 @@ def drop_alignment_function(apps, schema_editor):
 def create_candle_referenced_function(apps, schema_editor):
     if schema_editor.connection.vendor == "postgresql":
         schema_editor.execute(CREATE_CANDLE_REFERENCED_SQL)
-        schema_editor.execute(CREATE_CANDLE_REFERENCED_AS_OF_SQL)
 
 
 def drop_candle_referenced_function(apps, schema_editor):
     if schema_editor.connection.vendor == "postgresql":
-        schema_editor.execute(DROP_CANDLE_REFERENCED_AS_OF_SQL)
         schema_editor.execute(DROP_CANDLE_REFERENCED_SQL)
+
+
+def create_candle_attestation(apps, schema_editor):
+    if schema_editor.connection.vendor == "postgresql":
+        schema_editor.execute(CREATE_CANDLE_ATTESTATION_SQL)
+
+
+def drop_candle_attestation(apps, schema_editor):
+    if schema_editor.connection.vendor == "postgresql":
+        schema_editor.execute(DROP_CANDLE_ATTESTATION_SQL)
 
 
 def create_lineage_validation(apps, schema_editor):
@@ -824,9 +813,7 @@ PREFLIGHT_CHECKS = (
         SELECT count(*) FROM market_candle candle
          JOIN market_instrument instrument ON instrument.id = candle.instrument_id
          WHERE candle.dataset_version_id IS NULL
-           AND candle.content_sha256 IS NOT NULL
-           AND EXISTS (SELECT 1 FROM market_candleobservation observation
-                        WHERE observation.candle_id = candle.id)
+           AND candle.provenance = 'observed'
            AND candle.content_sha256 IS DISTINCT FROM
                public.market_candleobservation_content_sha256(
                    instrument.code, candle.granularity, candle.timestamp,
@@ -834,7 +821,7 @@ PREFLIGHT_CHECKS = (
                    candle.bid_open, candle.bid_high, candle.bid_low, candle.bid_close,
                    candle.ask_open, candle.ask_high, candle.ask_low, candle.ask_close)
         """,
-        "refuses observed candles whose content_sha256 does not recompute from their content",
+        "refuses observed live candles whose content_sha256 does not recompute from their own content",
     ),
     (
         """
@@ -899,31 +886,28 @@ POST_RENUMBER_CHECKS = (
         "refuses conflict rows whose content agrees with their frozen candle",
     ),
     (
-        # The other half depends on whether frozen evidence cited the candle,
-        # and that has to be read AS OF the observation: a revision recorded
-        # before any recommendation existed is not retrospectively a conflict
-        # because one cites the candle today. Rows whose historical reference
-        # state cannot be reconstructed (the function returns NULL) keep the
-        # kind they were recorded with rather than being re-adjudicated.
+        # The other half of the kind rule depends on whether frozen evidence
+        # cited the candle when the view was recorded, and that is NOT
+        # reconstructable here. Only market_candleconflict.created_at is an
+        # insertion timestamp (auto_now_add); every other referencing table
+        # carries a business time. Recommendation.generated_at in particular is
+        # fixed before provider.generate() is called and the row is inserted
+        # only after it returns, so a revision recorded legitimately during that
+        # window carries an observed_at later than a generated_at whose row did
+        # not yet exist. Reading those columns as visibility would condemn
+        # correct history.
+        #
+        # So a revision is never re-adjudicated. Only one reference-dependent
+        # contradiction is provable: references are append-only, so a candle
+        # that nothing cites today was cited by nothing when the row was
+        # written, and a 'conflict' against it cannot ever have been right.
         """
         SELECT count(*) FROM market_candleobservation observation
-         JOIN market_candle candle ON candle.id = observation.candle_id
-         CROSS JOIN LATERAL (
-             SELECT public.market_candleobservation_candle_referenced_as_of(
-                        observation.candle_id, observation.observed_at) AS referenced
-         ) AS history
-         WHERE observation.kind IN ('revision', 'conflict')
-           AND history.referenced IS NOT NULL
-           AND observation.kind <> CASE
-                 WHEN public.market_candleobservation_differing_fields(
-                          observation, candle.complete, candle.volume,
-                          candle.bid_open, candle.bid_high, candle.bid_low,
-                          candle.bid_close, candle.ask_open, candle.ask_high,
-                          candle.ask_low, candle.ask_close) <> '[]'
-                      AND history.referenced
-                 THEN 'conflict' ELSE 'revision' END
+         WHERE observation.kind = 'conflict'
+           AND NOT public.market_candleobservation_candle_is_referenced(
+                   observation.candle_id)
         """,
-        "refuses revision rows whose kind contradicts the evidence of their own time",
+        "refuses conflict rows against a candle nothing has ever referenced",
     ),
     (
         """
@@ -1043,6 +1027,7 @@ class Migration(migrations.Migration):
                 name="candle_observation_revision_shape",
             ),
         ),
+        migrations.RunPython(create_candle_attestation, drop_candle_attestation),
         migrations.RunPython(create_lineage_validation, drop_lineage_validation),
         migrations.RunPython(migrations.RunPython.noop, refuse_reverse_with_observations),
     ]

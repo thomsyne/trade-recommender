@@ -313,17 +313,86 @@ class ObservationLineageEnforcementTests(TransactionTestCase):
 
     # ---- frozen candle content ---------------------------------------------
 
-    def test_candle_carrying_a_hash_of_other_content_cannot_be_attested(self):
-        """The candle's own hash must recompute, not merely be echoed back."""
+    def test_forged_candle_is_refused_at_the_database_boundary(self):
+        """A live observed candle must attest its own content when inserted.
+
+        Raw SQL reaches past save() and ORM validation, so the rejection has to
+        come from the database, and it has to happen with no observation in
+        sight: nothing downstream may ever be able to bind the row.
+        """
         other = candle(MONDAY_HOUR, volume=999)
         forged = candle_content_sha256(self.instrument.code, "H1", other)
-        row, run, item = self.make_candle(MONDAY_HOUR, "H1", content_sha256=forged)
-
-        # The observation attests the digest the candle advertises, and its own
-        # content hashes to it, so only recomputing the candle catches this.
-        self.assert_insert_rejected(
-            self.observation_values(row, run, other, content_sha256=forged, volume=other.volume)
+        item = candle(MONDAY_HOUR)
+        run = self.make_run("H1", MONDAY_HOUR, live_candle_completion(MONDAY_HOUR, "H1"))
+        columns = (
+            "instrument_id, ingestion_run_id, granularity, timestamp, complete, volume, "
+            "bid_open, bid_high, bid_low, bid_close, ask_open, ask_high, ask_low, ask_close, "
+            "provenance, content_sha256, observed_at"
         )
+        with self.assertRaises(DatabaseError) as caught, transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"INSERT INTO market_candle ({columns}) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    [
+                        self.instrument.pk,
+                        run.pk,
+                        "H1",
+                        MONDAY_HOUR,
+                        item.complete,
+                        item.volume,
+                        item.bid_open,
+                        item.bid_high,
+                        item.bid_low,
+                        item.bid_close,
+                        item.ask_open,
+                        item.ask_high,
+                        item.ask_low,
+                        item.ask_close,
+                        Candle.Provenance.OBSERVED,
+                        forged,
+                        timezone.now(),
+                    ],
+                )
+        self.assertIn("does not recompute", str(caught.exception))
+        self.assertFalse(Candle.objects.filter(timestamp=MONDAY_HOUR).exists())
+
+    def test_forged_candle_with_a_matching_forged_root_observation_is_refused(self):
+        """Forging both halves consistently still cannot get past the boundary."""
+        other = candle(MONDAY_HOUR, volume=999)
+        forged = candle_content_sha256(self.instrument.code, "H1", other)
+
+        with self.assertRaises(DatabaseError), transaction.atomic():
+            self.make_candle(MONDAY_HOUR, "H1", content_sha256=forged)
+
+    def test_honest_observed_candle_is_accepted(self):
+        row, run, item = self.make_candle(MONDAY_HOUR, "H1")
+
+        self.assertEqual(row.content_sha256, candle_content_sha256("USD_CAD", "H1", item))
+        self.assert_insert_accepted(self.observation_values(row, run, item))
+
+    def test_legacy_unattested_candle_is_still_permitted(self):
+        """Legacy rows carry no hash and keep their honest unknown provenance."""
+        row, _, _ = self.make_candle(MONDAY_HOUR, "H1", legacy=True)
+
+        self.assertIsNone(row.content_sha256)
+        self.assertEqual(row.provenance, Candle.Provenance.LEGACY_UNKNOWN)
+
+    def test_fixture_candle_is_not_held_to_observed_attestation(self):
+        item = candle(MONDAY_HOUR)
+        run = self.make_run("H1", MONDAY_HOUR, live_candle_completion(MONDAY_HOUR, "H1"))
+        row = Candle.objects.create(
+            instrument=self.instrument,
+            ingestion_run=run,
+            dataset_version=None,
+            granularity="H1",
+            content_sha256=None,
+            observed_at=None,
+            provenance=Candle.Provenance.FIXTURE,
+            **item.__dict__,
+        )
+
+        self.assertEqual(row.provenance, Candle.Provenance.FIXTURE)
 
     def test_root_observation_must_attest_the_candle_it_froze(self):
         row, run, item = self.make_candle(MONDAY_HOUR, "H1")
@@ -590,12 +659,16 @@ class SqlPythonParityTests(TransactionTestCase):
 
 
 class HistoricalKindEvaluationTests(TransactionTestCase):
-    """Migration 0029 must judge an old row by the world it was written in.
+    """Migration 0029 must not re-adjudicate history it cannot reconstruct.
 
-    A ``revision`` recorded while nothing cited the candle is still a revision
-    after a recommendation cites that candle. Re-adjudicating it against
-    today's references would rewrite historical meaning and, worse, make the
-    migration refuse a ledger that was always correct.
+    Only one referencing table records an insertion time (market_candleconflict
+    uses auto_now_add); every other carries a business timestamp. In particular
+    Recommendation.generated_at is fixed before provider.generate() is called
+    and the row is inserted only after it returns, so a revision recorded
+    legitimately during that window has an observed_at later than a
+    generated_at whose row did not yet exist. Reading those columns as
+    visibility would condemn correct history, so a revision is never
+    reclassified; only provable contradictions are refused.
     """
 
     def setUp(self):
@@ -629,97 +702,125 @@ class HistoricalKindEvaluationTests(TransactionTestCase):
             cursor.execute(statement, params)
             return cursor.fetchone()[0]
 
-    def test_a_later_reference_does_not_retroactively_recast_an_old_revision(self):
+    def preflight_offences(self):
+        lineage = import_module("market.migrations.0029_candle_observation_lineage")
+        return {message: self.sql(statement) for statement, message in lineage.POST_RENUMBER_CHECKS}
+
+    def reference(self, row, captured_at):
         from market.models import TechnicalSnapshot
 
+        snapshot = TechnicalSnapshot.objects.filter(instrument=self.instrument).first()
+        return EvidenceSnapshot.objects.create(
+            instrument=self.instrument,
+            anchor_candle=row,
+            technical_snapshot=snapshot,
+            market_data_cutoff=captured_at,
+            captured_at=captured_at,
+            payload={"test": "reference"},
+            sha256=f"{EvidenceSnapshot.objects.count():064d}",
+        )
+
+    def revised_candle(self):
         self.ingest([candle(MONDAY_HOUR)], "first")
         self.ingest([candle(MONDAY_HOUR, volume=250)], "revised")
         row = Candle.objects.get(granularity="H1")
-        revision = row.authoritative_observation()
+        return row, row.authoritative_observation()
+
+    def test_reference_recorded_after_the_revision_leaves_it_a_revision(self):
+        row, revision = self.revised_candle()
         self.assertEqual(revision.kind, CandleObservation.Kind.REVISION)
 
-        # Frozen evidence starts citing the candle only now, after the revision
-        # was recorded.
-        snapshot = TechnicalSnapshot.objects.filter(instrument=self.instrument).first()
-        EvidenceSnapshot.objects.create(
-            instrument=self.instrument,
-            anchor_candle=row,
-            technical_snapshot=snapshot,
-            market_data_cutoff=revision.observed_at + timedelta(hours=1),
-            captured_at=revision.observed_at + timedelta(hours=1),
-            payload={"test": "later-reference"},
-            sha256="e" * 64,
-        )
+        self.reference(row, revision.observed_at + timedelta(hours=1))
 
         self.assertTrue(
-            self.sql("SELECT market_candleobservation_candle_is_referenced(%s)", [row.pk]),
-            "the candle is referenced today",
+            self.sql("SELECT market_candleobservation_candle_is_referenced(%s)", [row.pk])
         )
-        self.assertFalse(
-            self.sql(
-                "SELECT market_candleobservation_candle_referenced_as_of(%s, %s)",
-                [row.pk, revision.observed_at],
-            ),
-            "but nothing cited it when the revision was recorded",
-        )
+        for message, offences in self.preflight_offences().items():
+            self.assertEqual(offences, 0, f"0029 would have refused: {message}")
 
-        # Judging the same row against today's references -- the defect this
-        # test exists for -- would have condemned it.
-        self.assertEqual(
-            self.sql(
-                """
-                SELECT count(*) FROM market_candleobservation observation
-                 JOIN market_candle candle ON candle.id = observation.candle_id
-                 WHERE observation.kind IN ('revision', 'conflict')
-                   AND observation.kind <> CASE
-                         WHEN public.market_candleobservation_differing_fields(
-                                  observation, candle.complete, candle.volume,
-                                  candle.bid_open, candle.bid_high, candle.bid_low,
-                                  candle.bid_close, candle.ask_open, candle.ask_high,
-                                  candle.ask_low, candle.ask_close) <> '[]'
-                              AND public.market_candleobservation_candle_is_referenced(
-                                      observation.candle_id)
-                         THEN 'conflict' ELSE 'revision' END
-                """
-            ),
-            1,
-            "a present-tense reading of this ledger flags the revision",
-        )
+    def test_reference_whose_business_time_precedes_the_revision_is_not_visibility(self):
+        """The provider-generation overlap: a business timestamp is not an insert."""
+        row, revision = self.revised_candle()
 
-        # The migration's own post-renumber validation must accept the ledger.
-        lineage = import_module("market.migrations.0029_candle_observation_lineage")
-        for statement, message in lineage.POST_RENUMBER_CHECKS:
-            self.assertEqual(self.sql(statement), 0, f"0029 would have refused: {message}")
+        # Exactly the shape Recommendation.generated_at produces: a reference
+        # whose recorded time precedes the revision, inserted afterwards.
+        self.reference(row, revision.observed_at - timedelta(minutes=5))
 
-    def test_a_reference_predating_the_observation_still_requires_a_conflict(self):
-        from market.models import TechnicalSnapshot
+        for message, offences in self.preflight_offences().items():
+            self.assertEqual(offences, 0, f"0029 would have refused: {message}")
 
-        self.ingest([candle(MONDAY_HOUR)], "first")
-        row = Candle.objects.get(granularity="H1")
-        initial = row.authoritative_observation()
-        snapshot = TechnicalSnapshot.objects.filter(instrument=self.instrument).first()
-        EvidenceSnapshot.objects.create(
-            instrument=self.instrument,
-            anchor_candle=row,
-            technical_snapshot=snapshot,
-            market_data_cutoff=initial.observed_at,
-            captured_at=initial.observed_at,
-            payload={"test": "earlier-reference"},
-            sha256="f" * 64,
-        )
+    def test_reference_at_exactly_the_observation_instant_is_not_visibility(self):
+        row, revision = self.revised_candle()
 
-        # The candle was already cited, so a departing view is a conflict, and
-        # the as-of function agrees with the present-tense one.
-        self.ingest([candle(MONDAY_HOUR, volume=250)], "revised")
-        head = Candle.objects.get(granularity="H1").authoritative_observation()
+        self.reference(row, revision.observed_at)
 
-        self.assertEqual(head.kind, CandleObservation.Kind.CONFLICT)
-        self.assertTrue(
-            self.sql(
-                "SELECT market_candleobservation_candle_referenced_as_of(%s, %s)",
-                [row.pk, head.observed_at],
+        for message, offences in self.preflight_offences().items():
+            self.assertEqual(offences, 0, f"0029 would have refused: {message}")
+
+    def test_a_conflict_against_a_never_referenced_candle_is_provably_wrong(self):
+        """References are append-only, so "cited by nothing" cannot have changed."""
+        row, revision = self.revised_candle()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "ALTER TABLE market_candleobservation DISABLE TRIGGER "
+                "market_candleobservation_append_only"
             )
+            cursor.execute(
+                "UPDATE market_candleobservation SET kind = 'conflict' WHERE id = %s",
+                [revision.pk],
+            )
+            cursor.execute(
+                "ALTER TABLE market_candleobservation ENABLE TRIGGER "
+                "market_candleobservation_append_only"
+            )
+
+        offences = self.preflight_offences()
+        self.assertEqual(
+            offences["refuses conflict rows against a candle nothing has ever referenced"], 1
         )
-        lineage = import_module("market.migrations.0029_candle_observation_lineage")
-        for statement, message in lineage.POST_RENUMBER_CHECKS:
-            self.assertEqual(self.sql(statement), 0, f"0029 would have refused: {message}")
+
+    def test_legacy_root_revision_is_never_re_adjudicated(self):
+        run = IngestionRun.objects.create(
+            source=self.source,
+            instrument=self.instrument,
+            granularity="H1",
+            requested_from=MONDAY_HOUR,
+            requested_to=live_candle_completion(MONDAY_HOUR, "H1"),
+            parameters={"legacy": True},
+            request_manifest_hash=f"{7:064d}",
+        )
+        legacy = Candle.objects.create(
+            instrument=self.instrument,
+            ingestion_run=run,
+            dataset_version=None,
+            granularity="H1",
+            content_sha256=None,
+            observed_at=None,
+            provenance=Candle.Provenance.LEGACY_UNKNOWN,
+            **candle(MONDAY_HOUR).__dict__,
+        )
+        self.ingest([candle(MONDAY_HOUR, volume=250)], "legacy-adoption")
+        head = legacy.authoritative_observation()
+        self.assertEqual(head.kind, CandleObservation.Kind.REVISION)
+
+        self.reference(legacy, head.observed_at - timedelta(minutes=5))
+
+        for message, offences in self.preflight_offences().items():
+            self.assertEqual(offences, 0, f"0029 would have refused: {message}")
+
+    def test_every_reference_table_is_covered_by_the_referenced_predicate(self):
+        """All seven relations that can bind a candle are consulted."""
+        body = self.sql(
+            "SELECT prosrc FROM pg_proc WHERE proname = "
+            "'market_candleobservation_candle_is_referenced'"
+        )
+        for relation in (
+            "market_candleconflict",
+            "forecasts_evidencesnapshot",
+            "forecasts_forecastresolution",
+            "forecasts_recommendation",
+            "forecasts_recommendationresolution",
+            "forecasts_papertradeentry",
+            "forecasts_papertraderesult",
+        ):
+            self.assertIn(relation, body)
