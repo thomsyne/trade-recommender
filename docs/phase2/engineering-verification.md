@@ -112,3 +112,29 @@ isolated broad focused run has the accepted runtime-superuser assertion only. Op
 capacity, canary rollout and season-specific DST observation remain pending separate
 production authorization. The engineer considers this **READY for independent testing**,
 not self-approved for acceptance, deployment or trading.
+
+## Tester P2-01 correction
+
+The independent first pass found one blocking diagnostic mismatch: disabled OANDA
+jobs were explained using decision `active` rather than collection `ingestion_enabled`.
+The tester's exact probe was reproduced before correction (`engineer-p2-01-reproduced.log`).
+A new repository regression then failed in32 subcases (eight codes × four configuration/
+policy combinations) before the fix (`engineer-p2-01-new-test-before-fix.log`).
+
+`operations.job_state.disabled_reason` now checks collection eligibility, then missing
+token, then explicit schedule disable. Collection-disabled instruments say so directly;
+ingestion-only instruments missing a token show DISABLED — CONFIGURATION. The existing
+active-CAD test fixture now explicitly enables ingestion to represent its intended
+configuration case. No existing assertions were removed or weakened.
+
+Serial checks: `test operations.tests.test_diagnostics market.tests.test_phase2_ingestion
+operations.tests.test_queue dashboard.tests --keepdb --noinput`:55 tests passed/12.428s.
+Tester exact probe rerun:1 passed/0.441s. Ruff, format, compilation and diff checks passed.
+The Operations template and existing CSS were rendered with three synthetic states and
+an assertion refusing database queries. `p2-01-visual/operations-collection-component.png`
+was visually inspected: configuration warning, explicit collection disable and explicit
+schedule disable are readable, distinct and unclipped. Full-page screenshot and source
+HTML also retained. Remote font import omitted for offline synthetic review; no production
+settings or data used. Headless anchor screenshots were blank and are retained as failed
+render attempts; the inspected component capture is the valid evidence. No template or
+CSS source was changed. Independent tester re-verification remains required.

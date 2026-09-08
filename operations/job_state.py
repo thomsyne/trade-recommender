@@ -90,10 +90,10 @@ def disabled_reason(job):
     if task == "market.ingest_oanda":
         code = job.parameters.get("instrument", "")
         instrument = Instrument.objects.filter(code=code).first()
-        if instrument is not None and not instrument.active:
+        if instrument is not None and not instrument.ingestion_enabled:
             return (
                 "disabled_intentional",
-                f"{code} is outside the prospective pair scope; not collected by policy.",
+                f"Live collection is disabled for {code} (ingestion_enabled=False).",
             )
         if not settings.OANDA_TOKEN:
             return ("disabled_configuration", "OANDA_TOKEN is not configured.")
