@@ -38,7 +38,7 @@ assert_empty_dir() { [ -z "$(ls -A "$1")" ] || fail "expected $1 to be empty, fo
 
 toolbox="$temporary/toolbox"
 mkdir -p "$toolbox"
-for command in basename cat chmod cp cut date dirname env grep gzip head kill ls mkdir mkfifo mktemp mv printf rm rmdir sed seq sleep tail tr wc; do
+for command in basename cat chmod cp cut date dirname env grep gzip head kill ls mkdir mkfifo mktemp mv printf ps rm rmdir sed seq sh sleep tail tr wc; do
   path="$(command -v "$command" || true)"
   if [ -n "$path" ] && [ -x "$path" ]; then ln -s "$path" "$toolbox/$command"; fi
 done
@@ -72,36 +72,57 @@ good_aws() {
   cat <<'EOF'
 #!/bin/bash
 echo "aws $*" >>"$CALLS"
-if [ "$1" = s3 ] && [ "$2" = cp ]; then
-  object_key="$4"
-  cp "$3" "$FAKE_BUCKET/$(basename "$object_key")"
-  # The backup attaches the local sha256 as user metadata at upload time;
-  # remember it so head-object can return it for verification.
-  sha=""
+# Minimal S3 stub with object versioning: every put-object writes a new version
+# under its own id, and head-object answers for one exact version.
+b64sha() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 -binary "$1" | openssl base64 -A
+  else
+    python3 -c 'import base64,hashlib,sys;print(base64.b64encode(hashlib.sha256(open(sys.argv[1],"rb").read()).digest()).decode())' "$1"
+  fi
+}
+if [ "$1" = s3api ] && [ "$2" = put-object ]; then
+  key=""; body=""; meta_sha=""
   while [ "$#" -gt 0 ]; do
-    if [ "$1" = "--metadata" ]; then sha="${2#sha256=}"; shift; fi
+    case "$1" in
+      --key) shift; key="$1" ;;
+      --body) shift; body="$1" ;;
+      --metadata) shift; meta_sha="${1#sha256=}" ;;
+    esac
     shift
   done
-  printf '%s' "$sha" >"$FAKE_BUCKET/$(basename "$object_key").sha256"
-  exit 0
+  version="${FAKE_VERSION_ID:-v$(date +%s)-$RANDOM}"
+  object="$FAKE_BUCKET/$(basename "$key").$version"
+  cp "$body" "$object"
+  checksum="$(b64sha "$object")"
+  printf '%s\n' "$meta_sha" >"$object.meta-sha256"
+  printf '%s\n' "$checksum" >"$object.checksum"
+  printf '%s' "$version" >"$FAKE_BUCKET/$(basename "$key").latest"
+  # Some cases make the reported upload checksum disagree with the stored bytes.
+  printf '%s\t%s\n' "$version" "${FAKE_PUT_CHECKSUM:-$checksum}"
+  exit "${FAKE_PUT_STATUS:-0}"
 fi
 if [ "$1" = s3api ] && [ "$2" = head-object ]; then
-  key=""
-  query=""
+  key=""; version=""
   while [ "$#" -gt 0 ]; do
-    if [ "$1" = --key ]; then shift; key="$1"; fi
-    if [ "$1" = --query ]; then shift; query="$1"; fi
+    case "$1" in
+      --key) shift; key="$1" ;;
+      --version-id) shift; version="$1" ;;
+    esac
     shift
   done
-  object="$FAKE_BUCKET/$(basename "$key")"
-  if [ "$query" = ContentLength ]; then
-    wc -c <"$object" | tr -d ' '
-    exit 0
+  if [ -n "${FAKE_HEAD_STATUS:-}" ] && [ "${FAKE_HEAD_STATUS}" != 0 ]; then
+    echo "head-object failed" >&2
+    exit "$FAKE_HEAD_STATUS"
   fi
-  if [ "$query" = "Metadata.sha256" ]; then
-    cat "$object.sha256" 2>/dev/null || true
-    exit 0
+  object="$FAKE_BUCKET/$(basename "$key").$version"
+  if [ ! -f "$object" ]; then
+    echo "NoSuchVersion" >&2
+    exit 254
   fi
+  printf '%s\t%s\t%s\n' "$(wc -c <"$object" | tr -d ' ')" \
+    "$(cat "$object.checksum")" "$(cat "$object.meta-sha256")"
+  exit 0
 fi
 exit 0
 EOF
@@ -119,7 +140,14 @@ prepare_case() {
   : >"$CALLS"
   good_dump | write_stub pg_dump
   good_aws | write_stub aws
-  good_flock | write_stub flock
+  # Prefer the real flock(1) wherever it exists (Linux, and therefore CI and
+  # the production image): the kernel semantics are the thing under test. The
+  # Python stub is only a macOS stand-in.
+  if command -v flock >/dev/null 2>&1; then
+    ln -sf "$(command -v flock)" "$MOCK_BIN/flock"
+  else
+    good_flock | write_stub flock
+  fi
   if command -v setsid >/dev/null 2>&1; then ln -sf "$(command -v setsid)" "$MOCK_BIN/setsid"; fi
   if command -v uuidgen >/dev/null 2>&1; then ln -sf "$(command -v uuidgen)" "$MOCK_BIN/uuidgen"; fi
 }
@@ -148,6 +176,22 @@ sys.exit(0)
 EOF
 }
 
+assert_lock_free() {
+  # The interrupted attempt must have released the kernel lock even though the
+  # lock file itself remains.
+  ( exec 9>>"$STATE/.backup-lock"; PATH="$MOCK_BIN:$toolbox" "$MOCK_BIN/flock" -n 9 ) \
+    || fail "the attempt lock is still held after the attempt ended"
+}
+
+run_backup_status() {
+  # Capture backup.sh's exit status without tripping the harness's `set -e`.
+  # `run_backup` restores errexit itself, so the `||` is what keeps a non-zero
+  # status from aborting the harness here.
+  captured_status=0
+  run_backup "$@" || captured_status=$?
+  return 0
+}
+
 run_backup() {
   # run_backup MODE [extra env assignments...]; captures output/error, records status.
   mode="$1"; shift
@@ -165,8 +209,10 @@ run_backup() {
 prepare_case success
 run_backup once || fail "successful backup exited non-zero"
 assert_contains 'backup uploaded: postgres/' "$CASE_ROOT/output"
-assert_contains 'aws s3 cp' "$CALLS"
-assert_contains '--sse AES256' "$CALLS"
+assert_contains 'aws s3api put-object' "$CALLS"
+assert_contains '--server-side-encryption AES256' "$CALLS"
+assert_contains '--checksum-algorithm SHA256' "$CALLS"
+assert_contains '--version-id' "$CALLS"
 assert_contains 'aws s3api head-object' "$CALLS"
 assert_contains 'pg_dump --host=db --username=app --dbname=app --clean --if-exists --no-owner --no-acl' "$CALLS"
 assert_not_contains 'not-a-real-secret' "$CALLS"
@@ -177,7 +223,10 @@ assert_contains 'sha256=' "$STATE/backup-last-success"
 assert_contains 'size_bytes=' "$STATE/backup-last-success"
 assert_absent "$STATE/backup-last-failure"
 assert_absent "$STATE/backup-in-progress"
-[ ! -e "$STATE/.backup-lock" ] || fail "attempt lock survived a successful backup"
+# The lock file is persistent: unlinking it would let a third process lock a
+# fresh inode while a holder still owns the old one.
+[ -e "$STATE/.backup-lock" ] || fail "the persistent lock file must survive an attempt"
+assert_contains 'version_id=' "$STATE/backup-last-success"
 # The attempt record, success file and object key share one attempt identity.
 attempt_id="$(sed -n 's/^attempt_id=//p' "$STATE/backup-last-attempt")"
 [ -n "$attempt_id" ] || fail "attempt record lacks an attempt_id"
@@ -185,13 +234,13 @@ assert_contains "attempt_id=${attempt_id}" "$STATE/backup-last-success"
 assert_contains "$attempt_id" "$CASE_ROOT/output"
 assert_empty_dir "$WORK"
 grep -rq 'not-a-real-secret' "$STATE" && fail "state files must never contain the password"
-uploaded="$(ls "$FAKE_BUCKET"/*.sql.gz 2>/dev/null | head -1)"
+uploaded="$(ls "$FAKE_BUCKET"/*.sql.gz.* 2>/dev/null | grep -v -e '\.checksum$' -e '\.meta-sha256$' -e '\.latest$' | head -1)"
 [ -n "$uploaded" ] || fail "no object was uploaded"
 gzip -t "$uploaded" || fail "uploaded archive is not valid gzip"
 recorded_sha="$(sed -n 's/^sha256=//p' "$STATE/backup-last-success")"
 actual_sha="$( (sha256sum "$uploaded" 2>/dev/null || shasum -a 256 "$uploaded") | cut -d' ' -f1)"
 [ "$recorded_sha" = "$actual_sha" ] || fail "recorded sha256 does not match the uploaded archive"
-remote_sha="$(cat "$uploaded.sha256" 2>/dev/null || true)"
+remote_sha="$(cat "$uploaded.meta-sha256" 2>/dev/null || true)"
 [ "$remote_sha" = "$recorded_sha" ] || fail "upload metadata sha256 does not match the recorded hash"
 first_success="$(cat "$STATE/backup-last-success")"
 first_marker="$(cat "$STATE/last-backup")"
@@ -212,8 +261,8 @@ assert_line 'stage=dump' "$STATE/backup-last-failure"
 assert_line 'exit_status=1' "$STATE/backup-last-failure"
 [ "$(cat "$STATE/backup-last-success")" = "$first_success" ] || fail "last-success changed after a failed attempt"
 [ "$(cat "$STATE/last-backup")" = "$first_marker" ] || fail "legacy marker changed after a failed attempt"
-assert_not_contains 'aws s3 cp' "$(mktemp)" 2>/dev/null || true
-[ "$(grep -c 'aws s3 cp' "$CALLS")" -eq 1 ] || fail "failed dump must not upload"
+# Exactly one upload in this case root: the earlier successful attempt's.
+[ "$(grep -c 'aws s3api put-object' "$CALLS")" -eq 1 ] || fail "failed dump must not upload"
 assert_empty_dir "$WORK"
 assert_contains 'connection to server failed' "$CASE_ROOT/error"
 grep -rq 'connection to server failed' "$STATE" && fail "raw stderr must not be persisted to state"
@@ -305,29 +354,63 @@ assert_absent "$STATE/backup-last-success"
 assert_empty_dir "$WORK"
 grep -rq 'AccessDenied' "$STATE" && fail "raw upload error must not be persisted to state"
 
-prepare_case upload-size-mismatch
+prepare_case upload-put-checksum-mismatch
+# put-object reports a checksum that disagrees with the archive: the upload is
+# refused before anything is verified or recorded.
+if run_backup once FAKE_PUT_CHECKSUM=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=; then
+  fail "a put-object checksum mismatch must exit non-zero"
+fi
+assert_line 'category=upload_checksum_mismatch' "$STATE/backup-last-failure"
+assert_line 'stage=upload' "$STATE/backup-last-failure"
+assert_absent "$STATE/last-backup"
+assert_empty_dir "$WORK"
+
+prepare_case upload-version-mismatch
+# The stored version disagrees with what put-object attested: verification must
+# catch it. The stub answers head-object for a *different* object than the one
+# just written, which is what an overwrite race looks like from the client.
 write_stub aws <<'EOF'
 #!/bin/bash
 echo "aws $*" >>"$CALLS"
-if [ "$1" = s3 ] && [ "$2" = cp ]; then
-  cp "$3" "$FAKE_BUCKET/$(basename "$4")"
+b64sha() { openssl dgst -sha256 -binary "$1" | openssl base64 -A; }
+if [ "$1" = s3api ] && [ "$2" = put-object ]; then
+  key=""; body=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in --key) shift; key="$1" ;; --body) shift; body="$1" ;; esac
+    shift
+  done
+  cp "$body" "$FAKE_BUCKET/object.v1"
+  printf '%s\t%s\n' v1 "$(b64sha "$FAKE_BUCKET/object.v1")"
   exit 0
 fi
-if [ "$1" = s3api ]; then
-  # Report the object's real size but a wrong checksum: the size check
-  # passes and the checksum verification must fail.
-  if [ "$(echo "$*" | tr ' ' '\n' | grep -A1 '^--query$' | tail -1)" = ContentLength ]; then
-    key="$(echo "$*" | tr ' ' '\n' | grep -A1 '^--key$' | tail -1)"
-    wc -c <"$FAKE_BUCKET/$(basename "$key")" | tr -d ' '
-    exit 0
-  fi
-  printf '%064d' 0
+if [ "$1" = s3api ] && [ "$2" = head-object ]; then
+  # Another writer replaced the key after the upload; the bytes behind this
+  # version id are not the ones this attempt uploaded.
+  printf 'replaced by another writer\n' >"$FAKE_BUCKET/object.replaced"
+  printf '%s\t%s\t%s\n' "$(wc -c <"$FAKE_BUCKET/object.replaced" | tr -d ' ')" \
+    "$(b64sha "$FAKE_BUCKET/object.replaced")" "0000000000000000000000000000000000000000000000000000000000000000"
   exit 0
 fi
 exit 0
 EOF
-if run_backup once; then fail "checksum mismatch after upload must exit non-zero"; fi
+if run_backup once; then fail "a replaced object version must exit non-zero"; fi
 assert_line 'category=upload_checksum_mismatch' "$STATE/backup-last-failure"
+assert_line 'stage=verify_upload' "$STATE/backup-last-failure"
+assert_absent "$STATE/last-backup"
+assert_empty_dir "$WORK"
+
+prepare_case upload-unversioned
+# A bucket without versioning returns no VersionId; the attempt cannot attest
+# one exact object and must refuse rather than publish a success.
+if run_backup once FAKE_VERSION_ID=None; then fail "an unversioned upload must exit non-zero"; fi
+assert_line 'category=upload_unversioned' "$STATE/backup-last-failure"
+assert_line 'stage=upload' "$STATE/backup-last-failure"
+assert_absent "$STATE/last-backup"
+assert_empty_dir "$WORK"
+
+prepare_case upload-head-failure
+if run_backup once FAKE_HEAD_STATUS=254; then fail "an unverifiable upload must exit non-zero"; fi
+assert_line 'category=upload_unverified' "$STATE/backup-last-failure"
 assert_line 'stage=verify_upload' "$STATE/backup-last-failure"
 assert_absent "$STATE/last-backup"
 assert_empty_dir "$WORK"
@@ -423,7 +506,8 @@ assert_line 'stage=dump' "$STATE/backup-last-failure"
 assert_line 'outcome=failure' "$STATE/backup-last-attempt"
 assert_absent "$STATE/last-backup"
 assert_absent "$STATE/backup-in-progress"
-[ ! -e "$STATE/.backup-lock" ] || fail "attempt lock survived an interrupted backup"
+[ -e "$STATE/.backup-lock" ] || fail "the persistent lock file must not be removed"
+assert_lock_free
 assert_empty_dir "$WORK"
 # Both supervised children must have been terminated AND reaped with the loop:
 # pg_dump (which exec'd into sleep) and the real gzip both record their PIDs.
@@ -468,7 +552,9 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 grep -q '^outcome=success$' "$STATE/backup-last-attempt" || fail "attempt never committed"
-assert_absent "$STATE/backup-last-success"
+# backup-last-success is written before the authoritative record commits: it is
+# already true once the upload has been verified against its exact version.
+assert_present "$STATE/backup-last-success"
 kill -TERM "$loop_pid"
 : >"$release"
 set +e
@@ -476,29 +562,45 @@ wait "$loop_pid"
 exit_status=$?
 set -e
 [ "$exit_status" -eq 143 ] || fail "interrupt after commit should exit 143, got $exit_status"
+# A signal landing after the commit must not rewrite the outcome as a failure.
 assert_line 'outcome=success' "$STATE/backup-last-attempt"
 assert_absent "$STATE/backup-last-failure"
-assert_absent "$STATE/backup-last-success"
+assert_present "$STATE/backup-last-success"
 assert_absent "$STATE/last-backup"
 assert_absent "$STATE/backup-in-progress"
-[ ! -e "$STATE/.backup-lock" ] || fail "attempt lock survived an interrupted backup"
+[ -e "$STATE/.backup-lock" ] || fail "the persistent lock file must not be removed"
+assert_lock_free
 assert_empty_dir "$WORK"
 
 # --------------------------------------- unwritable state must abort the dump
 # The state directory is mandatory: a backup that cannot publish durable state
 # before dumping must abort rather than run silently.
 prepare_case state-unwritable
-chmod 500 "$STATE"
-if run_backup once; then
-  chmod 700 "$STATE"
-  fail "an unwritable state directory must abort the backup"
+# Permission bits do not bind root, and the backup container runs as root, so
+# the case that must hold everywhere is a state path that is not a usable
+# directory at all.
+not_a_directory="$CASE_ROOT/state-is-a-file"
+: >"$not_a_directory"
+if run_backup once BACKUP_STATE_DIR="$not_a_directory"; then
+  fail "an unusable state directory must abort the backup"
 fi
-chmod 700 "$STATE"
 assert_contains 'state directory' "$CASE_ROOT/output"
 assert_contains 'not writable' "$CASE_ROOT/output"
 assert_not_contains 'pg_dump' "$CALLS"
 assert_absent "$STATE/last-backup"
 assert_empty_dir "$WORK"
+
+if [ "$(id -u)" -ne 0 ]; then
+  # As an unprivileged user the mode bits are meaningful too.
+  prepare_case state-unwritable-mode
+  chmod 500 "$STATE"
+  if run_backup once; then
+    chmod 700 "$STATE"
+    fail "an unwritable state directory must abort the backup"
+  fi
+  chmod 700 "$STATE"
+  assert_not_contains 'pg_dump' "$CALLS"
+fi
 
 # ------------------------------------------- concurrent attempts serialize
 # The scheduler's backup loop and a deploy-time `backup once` share the state
@@ -558,15 +660,194 @@ set -e
 [ "$second_status" -ne 0 ] || fail "a skipped concurrent backup must exit non-zero"
 [ "$first_status" -eq 0 ] || fail "the first backup should succeed after the second was skipped"
 assert_absent "$STATE/backup-in-progress"
-[ ! -e "$STATE/.backup-lock" ] || fail "attempt lock survived a serialized pair of backups"
+[ -e "$STATE/.backup-lock" ] || fail "the persistent lock file must not be removed"
 assert_present "$STATE/last-backup"
 assert_line 'outcome=success' "$STATE/backup-last-attempt"
 assert_absent "$STATE/backup-last-failure"
 assert_empty_dir "$WORK"
 # One upload only: the skipped attempt must not have created a second object.
-[ "$(grep -c 'aws s3 cp' "$CALLS")" -eq 1 ] || fail "a skipped concurrent backup must not upload"
-[ "$(ls "$FAKE_BUCKET"/*.sql.gz 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ] \
+[ "$(grep -c 'aws s3api put-object' "$CALLS")" -eq 1 ] \
+  || fail "a skipped concurrent backup must not upload"
+[ "$(ls "$FAKE_BUCKET"/*.sql.gz.* 2>/dev/null | grep -c -v -e '\.checksum$' -e '\.meta-sha256$' -e '\.latest$')" -eq 1 ] \
   || fail "concurrent backups collided on the object key"
+# Exclusion must hold for a THIRD process too: the loser above must not have
+# disturbed the holder's lock file, so a later contender is still excluded.
+env -i PATH="$MOCK_BIN:$toolbox" HOME="$CASE_ROOT" TMPDIR="$WORK" CALLS="$CALLS" \
+  FAKE_BUCKET="$FAKE_BUCKET" POSTGRES_HOST=db POSTGRES_USER=app POSTGRES_DB=app \
+  POSTGRES_PASSWORD=not-a-real-secret BACKUP_BUCKET=fake-bucket AWS_REGION=us-east-1 \
+  BACKUP_STATE_DIR="$STATE" BACKUP_WORK_DIR="$WORK" /bin/sh -c '
+    exec 8>>"$BACKUP_STATE_DIR/.backup-lock"
+    flock -n 8 || exit 9
+    sleep 5 &
+    echo $! >"'"$CASE_ROOT"'/holder.pid"
+    wait
+  ' >/dev/null 2>&1 &
+holder_pid=$!
+for _ in $(seq 1 60); do
+  [ -f "$CASE_ROOT/holder.pid" ] && break
+  sleep 0.05
+done
+set +e
+env -i PATH="$MOCK_BIN:$toolbox" HOME="$CASE_ROOT" TMPDIR="$WORK" CALLS="$CALLS" FAKE_BUCKET="$FAKE_BUCKET" \
+  POSTGRES_HOST=db POSTGRES_USER=app POSTGRES_DB=app POSTGRES_PASSWORD=not-a-real-secret \
+  BACKUP_BUCKET=fake-bucket AWS_REGION=us-east-1 BACKUP_STATE_DIR="$STATE" BACKUP_WORK_DIR="$WORK" \
+  /bin/sh "$backup" once >"$CASE_ROOT/output-third" 2>&1
+third_status=$?
+set -e
+[ "$third_status" -eq 3 ] \
+  || fail "a third process must be excluded while the lock is held (got $third_status)"
+grep -q 'another backup holds the attempt lock' "$CASE_ROOT/output-third" \
+  || fail "the excluded third process must say so"
+kill "$holder_pid" 2>/dev/null || true
+wait "$holder_pid" 2>/dev/null || true
+
+# ------------------------------------------ state write faults are terminal
+# Fault injection at each state rename boundary. A backup that cannot record
+# its own outcome must fail loudly and leave its in-progress evidence behind,
+# never report success and never silently forget the attempt.
+inject_mv_failure() {
+  # inject_mv_failure TARGET_BASENAME -- fail the atomic rename of that state file.
+  real_mv="$(command -v mv)"
+  write_stub mv <<STUB
+#!/bin/bash
+if [ "\${@: -1}" = "$STATE/$1" ]; then
+  echo "injected mv failure for $1" >&2
+  exit 1
+fi
+exec $real_mv "\$@"
+STUB
+}
+
+prepare_case state-fault-last-attempt-success
+inject_mv_failure backup-last-attempt
+if run_backup once; then fail "an uncommittable success must exit non-zero"; fi
+assert_absent "$STATE/last-backup"
+assert_present "$STATE/backup-in-progress"
+assert_contains 'attempt_id=' "$STATE/backup-in-progress"
+in_progress_id="$(sed -n 's/^attempt_id=//p' "$STATE/backup-in-progress")"
+assert_contains "attempt_id=${in_progress_id}" "$STATE/backup-last-success"
+[ ! -e "$STATE/backup-last-attempt" ] || fail "no terminal record should exist"
+assert_lock_free
+assert_empty_dir "$WORK"
+
+prepare_case state-fault-last-success
+inject_mv_failure backup-last-success
+if run_backup once; then fail "an unrecordable success detail must exit non-zero"; fi
+# The attempt never commits as a success when its evidence cannot be published.
+[ ! -e "$STATE/backup-last-attempt" ] || fail "no terminal record should exist"
+assert_absent "$STATE/last-backup"
+assert_present "$STATE/backup-in-progress"
+assert_lock_free
+
+prepare_case state-fault-last-attempt-failure
+write_stub pg_dump <<'EOF'
+#!/bin/bash
+echo "pg_dump $*" >>"$CALLS"
+echo "pg_dump: error: connection to server failed" >&2
+exit 1
+EOF
+inject_mv_failure backup-last-attempt
+if run_backup once; then fail "an uncommittable failure must exit non-zero"; fi
+assert_present "$STATE/backup-in-progress"
+[ ! -e "$STATE/backup-last-attempt" ] || fail "no terminal record should exist"
+assert_lock_free
+
+prepare_case state-fault-in-progress
+real_mv="$(command -v mv)"
+write_stub mv <<STUB
+#!/bin/bash
+if [ "\${@: -1}" = "$STATE/backup-in-progress" ]; then
+  echo "injected mv failure" >&2
+  exit 1
+fi
+exec $real_mv "\$@"
+STUB
+run_backup_status once
+[ "$captured_status" -eq 2 ] \
+  || fail "an unwritable in-progress record must abort with 2, got $captured_status"
+assert_not_contains 'pg_dump' "$CALLS"
+assert_absent "$STATE/backup-in-progress"
+assert_lock_free
+
+# ---------------------------------------------- precondition exit semantics
+prepare_case precondition-no-flock
+rm -f "$MOCK_BIN/flock"
+run_backup_status once
+[ "$captured_status" -eq 2 ] || fail "a missing flock must abort with 2, got $captured_status"
+assert_contains 'required tool flock is missing' "$CASE_ROOT/output"
+assert_not_contains 'pg_dump' "$CALLS"
+
+prepare_case precondition-unwritable-state
+: >"$CASE_ROOT/not-a-directory"
+run_backup_status once BACKUP_STATE_DIR="$CASE_ROOT/not-a-directory"
+[ "$captured_status" -eq 2 ] \
+  || fail "an unusable state directory must abort with 2, got $captured_status"
+assert_not_contains 'pg_dump' "$CALLS"
+
+# ------------------------------- interruption reaps children and descendants
+prepare_case interrupt-descendants
+write_stub pg_dump <<EOF
+#!/bin/bash
+echo "pg_dump \$*" >>"\$CALLS"
+printf -- '--\n-- PostgreSQL database dump\n--\n'
+# A descendant of pg_dump, in the same process group: interrupting the backup
+# must take the whole group down, not just the direct children.
+( while true; do sleep 0.2; done ) &
+echo \$! >"$CASE_ROOT/descendant.pid"
+echo \$\$ >"$CASE_ROOT/pg_dump.pid"
+echo started >"$CASE_ROOT/dump-started"
+while true; do sleep 0.2; done
+EOF
+env -i PATH="$MOCK_BIN:$toolbox" HOME="$CASE_ROOT" TMPDIR="$WORK" CALLS="$CALLS" FAKE_BUCKET="$FAKE_BUCKET" \
+  POSTGRES_HOST=db POSTGRES_USER=app POSTGRES_DB=app POSTGRES_PASSWORD=not-a-real-secret \
+  BACKUP_BUCKET=fake-bucket AWS_REGION=us-east-1 BACKUP_STATE_DIR="$STATE" BACKUP_WORK_DIR="$WORK" \
+  /bin/sh "$backup" once >"$CASE_ROOT/output" 2>"$CASE_ROOT/error" &
+backup_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$CASE_ROOT/dump-started" ] && [ -f "$CASE_ROOT/descendant.pid" ] && break
+  sleep 0.05
+done
+assert_present "$CASE_ROOT/dump-started"
+dump_pid="$(cat "$CASE_ROOT/pg_dump.pid")"
+descendant_pid="$(cat "$CASE_ROOT/descendant.pid")"
+gzip_pid=""
+for _ in $(seq 1 100); do
+  gzip_pid="$(cat "$WORK"/backup.*/gzip.pid 2>/dev/null || true)"
+  [ -n "$gzip_pid" ] && break
+  sleep 0.05
+done
+[ -n "$gzip_pid" ] || fail "the supervisor never recorded the gzip pid"
+kill -0 "$dump_pid" 2>/dev/null || fail "pg_dump should be running before the interrupt"
+kill -0 "$descendant_pid" 2>/dev/null || fail "the descendant should be running"
+kill -0 "$gzip_pid" 2>/dev/null || fail "gzip should be running"
+kill -TERM "$backup_pid"
+set +e
+wait "$backup_pid"
+interrupt_status=$?
+set -e
+[ "$interrupt_status" -eq 143 ] || fail "interrupt should exit 143, got $interrupt_status"
+for _ in $(seq 1 100); do
+  if ! kill -0 "$dump_pid" 2>/dev/null && ! kill -0 "$gzip_pid" 2>/dev/null \
+     && ! kill -0 "$descendant_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+kill -0 "$dump_pid" 2>/dev/null && fail "pg_dump ($dump_pid) survived the interrupt"
+kill -0 "$gzip_pid" 2>/dev/null && fail "gzip ($gzip_pid) survived the interrupt"
+if command -v setsid >/dev/null 2>&1; then
+  # With setsid the supervisor owns a process group, so descendants die too.
+  kill -0 "$descendant_pid" 2>/dev/null \
+    && fail "the descendant ($descendant_pid) survived the interrupt"
+else
+  # Development hosts without setsid(1) can only reap the direct children; the
+  # production image has setsid, which the container run exercises.
+  kill "$descendant_pid" 2>/dev/null || true
+fi
+assert_line 'category=interrupted' "$STATE/backup-last-failure"
+assert_absent "$STATE/backup-in-progress"
+assert_lock_free
+assert_empty_dir "$WORK"
 
 # -------------------------------------------------------------- restore-check
 prepare_case restore-check-refusals

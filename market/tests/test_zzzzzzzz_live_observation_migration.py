@@ -342,63 +342,69 @@ class LineageRenumberMigrationTests(TransactionTestCase):
         def pin(run):
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "ALTER TABLE market_ingestionrun DISABLE TRIGGER "
-                    "market_ingestion_run_enforce"
+                    "ALTER TABLE market_ingestionrun DISABLE TRIGGER market_ingestion_run_enforce"
                 )
                 cursor.execute(
                     "UPDATE market_ingestionrun SET started_at = %s WHERE id = %s",
                     [started_at, run.pk],
                 )
                 cursor.execute(
-                    "ALTER TABLE market_ingestionrun ENABLE TRIGGER "
-                    "market_ingestion_run_enforce"
+                    "ALTER TABLE market_ingestionrun ENABLE TRIGGER market_ingestion_run_enforce"
                 )
             return run
 
-        run_a1 = pin(IngestionRun.objects.create(
-            source=source_a,
-            instrument=instrument,
-            granularity="H1",
-            requested_from=start,
-            requested_to=start + timedelta(hours=1),
-            parameters={},
-            request_manifest_hash="0029-legacy-a1",
-            status="succeeded",
-            finished_at=start + timedelta(hours=1),
-        ))
-        run_a2 = pin(IngestionRun.objects.create(
-            source=source_a,
-            instrument=instrument,
-            granularity="H1",
-            requested_from=start,
-            requested_to=start + timedelta(hours=1),
-            parameters={},
-            request_manifest_hash="0029-legacy-a2",
-            status="succeeded",
-            finished_at=start + timedelta(hours=1),
-        ))
-        run_b2 = pin(IngestionRun.objects.create(
-            source=source_b,
-            instrument=instrument,
-            granularity="H1",
-            requested_from=start,
-            requested_to=start + timedelta(hours=1),
-            parameters={},
-            request_manifest_hash="0029-legacy-b2",
-            status="succeeded",
-            finished_at=start + timedelta(hours=1),
-        ))
-        legacy_run = pin(IngestionRun.objects.create(
-            source=source_a,
-            instrument=instrument,
-            granularity="H1",
-            requested_from=start,
-            requested_to=start + timedelta(hours=2),
-            parameters={},
-            request_manifest_hash="0029-legacy-adoption",
-            status="succeeded",
-            finished_at=start + timedelta(hours=2),
-        ))
+        run_a1 = pin(
+            IngestionRun.objects.create(
+                source=source_a,
+                instrument=instrument,
+                granularity="H1",
+                requested_from=start,
+                requested_to=start + timedelta(hours=1),
+                parameters={},
+                request_manifest_hash="0029-legacy-a1",
+                status="succeeded",
+                finished_at=start + timedelta(hours=1),
+            )
+        )
+        run_a2 = pin(
+            IngestionRun.objects.create(
+                source=source_a,
+                instrument=instrument,
+                granularity="H1",
+                requested_from=start,
+                requested_to=start + timedelta(hours=1),
+                parameters={},
+                request_manifest_hash="0029-legacy-a2",
+                status="succeeded",
+                finished_at=start + timedelta(hours=1),
+            )
+        )
+        run_b2 = pin(
+            IngestionRun.objects.create(
+                source=source_b,
+                instrument=instrument,
+                granularity="H1",
+                requested_from=start,
+                requested_to=start + timedelta(hours=1),
+                parameters={},
+                request_manifest_hash="0029-legacy-b2",
+                status="succeeded",
+                finished_at=start + timedelta(hours=1),
+            )
+        )
+        legacy_run = pin(
+            IngestionRun.objects.create(
+                source=source_a,
+                instrument=instrument,
+                granularity="H1",
+                requested_from=start,
+                requested_to=start + timedelta(hours=2),
+                parameters={},
+                request_manifest_hash="0029-legacy-adoption",
+                status="succeeded",
+                finished_at=start + timedelta(hours=2),
+            )
+        )
 
         def content(**changes):
             values = {
@@ -441,12 +447,30 @@ class LineageRenumberMigrationTests(TransactionTestCase):
         )
 
         columns = (
-            "instrument_id", "granularity", "timestamp", "interval_end",
-            "complete", "volume", "bid_open", "bid_high", "bid_low",
-            "bid_close", "ask_open", "ask_high", "ask_low", "ask_close",
-            "source_id", "ingestion_run_id", "candle_id", "kind", "revision",
-            "supersedes_id", "content_sha256", "differing_fields",
-            "observed_at", "created_at",
+            "instrument_id",
+            "granularity",
+            "timestamp",
+            "interval_end",
+            "complete",
+            "volume",
+            "bid_open",
+            "bid_high",
+            "bid_low",
+            "bid_close",
+            "ask_open",
+            "ask_high",
+            "ask_low",
+            "ask_close",
+            "source_id",
+            "ingestion_run_id",
+            "candle_id",
+            "kind",
+            "revision",
+            "supersedes_id",
+            "content_sha256",
+            "differing_fields",
+            "observed_at",
+            "created_at",
         )
         with connection.cursor() as cursor:
             cursor.execute(
@@ -457,8 +481,17 @@ class LineageRenumberMigrationTests(TransactionTestCase):
                 "INSERT INTO market_candleobservation ({cols}) VALUES ({ph}) RETURNING id"
             ).format(cols=", ".join(columns), ph=", ".join(["%s"] * len(columns)))
 
-            def put(candle_row, source, run, kind, revision, supersedes_id,
-                    differing_fields, observed_at=None, **changes):
+            def put(
+                candle_row,
+                source,
+                run,
+                kind,
+                revision,
+                supersedes_id,
+                differing_fields,
+                observed_at=None,
+                **changes,
+            ):
                 row = Candle(
                     instrument=instrument,
                     ingestion_run=run,
@@ -469,13 +502,27 @@ class LineageRenumberMigrationTests(TransactionTestCase):
                     **content(**changes),
                 )
                 values = [
-                    instrument.pk, "H1", candle_row.timestamp,
+                    instrument.pk,
+                    "H1",
+                    candle_row.timestamp,
                     candle_row.timestamp + timedelta(hours=1),
-                    True, 100, row.bid_open, row.bid_high, row.bid_low,
-                    row.bid_close, row.ask_open, row.ask_high, row.ask_low,
+                    True,
+                    100,
+                    row.bid_open,
+                    row.bid_high,
+                    row.bid_low,
+                    row.bid_close,
+                    row.ask_open,
+                    row.ask_high,
+                    row.ask_low,
                     row.ask_close,
-                    source.pk, run.pk, candle_row.pk, kind, revision,
-                    supersedes_id, self._content_hash(row),
+                    source.pk,
+                    run.pk,
+                    candle_row.pk,
+                    kind,
+                    revision,
+                    supersedes_id,
+                    self._content_hash(row),
                     json.dumps(differing_fields),
                     observed_at or datetime(2026, 1, 5, 9, 30, 0, tzinfo=UTC),
                     datetime(2026, 1, 5, 9, 30, 0, tzinfo=UTC),
@@ -486,21 +533,45 @@ class LineageRenumberMigrationTests(TransactionTestCase):
             # candle_a: rev 1 froze it (source A); source A then revises it,
             # and source B writes its own revision 2 with NO predecessor.
             first_id = put(
-                candle_a, source_a, run_a1, "initial", 1, None, [],
+                candle_a,
+                source_a,
+                run_a1,
+                "initial",
+                1,
+                None,
+                [],
                 observed_at=candle_a.observed_at,
             )
             put(
-                candle_a, source_a, run_a2, "revision", 2, first_id, ["bid_close"],
+                candle_a,
+                source_a,
+                run_a2,
+                "revision",
+                2,
+                first_id,
+                ["bid_close"],
                 bid_close=Decimal("0.651100"),
             )
             put(
-                candle_a, source_b, run_b2, "revision", 2, None, ["bid_close"],
+                candle_a,
+                source_b,
+                run_b2,
+                "revision",
+                2,
+                None,
+                ["bid_close"],
                 bid_close=Decimal("0.651200"),
             )
             # legacy candle: first recorded view written as revision 2 with no
             # supersedes; 0029 must make it revision 1.
             put(
-                legacy, source_a, legacy_run, "revision", 2, None, ["bid_close"],
+                legacy,
+                source_a,
+                legacy_run,
+                "revision",
+                2,
+                None,
+                ["bid_close"],
                 bid_close=Decimal("0.651300"),
             )
 

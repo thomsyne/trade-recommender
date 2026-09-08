@@ -37,6 +37,7 @@ _ALLOWED_KEYS = {
     "exit_status",
     "sha256",
     "size_bytes",
+    "version_id",
     "interval_seconds",
 }
 PROCESS_STARTED_AT = timezone.now()
@@ -210,6 +211,13 @@ def backup_assessment(state, *, now, max_age_hours):
         "attempt_in_progress": in_progress_at is not None,
         "state": "missing",
     }
+    if state.in_progress is not None and in_progress_at is None:
+        # The file exists but carries no usable start: a partial or corrupted
+        # record. It is not the same as having no record at all, and it cannot
+        # be read as "no attempt is running", so readiness fails on it.
+        detail["state"] = "attempt_malformed"
+        detail["attempt_in_progress"] = True
+        return False, detail
     if in_progress_at is not None:
         attempt_age = (now - in_progress_at).total_seconds()
         detail["attempt_started_at"] = in_progress_at

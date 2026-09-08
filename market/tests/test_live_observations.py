@@ -348,8 +348,8 @@ class LiveObservationIdentityTests(TestCase):
         self.assertEqual(CandleObservation.objects.count(), 0)
 
     def test_dst_fall_back_hours_keep_distinct_completions(self):
-        first = datetime(2026, 11, 1, 5, tzinfo=UTC)
-        second = datetime(2026, 11, 1, 6, tzinfo=UTC)
+        first = datetime(2025, 11, 2, 5, tzinfo=UTC)
+        second = datetime(2025, 11, 2, 6, tzinfo=UTC)
         self.assertEqual(
             registered_candle_completion(first, "H1"), registered_candle_completion(second, "H1")
         )
@@ -361,7 +361,7 @@ class LiveObservationIdentityTests(TestCase):
         )
         self.assertEqual(ends, [first + timedelta(hours=1), second + timedelta(hours=1)])
         self.assertEqual(live_candle_completion(first, "H1"), first + timedelta(hours=1))
-        daily = datetime(2026, 11, 5, 22, tzinfo=UTC)
+        daily = datetime(2025, 11, 6, 22, tzinfo=UTC)
         self.assertEqual(
             live_candle_completion(daily, "D"), registered_candle_completion(daily, "D")
         )
@@ -369,10 +369,11 @@ class LiveObservationIdentityTests(TestCase):
     def test_multiple_granularities_and_instruments_are_independent_identities(self):
         other, _ = make_market("EUR_USD", 2)
         item = candle(START)
+        four_hour = candle(datetime(2026, 1, 5, 6, tzinfo=UTC))  # 01:00 New York
         daily = candle(datetime(2026, 1, 4, 22, tzinfo=UTC))
 
         ingest(self.source, self.instrument, [item], "h1")
-        ingest(self.source, self.instrument, [item], "h4", granularity="H4")
+        ingest(self.source, self.instrument, [four_hour], "h4", granularity="H4")
         ingest(self.source, self.instrument, [daily], "d", granularity="D")
         ingest(self.source, other, [item], "other")
 
@@ -436,6 +437,7 @@ class LiveObservationIdentityTests(TestCase):
             }
             values.update(changes)
             return candle(START, **values)
+
         ingest(self.source, self.instrument, [price_scale()], "sub-unit")
         row = Candle.objects.get()
         self.assertEqual(row.content_sha256, candle_content_sha256("USD_CAD", "H1", price_scale()))
@@ -875,12 +877,16 @@ class LiveEvidenceDatabaseProtectionTests(TransactionTestCase):
         # observation rows these probes copy; the chronology check must not be
         # the reason a probe is rejected.
         with connection.cursor() as cursor:
-            cursor.execute("ALTER TABLE market_ingestionrun DISABLE TRIGGER market_ingestion_run_enforce")
+            cursor.execute(
+                "ALTER TABLE market_ingestionrun DISABLE TRIGGER market_ingestion_run_enforce"
+            )
             cursor.execute(
                 "UPDATE market_ingestionrun SET started_at = %s WHERE id = %s",
                 [self.observation.observed_at - timedelta(minutes=5), run.pk],
             )
-            cursor.execute("ALTER TABLE market_ingestionrun ENABLE TRIGGER market_ingestion_run_enforce")
+            cursor.execute(
+                "ALTER TABLE market_ingestionrun ENABLE TRIGGER market_ingestion_run_enforce"
+            )
         return run
 
     def test_observation_timestamp_outside_run_request_window_is_rejected(self):
@@ -943,8 +949,15 @@ class LiveEvidenceDatabaseProtectionTests(TransactionTestCase):
         # registered wall-clock step, not a naive UTC day.
         daily_start = datetime(2026, 1, 4, 22, tzinfo=UTC)  # Sunday 17:00 NY
         daily_end = datetime(2026, 1, 6, 22, tzinfo=UTC)
-        ingest(self.source, self.instrument, [candle(daily_start)], "daily-probe",
-               granularity="D", start=daily_start, end=daily_end)
+        ingest(
+            self.source,
+            self.instrument,
+            [candle(daily_start)],
+            "daily-probe",
+            granularity="D",
+            start=daily_start,
+            end=daily_end,
+        )
         daily = Candle.objects.get(granularity="D")
         head = daily.authoritative_observation()
         # A forged interval_end one hour early/late must be rejected even though

@@ -29,8 +29,8 @@ from forecasts.recommendations import (
 )
 from forecasts.sizing import size_recommendation
 from market.models import AuditEvent, Instrument, SourceRegistry
-from market.services import store_ingestion
-from market.tests.factories import candle
+from market.services import live_candle_completion, store_ingestion
+from market.tests.factories import candle, daily_sessions
 from research.models import PairEvidenceSnapshot
 
 
@@ -195,13 +195,17 @@ class RecommendationTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        reference_at = timezone.now() - timedelta(days=1)
+        # Daily candles open at the 17:00 New York close and cannot be observed
+        # before they complete, so the fixture walks the real session calendar
+        # instead of inventing an arbitrary instant.
+        self.sessions = daily_sessions(7)
+        reference_at = self.sessions[0]
         store_ingestion(
             self.source,
             self.instrument,
             "D",
             reference_at,
-            reference_at + timedelta(days=1),
+            live_candle_completion(reference_at, "D"),
             [candle(reference_at)],
             {"test": "recommendation-reference", "requests": []},
         )
@@ -326,25 +330,26 @@ class RecommendationTests(TestCase):
             provider=FakeProvider(),
             generated_at=self.now + timedelta(seconds=1),
         )
-        start = recommendation.reference_candle.timestamp + timedelta(days=1)
+        four = self.sessions[1:5]
         store_ingestion(
             self.source,
             self.instrument,
             "D",
-            start,
-            start + timedelta(days=4),
-            [rising_candle(start + timedelta(days=index)) for index in range(4)],
+            four[0],
+            live_candle_completion(four[-1], "D"),
+            [rising_candle(value) for value in four],
             {"test": "recommendation-future-four", "requests": []},
         )
         self.assertIsNone(resolve_recommendation(recommendation))
 
+        fifth = self.sessions[5]
         store_ingestion(
             self.source,
             self.instrument,
             "D",
-            start + timedelta(days=4),
-            start + timedelta(days=5),
-            [rising_candle(start + timedelta(days=4))],
+            fifth,
+            live_candle_completion(fifth, "D"),
+            [rising_candle(fifth)],
             {"test": "recommendation-future-five", "requests": []},
         )
         resolution = resolve_recommendation(recommendation)
@@ -623,13 +628,14 @@ class RecommendationDatabaseTests(TransactionTestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        reference_at = timezone.now() - timedelta(days=1)
+        sessions = daily_sessions(7)
+        reference_at = sessions[0]
         store_ingestion(
             source,
             instrument,
             "D",
             reference_at,
-            reference_at + timedelta(days=1),
+            live_candle_completion(reference_at, "D"),
             [candle(reference_at)],
             {"test": "database-reference", "requests": []},
         )
@@ -696,14 +702,14 @@ class RecommendationDatabaseTests(TransactionTestCase):
         paper_result.refresh_from_db()
         self.assertEqual(paper_result.gross_pips, Decimal("-100.000"))
 
-        start = recommendation.reference_candle.timestamp + timedelta(days=1)
+        later = sessions[1:6]
         store_ingestion(
             source,
             instrument,
             "D",
-            start,
-            start + timedelta(days=5),
-            [rising_candle(start + timedelta(days=index)) for index in range(5)],
+            later[0],
+            live_candle_completion(later[-1], "D"),
+            [rising_candle(value) for value in later],
             {"test": "database-resolution", "requests": []},
         )
         resolution = resolve_recommendation(recommendation)
