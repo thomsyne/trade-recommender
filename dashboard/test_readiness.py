@@ -3,6 +3,7 @@
 import os
 import tempfile
 from datetime import UTC, timedelta
+from pathlib import Path
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -395,6 +396,70 @@ class ReadinessBackupStateTests(TestCase):
         self.assertIn("backup", response.json()["checks"])
         self.assertEqual(response.json()["backup"]["state"], "success_missing")
         self.assertEqual(response.json()["backup"]["last_attempt_outcome"], "success")
+
+    def test_legacy_marker_is_ignored_once_modern_state_exists(self):
+        """A stale marker beside a broken producer must not read as healthy."""
+        Path(os.path.join(self.directory, "last-backup")).write_text(
+            iso(timedelta(minutes=5)), encoding="utf-8"
+        )
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempt_id=attempt_id(3),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            outcome="failure",
+            stage="upload",
+            category="upload_failed",
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["backup"]["state"], "missing")
+
+    def test_modern_state_without_a_terminal_record_is_not_healthy(self):
+        Path(os.path.join(self.directory, "last-backup")).write_text(
+            iso(timedelta(minutes=5)), encoding="utf-8"
+        )
+        write_state(
+            self.directory,
+            "backup-in-progress",
+            attempt_id=attempt_id(4),
+            started_at=iso(timedelta(minutes=4)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            stage="dump",
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["backup"]["state"], "attempt_record_missing")
+
+    def test_success_completed_before_it_was_attempted_is_incoherent(self):
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(5),
+            completed_at=iso(timedelta(hours=3)),
+            attempted_at=iso(timedelta(hours=1)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
+            sha256="a" * 64,
+        )
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempt_id=attempt_id(5),
+            attempted_at=iso(timedelta(hours=1)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            outcome="success",
+            stage="record",
+        )
+
+        response = self.ready()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["backup"]["state"], "success_incoherent")
 
     def test_no_successful_backup_fails_readiness(self):
         response = self.ready()

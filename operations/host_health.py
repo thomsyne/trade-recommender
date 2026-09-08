@@ -233,6 +233,10 @@ def _success_is_self_consistent(success, *, now):
     for field in ("object_key", "version_id", "sha256"):
         if not success.get(field):
             return "success_partial"
+    # A backup cannot finish before it started.
+    attempted_at = _parse_timestamp(success.get("attempted_at"))
+    if attempted_at is not None and completed_at < attempted_at:
+        return "success_incoherent"
     return None
 
 
@@ -255,12 +259,15 @@ def backup_assessment(state, *, now, max_age_hours):
     """Return (ready, safe_detail) from a corroborated success, never an attempt.
 
     The legacy marker is a fallback for hosts that have not yet run the current
-    protocol at all. The moment any modern record exists, the modern contract
-    applies in full: a schema-valid authoritative terminal record must be
-    present, and a success must be corroborated by it. Corrupt modern state is
-    reported as corrupt rather than quietly falling through to the marker,
-    because a stale marker beside a broken protocol is exactly the situation
-    readiness exists to catch.
+    protocol at all. The moment any modern record exists the marker is ignored
+    entirely and the modern contract applies in full: a schema-valid
+    authoritative terminal record must be present, a published success must be
+    self-consistent and chronologically coherent, and where the record
+    describes that same attempt the two must agree. Corrupt modern state is
+    reported as corrupt rather than falling through to the marker, because a
+    stale marker beside a broken producer is exactly what readiness exists to
+    catch. An older committed success followed by a newer failed attempt stays
+    healthy, with the failure surfaced as a warning.
     """
     in_progress_at = state.in_progress_since
     detail = {
@@ -308,6 +315,9 @@ def backup_assessment(state, *, now, max_age_hours):
 
     attempt = state.last_attempt
     success = state.last_success
+    # From here the legacy marker is not evidence of anything: a host running
+    # the current protocol must be judged by the protocol's own records, or a
+    # stale marker beside a broken producer would read as healthy.
     if success is not None:
         # A published success is only a success if the protocol committed it.
         if _success_is_uncommitted(state):
@@ -330,18 +340,19 @@ def backup_assessment(state, *, now, max_age_hours):
             problem = _success_matches_commitment(success, attempt)
             if problem:
                 return unhealthy(problem)
-    elif attempt is not None:
+    else:
+        if attempt is None:
+            return unhealthy("attempt_record_missing")
         if not _attempt_record_is_valid(attempt):
             return unhealthy("attempt_malformed")
         if attempt.get("outcome") == "success":
             # Committed as successful with nothing published to corroborate it.
             return unhealthy("success_missing")
 
-    success_at = state.last_success_at
+    # The published success record, never the legacy marker.
+    success_at = _parse_timestamp(success.get("completed_at")) if success else None
     if success_at is None:
         return False, detail
-    if success_at > now:
-        return unhealthy("future_dated")
     age = (now - success_at).total_seconds()
     detail["last_success_age_seconds"] = int(age)
     if age > max_age_hours * 3600:
