@@ -48,11 +48,14 @@ class ReadinessBackupStateTests(TestCase):
             attempt_id=attempt_id(1),
             completed_at="not-a-timestamp",
             object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
+            sha256="a" * 64,
         )
         write_state(
             self.directory,
             "backup-last-attempt",
             attempt_id=attempt_id(1),
+            object_key="postgres/20260907T120000Z.sql.gz",
             outcome="success",
             stage="record",
         )
@@ -71,6 +74,8 @@ class ReadinessBackupStateTests(TestCase):
             attempt_id=attempt_id(7),
             completed_at=iso(timedelta(minutes=2)),
             object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
+            sha256="a" * 64,
         )
         write_state(
             self.directory,
@@ -93,11 +98,14 @@ class ReadinessBackupStateTests(TestCase):
             attempt_id=attempt_id(2),
             completed_at=iso(-timedelta(hours=3)),
             object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
+            sha256="a" * 64,
         )
         write_state(
             self.directory,
             "backup-last-attempt",
             attempt_id=attempt_id(2),
+            object_key="postgres/20260907T120000Z.sql.gz",
             outcome="success",
             stage="record",
         )
@@ -115,6 +123,7 @@ class ReadinessBackupStateTests(TestCase):
             completed_at=iso(timedelta(hours=1)),
             attempted_at=iso(timedelta(hours=1)),
             object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
             sha256="a" * 64,
             size_bytes=1234,
         )
@@ -123,6 +132,7 @@ class ReadinessBackupStateTests(TestCase):
             "backup-last-attempt",
             attempt_id=attempt_id(1),
             attempted_at=iso(timedelta(hours=1)),
+            object_key="postgres/20260907T120000Z.sql.gz",
             outcome="success",
         )
 
@@ -139,7 +149,24 @@ class ReadinessBackupStateTests(TestCase):
         self.assertNotIn(self.directory, response.content.decode())
 
     def test_stale_success_fails_readiness(self):
-        write_state(self.directory, "backup-last-success", completed_at=iso(timedelta(hours=10)))
+        write_state(
+            self.directory,
+            "backup-last-success",
+            attempt_id=attempt_id(1),
+            completed_at=iso(timedelta(hours=10)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
+            sha256="a" * 64,
+        )
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempt_id=attempt_id(1),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            outcome="success",
+            stage="record",
+        )
+
         response = self.ready()
         self.assertEqual(response.status_code, 503)
         self.assertIn("backup", response.json()["checks"])
@@ -152,12 +179,16 @@ class ReadinessBackupStateTests(TestCase):
             attempt_id=attempt_id(1),
             completed_at=iso(timedelta(hours=2)),
             attempted_at=iso(timedelta(hours=2)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
+            sha256="a" * 64,
         )
         write_state(
             self.directory,
             "backup-last-attempt",
             attempt_id=attempt_id(2),
             attempted_at=iso(timedelta(hours=1)),
+            object_key="postgres/20260907T120000Z.sql.gz",
             outcome="failure",
             stage="upload",
             category="upload_failed",
@@ -194,6 +225,7 @@ class ReadinessBackupStateTests(TestCase):
             completed_at=attempted_at,
             attempted_at=attempted_at,
             object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
             sha256="a" * 64,
             size_bytes=1234,
         )
@@ -202,6 +234,7 @@ class ReadinessBackupStateTests(TestCase):
             "backup-last-attempt",
             attempt_id=attempt_id(1),
             attempted_at=attempted_at,
+            object_key="postgres/20260907T120000Z.sql.gz",
             outcome="failure",
             stage="record",
             category="interrupted",
@@ -234,6 +267,7 @@ class ReadinessBackupStateTests(TestCase):
             completed_at=attempted_at,
             attempted_at=attempted_at,
             object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
             sha256="a" * 64,
             size_bytes=1234,
         )
@@ -266,6 +300,7 @@ class ReadinessBackupStateTests(TestCase):
             completed_at=iso(timedelta(hours=2)),
             attempted_at=iso(timedelta(hours=2)),
             object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
             sha256="a" * 64,
             size_bytes=1234,
         )
@@ -275,6 +310,7 @@ class ReadinessBackupStateTests(TestCase):
             "backup-last-attempt",
             attempt_id=attempt_id(2),
             attempted_at=same_second,
+            object_key="postgres/20260907T120000Z.sql.gz",
             outcome="failure",
             stage="dump",
             category="dump_failed",
@@ -304,13 +340,19 @@ class ReadinessBackupStateTests(TestCase):
         write_state(
             self.directory,
             "backup-last-success",
+            attempt_id=attempt_id(1),
             completed_at=iso(timedelta(hours=2)),
             attempted_at=iso(timedelta(hours=2)),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
+            sha256="a" * 64,
         )
         write_state(
             self.directory,
             "backup-last-attempt",
+            attempt_id=attempt_id(2),
             attempted_at=iso(timedelta(hours=1)),
+            object_key="postgres/20260907T120000Z.sql.gz",
             outcome="failure",
             stage="upload",
             category="upload_failed",
@@ -318,6 +360,7 @@ class ReadinessBackupStateTests(TestCase):
         write_state(
             self.directory,
             "backup-last-failure",
+            attempt_id=attempt_id(2),
             failed_at=iso(timedelta(hours=1)),
             attempted_at=iso(timedelta(hours=1)),
             stage="upload",
@@ -330,7 +373,7 @@ class ReadinessBackupStateTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["backup"]["state"], "fresh")
 
-    def test_committed_success_without_a_published_success_file_is_missing(self):
+    def test_committed_success_without_a_published_success_file_is_reported(self):
         # The new producer commits the attempt record before publishing the
         # success file; if it is interrupted inside that window the committed
         # attempt stands but readiness must not invent a success timestamp.
@@ -338,6 +381,7 @@ class ReadinessBackupStateTests(TestCase):
         write_state(
             self.directory,
             "backup-last-attempt",
+            attempt_id=attempt_id(1),
             attempted_at=attempted_at,
             object_key="postgres/20260907T120000Z.sql.gz",
             outcome="success",
@@ -349,7 +393,7 @@ class ReadinessBackupStateTests(TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("backup", response.json()["checks"])
-        self.assertEqual(response.json()["backup"]["state"], "missing")
+        self.assertEqual(response.json()["backup"]["state"], "success_missing")
         self.assertEqual(response.json()["backup"]["last_attempt_outcome"], "success")
 
     def test_no_successful_backup_fails_readiness(self):
@@ -368,8 +412,17 @@ class ReadinessBackupStateTests(TestCase):
             completed_at=iso(timedelta(hours=1)),
             attempted_at=iso(timedelta(hours=1)),
             object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
             sha256="a" * 64,
             size_bytes=1234,
+        )
+        write_state(
+            self.directory,
+            "backup-last-attempt",
+            attempt_id=attempt_id(1),
+            object_key="postgres/20260907T120000Z.sql.gz",
+            outcome="success",
+            stage="record",
         )
         write_state(
             self.directory,
@@ -398,6 +451,7 @@ class ReadinessBackupStateTests(TestCase):
             completed_at=iso(timedelta(hours=1)),
             attempted_at=iso(timedelta(hours=1)),
             object_key="postgres/20260907T120000Z.sql.gz",
+            version_id="v-fixture-1",
             sha256="a" * 64,
             size_bytes=1234,
         )
@@ -429,12 +483,17 @@ class ReadinessBackupStateTests(TestCase):
         write_state(
             self.directory,
             "backup-last-success",
+            attempt_id=attempt_id(1),
             completed_at=iso(timedelta(hours=1)),
             object_key="<script>alert(1)</script>",
+            version_id="v-fixture-1",
+            sha256="a" * 64,
         )
         response = self.ready()
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["backup"]["state"], "success_partial")
         self.assertNotIn("<script>", response.content.decode())
+        self.assertNotIn("alert(1)", response.content.decode())
 
 
 @override_settings(
@@ -607,3 +666,194 @@ class OperationsPageSemanticsTests(TestCase):
         self.assertContains(response, '<caption class="visually-hidden">')
         self.assertContains(response, 'aria-labelledby="schedule-heading"')
         self.assertNotIn("/var/lib/trade-recommender", content)
+
+
+@override_settings(
+    DEBUG=True,
+    OANDA_TOKEN="",
+    OANDA_ACCOUNT_ID="",
+    ANTHROPIC_API_KEY="",
+    EODHD_API_TOKEN="",
+    POSTMORTEM_INTERPRETATION_ENABLED=False,
+    RECOMMENDATION_SCHEDULE_ENABLED=False,
+)
+class JobRecoveryProjectionTests(TestCase):
+    """Recovery is the newest success for the work, not whichever row came last."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_demo", verbosity=0)
+        cls.user = get_user_model().objects.get(username="owner")
+        cls.now = timezone.now()
+        cls.job = ScheduledJob.objects.create(
+            name="OANDA multi-series ingest",
+            task_name="market.ingest_oanda",
+            parameters={"instrument": "USD_CAD", "granularity": "H1"},
+            interval_seconds=3600,
+            next_run_at=cls.now + timedelta(hours=1),
+        )
+
+    def occurrence(self, key, *, status, offset, parameters, job="__scheduled__"):
+        # An explicit job=None means an ad-hoc occurrence, which is not the same
+        # as omitting the argument.
+        return JobOccurrence.objects.create(
+            idempotency_key=key,
+            scheduled_job=self.job if job == "__scheduled__" else job,
+            task_name=self.job.task_name,
+            parameters=parameters,
+            scheduled_for=self.now - timedelta(hours=offset),
+            available_at=self.now - timedelta(hours=offset),
+            status=status,
+            attempts=1,
+        )
+
+    def failure(self, occurrence, *, offset):
+        return TaskFailure.objects.create(
+            occurrence=occurrence,
+            attempt_number=1,
+            task_name=occurrence.task_name,
+            error_code="provider_timeout",
+            category="network",
+            stage="provider_fetch",
+            exception_type="ReadTimeout",
+            summary="ReadTimeout: provider request timed out",
+            terminal=True,
+            occurred_at=self.now - timedelta(hours=offset),
+        )
+
+    def failure_row(self, content, failure):
+        rows = [
+            chunk for chunk in content.split("<tr>") if f"#{failure.occurrence_id}</small>" in chunk
+        ]
+        self.assertEqual(len(rows), 1, failure.occurrence_id)
+        return rows[0]
+
+    def page(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse("operations"))
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_newest_success_across_parameter_groups_decides_recovery(self):
+        # One scheduled job, two parameter groups. The older group's success
+        # must not be the one that survives the collapse to job identity.
+        failed = self.occurrence(
+            "multi-failed",
+            status=JobOccurrence.Status.FAILED,
+            offset=6,
+            parameters={"instrument": "USD_CAD", "granularity": "H1"},
+        )
+        record = self.failure(failed, offset=6)
+        self.occurrence(
+            "multi-old-success",
+            status=JobOccurrence.Status.SUCCEEDED,
+            offset=8,
+            parameters={"granularity": "H4", "instrument": "EUR_USD"},
+        )
+        self.occurrence(
+            "multi-new-success",
+            status=JobOccurrence.Status.SUCCEEDED,
+            offset=1,
+            parameters={"instrument": "USD_CAD", "granularity": "H1"},
+        )
+
+        row = self.failure_row(self.page(), record)
+
+        self.assertIn("RECOVERED LATER", row)
+
+    def test_only_older_successes_leave_the_failure_unrecovered(self):
+        failed = self.occurrence(
+            "older-only-failed",
+            status=JobOccurrence.Status.FAILED,
+            offset=2,
+            parameters={"instrument": "USD_CAD", "granularity": "H1"},
+        )
+        record = self.failure(failed, offset=2)
+        # Two groups, both older than the failure, in an order that would make
+        # last-write-wins pick either one.
+        self.occurrence(
+            "older-a",
+            status=JobOccurrence.Status.SUCCEEDED,
+            offset=9,
+            parameters={"granularity": "H1", "instrument": "USD_CAD"},
+        )
+        self.occurrence(
+            "older-b",
+            status=JobOccurrence.Status.SUCCEEDED,
+            offset=5,
+            parameters={"instrument": "GBP_USD", "granularity": "H4"},
+        )
+
+        row = self.failure_row(self.page(), record)
+
+        self.assertNotIn("RECOVERED", row)
+        self.assertIn("TERMINAL", row)
+
+    def test_key_order_does_not_split_an_ad_hoc_identity(self):
+        adhoc_failed = self.occurrence(
+            "adhoc-failed",
+            status=JobOccurrence.Status.FAILED,
+            offset=4,
+            parameters={"instrument": "USD_CAD", "granularity": "H1"},
+            job=None,
+        )
+        record = self.failure(adhoc_failed, offset=4)
+        self.occurrence(
+            "adhoc-success",
+            status=JobOccurrence.Status.SUCCEEDED,
+            offset=1,
+            parameters={"granularity": "H1", "instrument": "USD_CAD"},
+            job=None,
+        )
+
+        row = self.failure_row(self.page(), record)
+
+        self.assertIn("RECOVERED LATER", row)
+
+    def test_absent_parameters_are_not_the_same_identity_as_empty_ones(self):
+        adhoc_failed = self.occurrence(
+            "adhoc-empty-failed",
+            status=JobOccurrence.Status.FAILED,
+            offset=4,
+            parameters={},
+            job=None,
+        )
+        record = self.failure(adhoc_failed, offset=4)
+        self.occurrence(
+            "adhoc-other-success",
+            status=JobOccurrence.Status.SUCCEEDED,
+            offset=1,
+            parameters={"instrument": "USD_CAD"},
+            job=None,
+        )
+
+        row = self.failure_row(self.page(), record)
+
+        self.assertNotIn("RECOVERED", row)
+
+    def test_a_sibling_scheduled_job_does_not_recover_this_one(self):
+        sibling = ScheduledJob.objects.create(
+            name="OANDA sibling series",
+            task_name=self.job.task_name,
+            parameters={"instrument": "EUR_USD", "granularity": "H4"},
+            interval_seconds=14_400,
+            next_run_at=self.now + timedelta(hours=1),
+        )
+        failed = self.occurrence(
+            "sibling-failed",
+            status=JobOccurrence.Status.FAILED,
+            offset=4,
+            parameters=self.job.parameters,
+        )
+        record = self.failure(failed, offset=4)
+        self.occurrence(
+            "sibling-success",
+            status=JobOccurrence.Status.SUCCEEDED,
+            offset=1,
+            parameters=sibling.parameters,
+            job=sibling,
+        )
+
+        row = self.failure_row(self.page(), record)
+
+        self.assertNotIn("RECOVERED", row)

@@ -87,11 +87,13 @@ def _occurrence_identity(row):
 
     A scheduled job is the identity when there is one; ad-hoc occurrences fall
     back to their task and the exact parameters they ran with, so a success for
-    USD_CAD H1 never marks a EUR_USD H4 failure recovered.
+    USD_CAD H1 never marks a EUR_USD H4 failure recovered. Parameters are
+    canonicalised with sorted keys so key order cannot split an identity, while
+    absent parameters stay distinct from explicitly empty ones.
     """
     if row.get("scheduled_job_id"):
         return ("job", row["scheduled_job_id"])
-    return ("task", row.get("task_name"), json.dumps(row.get("parameters") or {}, sort_keys=True))
+    return ("task", row.get("task_name"), json.dumps(row.get("parameters"), sort_keys=True))
 
 
 def migration_status():
@@ -999,12 +1001,20 @@ def operations(request):
     # Recovery is correlated by the identity of the work, not by the task name
     # alone: two scheduled jobs run the same task for different instruments or
     # granularities, and one pair succeeding says nothing about another pair.
-    latest_success_by_identity = {
-        _occurrence_identity(row): row["latest"]
-        for row in JobOccurrence.objects.filter(status=JobOccurrence.Status.SUCCEEDED)
+    latest_success_by_identity = {}
+    for row in (
+        JobOccurrence.objects.filter(status=JobOccurrence.Status.SUCCEEDED)
         .values("scheduled_job_id", "task_name", "parameters")
         .annotate(latest=Max("scheduled_for"))
-    }
+    ):
+        # The query groups by parameters, so one scheduled job can produce
+        # several rows. Collapsing them to the job identity has to keep the
+        # newest success: a dict comprehension would keep whichever row the
+        # database happened to return last.
+        key = _occurrence_identity(row)
+        current = latest_success_by_identity.get(key)
+        if current is None or row["latest"] > current:
+            latest_success_by_identity[key] = row["latest"]
     for failure in recent_failures:
         latest_success = latest_success_by_identity.get(
             _occurrence_identity(

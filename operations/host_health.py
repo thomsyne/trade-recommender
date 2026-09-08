@@ -201,12 +201,66 @@ def _same_attempt(first, second):
     return bool(attempted_at and attempted_at == second.get("attempted_at"))
 
 
-def backup_assessment(state, *, now, max_age_hours):
-    """Return (ready, safe_detail) from genuine last success, never last attempt.
+def _modern_state_present(state):
+    """Whether any record from the current backup protocol exists at all."""
+    return any(
+        record is not None
+        for record in (
+            state.last_attempt,
+            state.last_success,
+            state.last_failure,
+            state.in_progress,
+        )
+    )
 
-    A durable in-progress record is honest while a backup runs; one older than
-    the readiness window means the attempt died or is stuck without a terminal
-    outcome, and is reported (and fails readiness) like a missing backup.
+
+def _attempt_record_is_valid(attempt):
+    """Whether the authoritative terminal record is schema-valid."""
+    if not attempt:
+        return False
+    if not attempt.get("attempt_id"):
+        return False
+    return attempt.get("outcome") in {"success", "failure"}
+
+
+def _success_is_self_consistent(success, *, now):
+    """Whether a published success stands up on its own terms."""
+    completed_at = _parse_timestamp(success.get("completed_at"))
+    if completed_at is None:
+        return "success_malformed"
+    if completed_at > now:
+        return "future_dated"
+    for field in ("object_key", "version_id", "sha256"):
+        if not success.get(field):
+            return "success_partial"
+    return None
+
+
+def _success_matches_commitment(success, attempt):
+    """Whether a success agrees with the authoritative record of its own attempt.
+
+    Only applied when both records describe the same attempt. A later attempt
+    does not re-open an older success: that success was corroborated when it
+    committed, and an attempt that never committed is caught by its retained
+    in-progress evidence instead.
+    """
+    if attempt.get("outcome") != "success":
+        return "contradicted"
+    if success.get("object_key") != attempt.get("object_key"):
+        return "success_contradicted"
+    return None
+
+
+def backup_assessment(state, *, now, max_age_hours):
+    """Return (ready, safe_detail) from a corroborated success, never an attempt.
+
+    The legacy marker is a fallback for hosts that have not yet run the current
+    protocol at all. The moment any modern record exists, the modern contract
+    applies in full: a schema-valid authoritative terminal record must be
+    present, and a success must be corroborated by it. Corrupt modern state is
+    reported as corrupt rather than quietly falling through to the marker,
+    because a stale marker beside a broken protocol is exactly the situation
+    readiness exists to catch.
     """
     in_progress_at = state.in_progress_since
     detail = {
@@ -218,51 +272,80 @@ def backup_assessment(state, *, now, max_age_hours):
         "attempt_in_progress": in_progress_at is not None,
         "state": "missing",
     }
+
+    def unhealthy(name):
+        detail["state"] = name
+        return False, detail
+
     if state.in_progress is not None and in_progress_at is None:
         # The file exists but carries no usable start: a partial or corrupted
         # record. It is not the same as having no record at all, and it cannot
-        # be read as "no attempt is running", so readiness fails on it.
-        detail["state"] = "attempt_malformed"
+        # be read as "no attempt is running".
         detail["attempt_in_progress"] = True
-        return False, detail
+        return unhealthy("attempt_malformed")
     if in_progress_at is not None:
         attempt_age = (now - in_progress_at).total_seconds()
         detail["attempt_started_at"] = in_progress_at
+        if in_progress_at > now:
+            return unhealthy("future_dated")
         if attempt_age > max_age_hours * 3600:
-            detail["state"] = "attempt_stale"
+            return unhealthy("attempt_stale")
+
+    if not _modern_state_present(state):
+        # No protocol state whatsoever: the legacy marker is all there is, and
+        # is the only case in which it may be trusted on its own.
+        success_at = state.last_success_at
+        if success_at is None:
             return False, detail
-    if _published_success_is_contradicted(state):
-        detail["state"] = "contradicted"
-        return False, detail
-    if (
-        state.last_success is not None
-        and _parse_timestamp(state.last_success.get("completed_at")) is None
-    ):
-        # A success record that exists but cannot be read is not a success. It
-        # is reported separately from having no record at all.
-        detail["state"] = "success_malformed"
-        return False, detail
-    if _success_is_uncommitted(state):
-        # backup.sh publishes the success detail before committing the
-        # authoritative attempt record, and deliberately retains its
-        # in-progress evidence if that commit fails. A success detail belonging
-        # to the attempt still in progress has therefore not committed, and
-        # must not be read as one.
-        detail["state"] = "uncommitted"
-        return False, detail
+        if success_at > now:
+            return unhealthy("future_dated")
+        age = (now - success_at).total_seconds()
+        detail["last_success_age_seconds"] = int(age)
+        if age > max_age_hours * 3600:
+            return unhealthy("stale")
+        detail["state"] = "fresh"
+        return True, detail
+
+    attempt = state.last_attempt
+    success = state.last_success
+    if success is not None:
+        # A published success is only a success if the protocol committed it.
+        if _success_is_uncommitted(state):
+            # backup.sh publishes the detail before committing the
+            # authoritative record and retains its in-progress evidence when
+            # that commit fails, so a success belonging to the attempt still in
+            # progress has not committed.
+            return unhealthy("uncommitted")
+        if _published_success_is_contradicted(state):
+            return unhealthy("contradicted")
+        problem = _success_is_self_consistent(success, now=now)
+        if problem:
+            return unhealthy(problem)
+        if attempt is None:
+            # Absence of the commitment, not corruption of it.
+            return unhealthy("success_uncommitted")
+        if not _attempt_record_is_valid(attempt):
+            return unhealthy("attempt_malformed")
+        if _same_attempt(success, attempt):
+            problem = _success_matches_commitment(success, attempt)
+            if problem:
+                return unhealthy(problem)
+    elif attempt is not None:
+        if not _attempt_record_is_valid(attempt):
+            return unhealthy("attempt_malformed")
+        if attempt.get("outcome") == "success":
+            # Committed as successful with nothing published to corroborate it.
+            return unhealthy("success_missing")
+
     success_at = state.last_success_at
     if success_at is None:
         return False, detail
     if success_at > now:
-        # Nothing can have completed later than now; a clock or a forged file
-        # is the only way to produce this, and neither is a healthy backup.
-        detail["state"] = "future_dated"
-        return False, detail
+        return unhealthy("future_dated")
     age = (now - success_at).total_seconds()
     detail["last_success_age_seconds"] = int(age)
     if age > max_age_hours * 3600:
-        detail["state"] = "stale"
-        return False, detail
+        return unhealthy("stale")
     detail["state"] = "fresh"
     if state.last_failure_at is not None and state.last_failure_at > success_at:
         detail["warning"] = "last_attempt_failed"
