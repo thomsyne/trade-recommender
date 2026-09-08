@@ -757,8 +757,13 @@ class HistoricalKindEvaluationTests(TransactionTestCase):
         for message, offences in self.preflight_offences().items():
             self.assertEqual(offences, 0, f"0029 would have refused: {message}")
 
-    def test_a_conflict_against_a_never_referenced_candle_is_provably_wrong(self):
-        """References are append-only, so "cited by nothing" cannot have changed."""
+    def test_a_recorded_conflict_is_preserved_even_with_no_reference_today(self):
+        """Absence of a reference now does not prove absence when it was written.
+
+        Reference tables can be truncated, so a candle nothing cites today may
+        well have been cited at the time. The migration keeps the recorded kind
+        rather than rewriting history it cannot reconstruct.
+        """
         row, revision = self.revised_candle()
         with connection.cursor() as cursor:
             cursor.execute(
@@ -773,10 +778,43 @@ class HistoricalKindEvaluationTests(TransactionTestCase):
                 "ALTER TABLE market_candleobservation ENABLE TRIGGER "
                 "market_candleobservation_append_only"
             )
+        self.assertFalse(
+            self.sql("SELECT market_candleobservation_candle_is_referenced(%s)", [row.pk])
+        )
+
+        for message, offences in self.preflight_offences().items():
+            self.assertEqual(offences, 0, f"0029 would have refused: {message}")
+
+        revision.refresh_from_db()
+        self.assertEqual(revision.kind, CandleObservation.Kind.CONFLICT)
+
+    def test_a_conflict_whose_content_agrees_with_its_candle_is_still_refused(self):
+        """Content-based contradiction is provable and stays enforced.
+
+        A conflict means the view departed from the frozen evidence, so a row
+        whose own content still hashes to that evidence cannot be one, whatever
+        the reference history was.
+        """
+        self.ingest([candle(MONDAY_HOUR)], "first")
+        row = Candle.objects.get(granularity="H1")
+        initial = row.authoritative_observation()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "ALTER TABLE market_candleobservation DISABLE TRIGGER "
+                "market_candleobservation_append_only"
+            )
+            cursor.execute(
+                "UPDATE market_candleobservation SET kind = 'conflict' WHERE id = %s",
+                [initial.pk],
+            )
+            cursor.execute(
+                "ALTER TABLE market_candleobservation ENABLE TRIGGER "
+                "market_candleobservation_append_only"
+            )
 
         offences = self.preflight_offences()
         self.assertEqual(
-            offences["refuses conflict rows against a candle nothing has ever referenced"], 1
+            offences["refuses conflict rows whose content agrees with their frozen candle"], 1
         )
 
     def test_legacy_root_revision_is_never_re_adjudicated(self):

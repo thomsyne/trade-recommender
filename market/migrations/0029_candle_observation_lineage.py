@@ -842,6 +842,17 @@ PREFLIGHT_CHECKS = (
 
 # Checks that only make sense once the chains are dense, so they run after the
 # renumber statement inside the same transaction.
+#
+# There is deliberately no reference-dependent check on a recorded kind here.
+# Visibility at observation time is not reconstructable -- only
+# market_candleconflict.created_at is an insertion timestamp, and
+# Recommendation.generated_at is fixed before provider.generate() is called and
+# the row inserted only after it returns -- and absence cannot be proven either,
+# because reference tables can be truncated, so a candle nothing cites today may
+# have been cited when the row was written. A recorded kind is therefore
+# preserved unless its own content contradicts it. New inserts are still
+# adjudicated at present time by the trigger, where current visibility is
+# directly observable.
 POST_RENUMBER_CHECKS = (
     (
         """
@@ -884,30 +895,6 @@ POST_RENUMBER_CHECKS = (
                    candle.ask_low, candle.ask_close) = '[]'
         """,
         "refuses conflict rows whose content agrees with their frozen candle",
-    ),
-    (
-        # The other half of the kind rule depends on whether frozen evidence
-        # cited the candle when the view was recorded, and that is NOT
-        # reconstructable here. Only market_candleconflict.created_at is an
-        # insertion timestamp (auto_now_add); every other referencing table
-        # carries a business time. Recommendation.generated_at in particular is
-        # fixed before provider.generate() is called and the row is inserted
-        # only after it returns, so a revision recorded legitimately during that
-        # window carries an observed_at later than a generated_at whose row did
-        # not yet exist. Reading those columns as visibility would condemn
-        # correct history.
-        #
-        # So a revision is never re-adjudicated. Only one reference-dependent
-        # contradiction is provable: references are append-only, so a candle
-        # that nothing cites today was cited by nothing when the row was
-        # written, and a 'conflict' against it cannot ever have been right.
-        """
-        SELECT count(*) FROM market_candleobservation observation
-         WHERE observation.kind = 'conflict'
-           AND NOT public.market_candleobservation_candle_is_referenced(
-                   observation.candle_id)
-        """,
-        "refuses conflict rows against a candle nothing has ever referenced",
     ),
     (
         """
