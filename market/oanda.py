@@ -139,11 +139,14 @@ class OandaClient:
                     message = None
                 detail = f": {message}" if message else ""
                 raise OandaError(f"OANDA returned HTTP {response.status_code}{detail}")
-            candles.extend(
-                parsed
-                for parsed in (_parse_candle(item) for item in response.json().get("candles", []))
-                if parsed.complete
-            )
+            try:
+                payload = response.json()
+                if type(payload) is not dict or type(payload.get("candles")) is not list:
+                    raise ValueError("missing candle list")
+                parsed = [_parse_live_candle(item) for item in payload["candles"]]
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                raise OandaError("OANDA live candle response is malformed") from None
+            candles.extend(item for item in parsed if item.complete)
             cursor = window_end
             first_request = False
         manifest = {
@@ -390,6 +393,21 @@ def _provider_timestamp(value):
 
 def _canonical_price_component(value):
     return isinstance(value, dict) and set(value) == {"o", "h", "l", "c"}
+
+
+def _parse_live_candle(item):
+    # Strict live boundary: never coerce text completion flags or local timestamps.
+    _provider_timestamp(item["time"])
+    if type(item["complete"]) is not bool or type(item["volume"]) is not int:
+        raise ValueError("invalid candle metadata")
+    parsed = _parse_candle(item)
+    if any(
+        not getattr(parsed, f"{side}_{field}").is_finite()
+        for side in ("bid", "ask")
+        for field in ("open", "high", "low", "close")
+    ):
+        raise ValueError("nonfinite candle price")
+    return parsed
 
 
 def _parse_candle(item):

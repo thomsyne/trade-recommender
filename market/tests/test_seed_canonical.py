@@ -33,7 +33,20 @@ class CanonicalSeedTests(TestCase):
 
         self.assertEqual(
             list(Instrument.objects.values_list("code", flat=True)),
-            ["EUR_USD", "GBP_USD", "EUR_GBP", "USD_CAD", "USD_JPY", "AUD_USD"],
+            [
+                "EUR_USD",
+                "GBP_USD",
+                "EUR_GBP",
+                "USD_CAD",
+                "USD_JPY",
+                "AUD_USD",
+                "USD_CHF",
+                "NZD_USD",
+                "EUR_JPY",
+                "GBP_JPY",
+                "AUD_JPY",
+                "AUD_CAD",
+            ],
         )
         self.assertEqual(Instrument.objects.filter(active=True).count(), 4)
         oanda = SourceRegistry.objects.get(name="OANDA v20")
@@ -41,9 +54,9 @@ class CanonicalSeedTests(TestCase):
         self.assertTrue(oanda.enabled)
         self.assertEqual(
             ScheduledJob.objects.filter(task_name="market.ingest_oanda", enabled=True).count(),
-            16,
+            48,
         )
-        self.assertFalse(
+        self.assertTrue(
             ScheduledJob.objects.filter(
                 task_name="market.ingest_oanda",
                 parameters__instrument__in=("USD_JPY", "AUD_USD"),

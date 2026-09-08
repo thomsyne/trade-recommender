@@ -334,6 +334,8 @@ def ingest_official_calendar(policy, parser, url, *, transport=None, resolver=No
 
 @transaction.atomic
 def capture_pair_evidence(instrument, *, now=None):
+    if not type(instrument).objects.filter(pk=instrument.pk, active=True).exists():
+        raise ValueError(f"Decision workflows are disabled for {instrument.code}")
     captured_at = now or datetime.now(UTC)
     jurisdictions = {
         "USD": "US",
