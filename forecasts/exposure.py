@@ -2,6 +2,7 @@ from collections import defaultdict
 from decimal import Decimal
 
 from django.db.models import Prefetch
+from django.utils import timezone
 
 from forecasts.models import PositionSizeAdvice, Recommendation
 from forecasts.sizing import (
@@ -17,15 +18,16 @@ from forecasts.sizing import (
 CURRENCY_SETUP_BUDGET = 2
 
 
-def active_directional_recommendations():
+def active_directional_recommendations(*, as_of=None):
+    from forecasts.lifecycle import current_risk_projection
     from forecasts.portfolio import active_admitted_recommendation_ids
 
-    return (
+    as_of = as_of or timezone.now()
+    rows = (
         Recommendation.objects.filter(
-            pk__in=active_admitted_recommendation_ids(),
+            pk__in=active_admitted_recommendation_ids(as_of=as_of),
             contract_version__in=(2, 3, 4),
             action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
-            paper_result__isnull=True,
         )
         .select_related("instrument", "paper_entry", "paper_result")
         .prefetch_related(
@@ -39,6 +41,8 @@ def active_directional_recommendations():
         )
     )
 
+    return [r for r in rows if current_risk_projection(r, as_of=as_of)]
+
 
 def decompose_pair(base_currency, quote_currency, action):
     if action == Recommendation.Action.BUY:
@@ -48,7 +52,10 @@ def decompose_pair(base_currency, quote_currency, action):
     return ()
 
 
-def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
+def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET, *, as_of=None):
+    from forecasts.lifecycle import current_risk_projection
+
+    as_of = as_of or timezone.now()
     currency_legs = defaultdict(
         lambda: {
             "long": [],
@@ -61,14 +68,9 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
     total_risk_cad = Decimal("0")
     sizing_missing_count = 0
     for recommendation in recommendations:
-        if recommendation.contract_version not in {2, 3, 4} or recommendation.action not in {
-            Recommendation.Action.BUY,
-            Recommendation.Action.SELL,
-        }:
+        lifecycle = current_risk_projection(recommendation, as_of=as_of)
+        if lifecycle is None:
             continue
-        if getattr(recommendation, "paper_result", None):
-            continue
-
         current_sizes = getattr(recommendation, "current_position_sizes", None)
         size = current_sizes[0] if current_sizes else getattr(recommendation, "position_size", None)
         if size:
@@ -80,9 +82,6 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
             recommendation.instrument.quote_currency,
             recommendation.action,
         )
-        from forecasts.lifecycle import project_lifecycle
-
-        lifecycle = project_lifecycle(recommendation)
         setup = {
             "recommendation": recommendation,
             "state": lifecycle["state"],

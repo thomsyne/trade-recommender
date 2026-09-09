@@ -160,8 +160,6 @@ def project_lifecycle(rec, *, as_of=None):
                 "not_activated": "expired_not_activated",
             }[result.outcome]
             reason, at = "recorded_result", result.resolved_at
-        elif entry:
-            state, reason, at = "entered", "recorded_entry", entry.entered_at
         else:
             historical = (
                 rec.paper_lifecycle_events.filter(occurred_at__lte=as_of)
@@ -174,6 +172,8 @@ def project_lifecycle(rec, *, as_of=None):
                 "cancelled",
             }:
                 state, reason, at = historical.state, historical.reason_code, historical.occurred_at
+            elif entry:
+                state, reason, at = "entered", "recorded_entry", entry.entered_at
             elif admission:
                 state = (
                     "admitted_awaiting_entry"
@@ -200,6 +200,24 @@ def project_lifecycle(rec, *, as_of=None):
         else "not_assessed",
         "legacy": rec.contract_version != 4,
     }
+
+
+def current_risk_projection(rec, *, as_of=None):
+    """Return the factual active projection, or None, at one effective cutoff.
+
+    Admission history alone does not prove continuing risk. Terminal coverage
+    facts need no paper result, and stale model instances must not hide them.
+    Legacy rows qualify only through recorded admission and active entry state.
+    """
+    if rec.contract_version not in {2, 3, 4} or rec.action not in {"buy", "sell"}:
+        return None
+    projection = project_lifecycle(rec, as_of=as_of)
+    if projection["admission_status"] != "admitted" or projection["state"] not in {
+        "admitted_awaiting_entry",
+        "entered",
+    }:
+        return None
+    return projection
 
 
 @transaction.atomic

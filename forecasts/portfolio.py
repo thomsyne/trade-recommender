@@ -29,19 +29,19 @@ from market.models import AuditEvent, Candle
 from operations.notifications import create_owner_notification
 
 
-def _latest_admission_states():
+def _latest_admission_states(*, as_of=None):
     states = {}
-    for event in PortfolioAdmissionEvent.objects.filter(occurred_at__lte=timezone.now()).order_by(
-        "recommendation_id", "occurred_at", "id"
-    ):
+    for event in PortfolioAdmissionEvent.objects.filter(
+        occurred_at__lte=as_of or timezone.now()
+    ).order_by("recommendation_id", "occurred_at", "id"):
         states[event.recommendation_id] = event.state
     return states
 
 
-def active_admitted_recommendation_ids():
+def active_admitted_recommendation_ids(*, as_of=None):
     return [
         recommendation_id
-        for recommendation_id, state in _latest_admission_states().items()
+        for recommendation_id, state in _latest_admission_states(as_of=as_of).items()
         if state == PortfolioAdmissionEvent.State.ADMITTED
     ]
 
@@ -97,18 +97,17 @@ def _selection_fits_snapshot(cohort, selected_members):
     )
 
 
-def _active_admitted(excluding=()):
-    rows = list(
-        Recommendation.objects.filter(
-            pk__in=active_admitted_recommendation_ids(), paper_result__isnull=True
-        )
+def _active_admitted(excluding=(), *, as_of=None):
+    from forecasts.lifecycle import current_risk_projection
+
+    as_of = as_of or timezone.now()
+    rows = (
+        Recommendation.objects.filter(pk__in=active_admitted_recommendation_ids(as_of=as_of))
         .exclude(pk__in=excluding)
         .select_related("instrument")
         .prefetch_related("position_sizes")
     )
-    from forecasts.lifecycle import project_lifecycle
-
-    return [r for r in rows if r.contract_version != 4 or not project_lifecycle(r)["terminal"]]
+    return [r for r in rows if current_risk_projection(r, as_of=as_of)]
 
 
 def _lock_portfolio():

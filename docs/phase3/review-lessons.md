@@ -42,3 +42,13 @@ Those independent counts supersede any suggestion that the engineer's earlier
 base 222 tests / 19 errors was the sole reproducible result. Disk-readiness failures are
 separate observations: the unchanged threshold is 2 GiB and the host fell below it.
 No assertion, runtime gate or unowned file may be changed to conceal that condition.
+
+F9 exposed a separate missed assumption: correct lifecycle labels do not prove
+correct risk denominators. Every current-risk consumer must share the factual
+admission-plus-active-state rule, including direct report callers with stale
+instances. A mandatory future verification is to place cancelled, missing-data
+and expired-unobserved records beside an admitted and an entered setup, compare
+actual Paper/Exposure row IDs and cash totals, then repeat immediately before
+and exactly at each terminal fact. A future result must not remove earlier risk.
+Legacy compatibility requires genuine pre-cutover admission and execution facts
+through a normal upgrade; relabelling a v4 fixture as legacy is not evidence.

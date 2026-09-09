@@ -911,7 +911,8 @@ def decide_experiment(request, era_id, assessment_id):
 
 @owner_required
 def exposure(request):
-    report = build_exposure_report(active_directional_recommendations())
+    as_of = timezone.now()
+    report = build_exposure_report(active_directional_recommendations(as_of=as_of), as_of=as_of)
     return render(request, "dashboard/exposure.html", report)
 
 

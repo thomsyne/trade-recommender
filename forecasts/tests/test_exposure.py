@@ -31,8 +31,9 @@ class ExposureTests(SimpleTestCase):
         # setups; the real projection boundary has database tests in Phase3.
         projection = patch(
             "forecasts.lifecycle.project_lifecycle",
-            side_effect=lambda rec: {
-                "state": rec.projected_state,
+            side_effect=lambda rec, **kwargs: {
+                "state": "target_hit" if rec.paper_result else rec.projected_state,
+                "admission_status": "admitted",
                 "label": rec.projected_state.replace("_", " "),
             },
         )
