@@ -59,6 +59,12 @@ def transition(rec, state, *, reason_code, source=None, occurred_at=None):
     if rec.contract_version != 4:
         raise ValidationError("legacy_transition_forbidden")
     source = source or rec
+    if state in {"expired_unobserved", "missing_data", "cancelled"}:
+        from forecasts.models import PaperLifecycleEvent
+
+        if not isinstance(source, PaperLifecycleEvent) or source.recommendation_id != rec.pk:
+            raise ValidationError("coverage_source_required")
+        validate_coverage_fact(source)
     occurred_at = occurred_at or timezone.now()
     latest = rec.lifecycle_events.first()
     key = identity_digest([rec.pk, state, type(source).__name__, source.pk])
@@ -281,3 +287,90 @@ def reconcile_lifecycle(instrument=None, *, as_of=None):
             close_cohort(cohort, "decision_deadline", as_of=as_of)
         elif cohort_has_triggered(cohort, as_of=as_of):
             close_cohort(cohort, "entry_trigger_before_selection", as_of=as_of)
+
+
+def validate_coverage_fact(fact):
+    from forecasts.models import Candle, PaperTradeEntry
+    from forecasts.paper import _has_coverage
+    from forecasts.targets import target_endpoint
+    from market.quality import registered_candle_completion
+
+    rec = fact.recommendation
+    if rec.contract_version != 4:
+        return
+    if (
+        not isinstance(fact.details, dict)
+        or type(fact.details.get("schema_version")) is not int
+        or fact.details.get("schema_version") != 1
+    ):
+        raise ValidationError("invalid_coverage_details")
+    entered = PaperTradeEntry.objects.filter(
+        recommendation=rec, entered_at__lte=fact.occurred_at
+    ).exists()
+    if fact.state == "cancelled":
+        if entered or not fact.reason_code:
+            raise ValidationError("invalid_cancellation_evidence")
+        return
+    if fact.state not in {"expired_unobserved", "missing_data"}:
+        return
+    target = rec.target_occurrence
+    maturity = registered_candle_completion(
+        target_endpoint(target.reference_candle.timestamp, target.horizon_sessions), "D"
+    )
+    if fact.occurred_at < maturity:
+        raise ValidationError("coverage_before_target_maturity")
+    shared = getattr(target, "resolution", None)
+    if fact.reason_code == "daily_horizon_unavailable":
+        if (
+            fact.state != "missing_data"
+            or not shared
+            or shared.outcome != "missing"
+            or shared.resolved_at > fact.occurred_at
+            or fact.details.get("target_resolution_id") != shared.pk
+        ):
+            raise ValidationError("missing_daily_source_required")
+        return
+    if fact.reason_code != "hourly_coverage_unavailable":
+        raise ValidationError("invalid_coverage_reason")
+    expected = "missing_data" if entered else "expired_unobserved"
+    candles = list(
+        Candle.objects.filter(
+            instrument=rec.instrument,
+            granularity="H1",
+            complete=True,
+            timestamp__gte=rec.generated_at,
+            timestamp__lte=maturity - timedelta(hours=1),
+            ingestion_run__status="succeeded",
+            ingestion_run__finished_at__lte=fact.occurred_at,
+        ).order_by("timestamp")
+    )
+    if fact.state != expected or _has_coverage(rec, maturity, candles, as_of=fact.occurred_at):
+        raise ValidationError("coverage_classification_mismatch")
+
+
+def validate_expiry_result(result):
+    from forecasts.models import Candle
+    from forecasts.paper import _has_coverage
+    from forecasts.targets import target_endpoint
+    from market.quality import registered_candle_completion
+
+    rec = result.recommendation
+    target = rec.target_occurrence
+    maturity = registered_candle_completion(
+        target_endpoint(target.reference_candle.timestamp, target.horizon_sessions), "D"
+    )
+    if result.resolved_at < maturity:
+        raise ValidationError("expiry_before_target_maturity")
+    candles = list(
+        Candle.objects.filter(
+            instrument=rec.instrument,
+            granularity="H1",
+            complete=True,
+            timestamp__gte=rec.generated_at,
+            timestamp__lte=maturity - timedelta(hours=1),
+            ingestion_run__status="succeeded",
+            ingestion_run__finished_at__lte=result.resolved_at,
+        ).order_by("timestamp")
+    )
+    if not _has_coverage(rec, maturity, candles, as_of=result.resolved_at):
+        raise ValidationError("expiry_coverage_required")

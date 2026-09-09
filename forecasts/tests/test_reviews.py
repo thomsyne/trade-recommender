@@ -9,7 +9,6 @@ from django.urls import reverse
 
 from forecasts.models import (
     DeterministicReview,
-    PaperLifecycleEvent,
     PaperTradeCostAssessment,
     ReviewCohort,
 )
@@ -43,7 +42,8 @@ class DeterministicReviewTests(TestCase):
             acquisition_method="v20 REST API",
             retention_policy="test only",
         )
-        self.timeline = EvidenceTimeline(daily=7)
+        # Leave nine days of real historical room for cutoff and late-fact probes.
+        self.timeline = EvidenceTimeline(daily=14)
         reference_run = self.timeline.ingest(
             self.source,
             self.instrument,
@@ -99,6 +99,27 @@ class DeterministicReviewTests(TestCase):
         )
         with self.timeline.at(self.timeline.after(run)):
             return resolve_paper_trade(recommendation)
+
+    def observe_entry_then_gap(self, recommendation, terminal_at):
+        # A missing-execution denominator requires observed entry and a real H1
+        # coverage gap at maturity; a labelled source row is insufficient.
+        first = self.timeline.hours_after(recommendation.generated_at, 1)[0]
+        run = self.timeline.ingest(
+            self.source,
+            self.instrument,
+            "H1",
+            [hourly_candle(first)],
+            manifest={"test": "review-entry-before-gap", "requests": []},
+            requested_from=recommendation.generated_at,
+        )
+        with self.timeline.at(self.timeline.after(run)):
+            resolve_paper_trade(recommendation)
+        self.assertIsNotNone(recommendation.paper_entry)
+        with self.timeline.at(terminal_at):
+            resolve_paper_trade(recommendation)
+        fact = recommendation.paper_lifecycle_events.get(state="missing_data")
+        self.assertEqual(fact.occurred_at, terminal_at)
+        self.assertEqual(fact.reason_code, "hourly_coverage_unavailable")
 
     def test_frozen_cohort_is_idempotent_and_correction_supersedes_changed_facts(self):
         recommendation = self.recommendation()
@@ -186,22 +207,7 @@ class DeterministicReviewTests(TestCase):
         self.resolve_thesis(recommendation)
         historical_cutoff = self.generated_at + timedelta(days=8)
         future_terminal_at = historical_cutoff + timedelta(days=1)
-        fact = PaperLifecycleEvent.objects.create(
-            recommendation=recommendation,
-            state=PaperLifecycleEvent.State.MISSING_DATA,
-            reason_code="future_gap",
-            details={"fixture": True},
-            occurred_at=future_terminal_at,
-        )
-        from forecasts.lifecycle import transition
-
-        transition(
-            recommendation,
-            "missing_data",
-            reason_code="future_gap",
-            source=fact,
-            occurred_at=future_terminal_at,
-        )
+        self.observe_entry_then_gap(recommendation, future_terminal_at)
 
         self.assertIsNone(build_due_review_cohort(cutoff_at=historical_cutoff))
         cohort = build_due_review_cohort(cutoff_at=future_terminal_at + timedelta(minutes=1))
@@ -251,22 +257,7 @@ class DeterministicReviewTests(TestCase):
         recommendation = self.recommendation()
         self.resolve_thesis(recommendation)
         missing_at = self.generated_at + timedelta(days=9)
-        fact = PaperLifecycleEvent.objects.create(
-            recommendation=recommendation,
-            state=PaperLifecycleEvent.State.MISSING_DATA,
-            reason_code="hourly_test_gap",
-            details={"fixture": True},
-            occurred_at=missing_at,
-        )
-        from forecasts.lifecycle import transition
-
-        transition(
-            recommendation,
-            "missing_data",
-            reason_code="hourly_test_gap",
-            source=fact,
-            occurred_at=missing_at,
-        )
+        self.observe_entry_then_gap(recommendation, missing_at)
 
         cohort = build_due_review_cohort(cutoff_at=missing_at + timedelta(minutes=1))
         execution = cohort.members.first().reviews.get(kind=DeterministicReview.Kind.EXECUTION)
@@ -275,7 +266,7 @@ class DeterministicReviewTests(TestCase):
         )
 
         self.assertEqual(execution.coverage, DeterministicReview.Coverage.MISSING)
-        self.assertEqual(execution.facts["terminal_reason_code"], "hourly_test_gap")
+        self.assertEqual(execution.facts["terminal_reason_code"], "hourly_coverage_unavailable")
         self.assertEqual(reconciliation.coverage, DeterministicReview.Coverage.MISSING)
         self.assertEqual(cohort.initial_coverage["by_review_and_coverage"]["execution:missing"], 1)
 
@@ -285,7 +276,7 @@ class DeterministicReviewTests(TestCase):
         self.assertContains(notebook, "Direction Supported")
         self.assertContains(notebook, "Missing data")
         self.assertContains(notebook, "Missing denominators")
-        self.assertContains(notebook, "hourly_test_gap")
+        self.assertContains(notebook, "hourly_coverage_unavailable")
         market = self.client.get(reverse("market-detail", args=(self.instrument.code,)))
         self.assertContains(market, "Deterministic postmortem")
         self.assertContains(market, reverse("reviews"))

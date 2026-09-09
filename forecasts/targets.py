@@ -3,7 +3,7 @@
 import hashlib
 import json
 from datetime import UTC
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -56,8 +56,10 @@ def target_material(target):
             timespec="microseconds"
         ),
         "content": target.reference_content_sha256,
-        "midpoint": format(target.reference_midpoint.quantize(QUANTUM), "f"),
-        "band": format(target.neutral_band.quantize(QUANTUM), "f"),
+        "midpoint": format(
+            target.reference_midpoint.quantize(QUANTUM, rounding=ROUND_HALF_EVEN), "f"
+        ),
+        "band": format(target.neutral_band.quantize(QUANTUM, rounding=ROUND_HALF_EVEN), "f"),
         "horizon": target.horizon_sessions,
         "cutoff": target.information_cutoff.astimezone(UTC).isoformat(timespec="microseconds"),
         "resolution": target.resolution_method,
@@ -73,7 +75,8 @@ def validate_target(target):
         or not candle.complete
         or not live_interval_is_aligned(candle.timestamp, "D")
         or candle.content_sha256 != target.reference_content_sha256
-        or target.reference_midpoint != candle.midpoint_close.quantize(QUANTUM)
+        or target.reference_midpoint
+        != candle.midpoint_close.quantize(QUANTUM, rounding=ROUND_HALF_EVEN)
         or target.information_cutoff < registered_candle_completion(candle.timestamp, "D")
         or target.registered_at < target.information_cutoff
         or target.neutral_band < 0
@@ -139,13 +142,18 @@ def validate_resolution(resolution):
         from forecasts.services import classify_change
 
         if (
-            candle.instrument_id != target.instrument_id
+            not candle.complete
+            or candle.ingestion_run.status != "succeeded"
+            or candle.ingestion_run.finished_at is None
+            or candle.ingestion_run.finished_at > resolution.resolved_at
+            or candle.instrument_id != target.instrument_id
             or candle.granularity != "D"
             or candle.timestamp
             != target_endpoint(target.reference_candle.timestamp, target.horizon_sessions)
             or candle.content_sha256 != resolution.horizon_content_sha256
             or resolution.resolved_at < registered_candle_completion(candle.timestamp, "D")
-            or resolution.endpoint_midpoint != candle.midpoint_close.quantize(QUANTUM)
+            or resolution.endpoint_midpoint
+            != candle.midpoint_close.quantize(QUANTUM, rounding=ROUND_HALF_EVEN)
             or resolution.midpoint_change
             != resolution.endpoint_midpoint - target.reference_midpoint
             or resolution.outcome
@@ -316,7 +324,9 @@ def resolve_target(target, *, as_of=None):
     ).first()
     from forecasts.services import classify_change
 
-    midpoint = endpoint.midpoint_close.quantize(QUANTUM) if endpoint else None
+    midpoint = (
+        endpoint.midpoint_close.quantize(QUANTUM, rounding=ROUND_HALF_EVEN) if endpoint else None
+    )
     change = midpoint - target.reference_midpoint if endpoint else None
     return TargetResolution.objects.create(
         target=target,
@@ -389,3 +399,20 @@ def control_readiness(instrument, *, as_of=None):
             return "Incompatible control — model issuance blocked"
         return "Missing control — model issuance blocked"
     return "Exact prospective control available"
+
+
+def validate_issuance_cutover(rec):
+    from django.db import connection
+    from django.db.models import Q
+
+    from forecasts.models import ExperimentEra
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT clock_timestamp()")
+        accepted_at = cursor.fetchone()[0]
+    if (
+        ExperimentEra.objects.filter(method__contract_version=4)
+        .filter(Q(starts_at__lte=accepted_at) | Q(starts_at__lte=rec.generated_at))
+        .exists()
+    ):
+        raise ValidationError("prospective_contract_downgrade")

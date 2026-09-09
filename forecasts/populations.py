@@ -138,7 +138,10 @@ def assessment_values(era, samples, as_of):
         for k in paired_clusters
     }
     delta_low, delta_high = _cluster_interval(
-        deltas, confidence=policy.confidence_level, value_range=Decimal(4) / 3
+        deltas,
+        confidence=policy.confidence_level,
+        value_range=Decimal(4) / 3,
+        support_low=-Decimal(2) / 3,
     )
     calibration = _calibration_error(resolved_samples, target_balanced=True)
     readiness = (
@@ -198,7 +201,10 @@ def assessment_values(era, samples, as_of):
                     - _mean(champion[key])
                 )
         _c_low, c_high = _cluster_interval(
-            challenger_pairs, confidence=policy.confidence_level, value_range=Decimal(4) / 3
+            challenger_pairs,
+            confidence=policy.confidence_level,
+            value_range=Decimal(4) / 3,
+            support_low=-Decimal(2) / 3,
         )
         if (
             readiness

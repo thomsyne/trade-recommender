@@ -5,6 +5,7 @@ from django.core.management import call_command
 from django.test import TestCase, TransactionTestCase, override_settings
 
 from market.models import IngestionRun, Instrument
+from market.tests.historical_database import HistoricalDatabaseMixin
 from operations.models import ScheduledJob
 from operations.tasks import capture_oanda_terms, ingest_oanda
 
@@ -305,7 +306,9 @@ class Phase2Tests(TestCase):
         )
 
 
-class Phase2MigrationTests(TransactionTestCase):
+class Phase2MigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0030_"
+
     @override_settings(
         OANDA_TOKEN="mock-only",
         OANDA_ACCOUNT_ID="mock-account",

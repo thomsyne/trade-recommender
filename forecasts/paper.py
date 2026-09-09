@@ -389,14 +389,18 @@ def _session_close(interval_start):
     return (local_start + timedelta(days=1)).astimezone(UTC)
 
 
-def _has_coverage(recommendation, through, candles):
+def _has_coverage(recommendation, through, candles, *, as_of=None):
     manifest_covers_range = IngestionRun.objects.filter(
         instrument=recommendation.instrument,
         granularity="H1",
         status=IngestionRun.Status.SUCCEEDED,
         requested_from__lte=recommendation.generated_at,
         requested_to__gte=through,
-        **({"finished_at__lte": timezone.now()} if recommendation.contract_version == 4 else {}),
+        **(
+            {"finished_at__lte": as_of or timezone.now()}
+            if recommendation.contract_version == 4
+            else {}
+        ),
     ).exists()
     if not manifest_covers_range or not candles:
         return False

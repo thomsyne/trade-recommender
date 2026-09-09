@@ -1,6 +1,6 @@
 """Four budget-free reconciliation jobs, with exact recurring collision checks."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from itertools import combinations
 from math import gcd
 
@@ -12,7 +12,20 @@ from market.live_schedules import deadline_microseconds
 from operations.models import ScheduledJob
 
 
+def valid_recurrence(job):
+    return (
+        job.schedule_type == "interval"
+        and isinstance(job.interval_seconds, int)
+        and not isinstance(job.interval_seconds, bool)
+        and job.interval_seconds > 0
+        and isinstance(job.next_run_at, datetime)
+        and timezone.is_aware(job.next_run_at)
+    )
+
+
 def recurring_schedules_collide(first, second):
+    if not valid_recurrence(first) or not valid_recurrence(second):
+        raise ValidationError("malformed_recurrence")
     return (
         deadline_microseconds(first.next_run_at) - deadline_microseconds(second.next_run_at)
     ) % (gcd(first.interval_seconds, second.interval_seconds) * 1_000_000) == 0
@@ -52,7 +65,13 @@ def schedule_errors():
     jobs = list(
         ScheduledJob.objects.filter(task_name__in=(TASK, "market.ingest_oanda"), enabled=True)
     )
-    for first, second in combinations(jobs, 2):
+    valid_jobs = []
+    for job in jobs:
+        if not valid_recurrence(job):
+            errors.append({"id": job.pk, "code": "malformed_recurrence"})
+        else:
+            valid_jobs.append(job)
+    for first, second in combinations(valid_jobs, 2):
         if TASK not in {first.task_name, second.task_name}:
             continue
         if recurring_schedules_collide(first, second):

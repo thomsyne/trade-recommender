@@ -351,7 +351,7 @@ def _sharpness(resolved):
     return _mean([_mean(values) for values in values_by_cluster.values()])
 
 
-def _cluster_interval(values_by_cluster, *, confidence, value_range):
+def _cluster_interval(values_by_cluster, *, confidence, value_range, support_low=Decimal(0)):
     if not values_by_cluster:
         return None, None
     cluster_means = [_mean(values) for values in values_by_cluster.values()]
@@ -360,8 +360,8 @@ def _cluster_interval(values_by_cluster, *, confidence, value_range):
     width = Decimal(str(value_range)) * Decimal(
         str(math.sqrt(math.log(2 / float(alpha)) / (2 * len(cluster_means))))
     )
-    low = max(Decimal(0), mean - width).quantize(SCORE_QUANTUM)
-    high = min(Decimal(str(value_range)), mean + width).quantize(SCORE_QUANTUM)
+    low = max(support_low, mean - width).quantize(SCORE_QUANTUM)
+    high = min(support_low + Decimal(str(value_range)), mean + width).quantize(SCORE_QUANTUM)
     return low, high
 
 

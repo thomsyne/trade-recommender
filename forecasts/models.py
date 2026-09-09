@@ -194,6 +194,11 @@ class Forecast(ImmutableModel):
         ]
 
     def clean(self):
+        if self.target_occurrence_id and (
+            self.method not in {"mechanical-ewma", "fixture-mechanical-ewma"}
+            or self.method_version != 1
+        ):
+            raise ValidationError("control_target_mismatch")
         if self.probability_up + self.probability_neutral + self.probability_down != 1:
             raise ValidationError("Forecast probabilities must sum to one")
         if self.evidence_snapshot.instrument_id != self.instrument_id:
@@ -279,6 +284,7 @@ class ForecastResolution(ImmutableModel):
 
 
 class Recommendation(ImmutableModel):
+    recorded_at = models.DateTimeField(null=True, blank=True, editable=False)
     target_occurrence = models.ForeignKey(
         TargetOccurrence,
         on_delete=models.PROTECT,
@@ -393,6 +399,10 @@ class Recommendation(ImmutableModel):
         ]
 
     def clean(self):
+        if (self._state.adding or self.pk is None) and self.contract_version != 4:
+            from forecasts.targets import validate_issuance_cutover
+
+            validate_issuance_cutover(self)
         if self.contract_version == 4:
             from forecasts.targets import validate_recommendation
 
@@ -726,6 +736,10 @@ class PaperTradeResult(ImmutableModel):
                 raise ValidationError("Paper horizon must be a daily candle")
         if self.exit_candle and self.exit_candle.instrument_id != recommendation.instrument_id:
             raise ValidationError("Paper exit candle must match its recommendation instrument")
+        if recommendation.contract_version == 4 and self.outcome in {"expired", "not_activated"}:
+            from forecasts.lifecycle import validate_expiry_result
+
+            validate_expiry_result(self)
         values = (self.exit_candle, self.exit_price, self.gross_pips, self.r_multiple)
         if self.outcome == self.Outcome.NOT_ACTIVATED:
             if not self.horizon_candle_id:
@@ -841,6 +855,9 @@ class PaperLifecycleEvent(ImmutableModel):
     def clean(self):
         if self.occurred_at < self.recommendation.generated_at:
             raise ValidationError("A lifecycle event cannot predate its recommendation")
+        from forecasts.lifecycle import validate_coverage_fact
+
+        validate_coverage_fact(self)
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -966,6 +983,24 @@ class PortfolioAdmissionEvent(ImmutableModel):
 
     class Meta:
         ordering = ("occurred_at", "id")
+
+    def clean(self):
+        if self.recommendation.contract_version == 4 and self.state == "revoked":
+            current = self.recommendation.lifecycle_events.filter(
+                occurred_at__lte=self.occurred_at
+            ).first()
+            if (
+                not current
+                or current.state != "admitted_awaiting_entry"
+                or PaperTradeEntry.objects.filter(
+                    recommendation=self.recommendation, entered_at__lte=self.occurred_at
+                ).exists()
+            ):
+                raise ValidationError("revocation_requires_pending_admission")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 class ReviewCohort(ImmutableModel):

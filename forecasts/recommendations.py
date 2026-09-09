@@ -3,7 +3,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Protocol
 
 import httpx
@@ -466,7 +466,7 @@ def _build_outcome_contract(instrument, generated_at, *, allow_fixture):
     ).first()
     if not technical or technical.atr_14 is None:
         raise ValidationError(f"No complete daily ATR exists for {instrument.code}")
-    reference = candle.midpoint_close.quantize(PRICE_QUANTUM)
+    reference = candle.midpoint_close.quantize(PRICE_QUANTUM, rounding=ROUND_HALF_EVEN)
     spread = candle.ask_close - candle.bid_close
     neutral_band = max(technical.atr_14 * Decimal("0.250"), spread * Decimal("2.00")).quantize(
         PRICE_QUANTUM

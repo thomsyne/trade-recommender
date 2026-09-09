@@ -3,11 +3,13 @@
 from collections import Counter
 
 from django.core.exceptions import ValidationError
+from django.db.models import Q
 from django.utils import timezone
 
 from forecasts.lifecycle import project_lifecycle
 from forecasts.models import (
     ExperimentAssessment,
+    ExperimentEra,
     ExperimentSample,
     PortfolioCohort,
     PortfolioSelectionMember,
@@ -34,13 +36,23 @@ def report(*, as_of=None):
         if len(details) < 50:
             details.append({"code": code, "id": identifier})
 
-    for rec in Recommendation.objects.order_by("pk").iterator():
+    for rec in Recommendation.objects.filter(generated_at__lte=as_of).order_by("pk").iterator():
         try:
             projection = project_lifecycle(rec, as_of=as_of)
         except (KeyError, ValueError, TypeError, AttributeError):
             issue("canonical_projection_invalid", rec.pk)
             continue
         if rec.contract_version != 4:
+            if (
+                rec.recorded_at
+                and ExperimentEra.objects.filter(
+                    method__contract_version=4, registered_at__lte=as_of
+                )
+                .filter(Q(starts_at__lte=rec.recorded_at) | Q(starts_at__lte=rec.generated_at))
+                .exists()
+            ):
+                issue("prospective_contract_downgrade", rec.pk)
+                continue
             legacy[projection["state"]] += 1
             if not rec.target_occurrence_id or not rec.control_forecast_id:
                 legacy["unpaired_legacy"] += 1
@@ -56,17 +68,32 @@ def report(*, as_of=None):
                 validate_recommendation(rec)
             except (ValidationError, AttributeError):
                 issue("recommendation_control_identity_mismatch", rec.pk)
-        if not rec.lifecycle_events.exists():
+        if not rec.lifecycle_events.filter(occurred_at__lte=as_of).exists():
             issue("canonical_lifecycle_missing", rec.pk)
+        from forecasts.lifecycle import validate_coverage_fact
+
+        for fact in rec.paper_lifecycle_events.filter(
+            occurred_at__lte=as_of, state__in=("expired_unobserved", "missing_data", "cancelled")
+        ):
+            try:
+                validate_coverage_fact(fact)
+            except (ValidationError, ValueError, TypeError, AttributeError):
+                issue("semantic_lifecycle_evidence_invalid", fact.pk)
+            if projection["state"] not in {"expired_unobserved", "missing_data", "cancelled"}:
+                issue("terminal_source_nonterminal_lifecycle", rec.pk)
         member = getattr(rec, "portfolio_membership", None)
+        if member and member.cohort.generated_at > as_of:
+            member = None
         disposition = getattr(rec, "portfolio_disposition", None)
+        if disposition and disposition.created_at > as_of:
+            disposition = None
         if rec.action != "abstain" and not disposition:
             issue("directional_disposition_missing", rec.pk)
         if member and not disposition:
             issue("membership_disposition_missing", rec.pk)
         if rec.action == "abstain" and (
             member
-            or rec.portfolio_admission_events.exists()
+            or rec.portfolio_admission_events.filter(occurred_at__lte=as_of).exists()
             or projection["entry_id"]
             or projection["result_id"]
         ):
@@ -81,12 +108,18 @@ def report(*, as_of=None):
         if projection["result_id"] and not projection["terminal"]:
             issue("terminal_result_nonterminal_lifecycle", rec.pk)
         result = getattr(rec, "paper_result", None)
+        if result and result.resolved_at > as_of:
+            result = None
         if result and (
             (result.outcome != "not_activated" and not result.entry_id)
             or projection["admission_status"] != "admitted"
         ):
             issue("result_entry_admission_mismatch", rec.pk)
-        admission = rec.portfolio_admission_events.order_by("-occurred_at", "-id").first()
+        admission = (
+            rec.portfolio_admission_events.filter(occurred_at__lte=as_of)
+            .order_by("-occurred_at", "-id")
+            .first()
+        )
         if admission and (
             not member
             or admission.cohort_id != member.cohort_id
@@ -94,30 +127,35 @@ def report(*, as_of=None):
                 admission.state == "admitted"
                 and not admission.selection.selected_members.filter(recommendation=rec).exists()
             )
-            or not member.cohort.selections.exists()
-            or admission.selection_id != member.cohort.selections.first().pk
+            or not member.cohort.selections.filter(selected_at__lte=as_of).exists()
+            or admission.selection_id
+            != member.cohort.selections.filter(selected_at__lte=as_of).first().pk
         ):
             issue("admission_selection_mismatch", rec.pk)
         resolution = getattr(rec, "resolution", None)
-        if resolution and rec.target_occurrence_id:
+        if resolution and resolution.resolved_at <= as_of and rec.target_occurrence_id:
             shared = getattr(rec.target_occurrence, "resolution", None)
+            if shared and shared.resolved_at > as_of:
+                shared = None
             if (
                 not shared
                 or resolution.target_resolution_id != shared.pk
                 or resolution.outcome != shared.outcome
             ):
                 issue("recommendation_shared_resolution_disagreement", rec.pk)
-    for target in TargetOccurrence.objects.order_by("pk").iterator():
+    for target in (
+        TargetOccurrence.objects.filter(registered_at__lte=as_of).order_by("pk").iterator()
+    ):
         try:
             validate_target(target)
         except ValidationError:
             issue("target_identity_invalid", target.pk)
-        controls = list(target.controls.all())
+        controls = list(target.controls.filter(issued_at__lte=as_of))
         if len({(c.method, c.method_version) for c in controls}) != len(controls):
             issue("duplicate_target_control", target.pk)
         if len(controls) > 1:
             issue("multiple_incompatible_target_controls", target.pk)
-        if TargetResolution.objects.filter(target_id=target.pk).count() > 1:
+        if TargetResolution.objects.filter(target_id=target.pk, resolved_at__lte=as_of).count() > 1:
             issue("multiple_target_resolutions", target.pk)
         for control in controls:
             if (
@@ -141,7 +179,7 @@ def report(*, as_of=None):
         shared = getattr(target, "resolution", None)
         if mature and (not shared or shared.resolved_at > as_of):
             issue("mature_target_missing_resolution", target.pk)
-        if shared:
+        if shared and shared.resolved_at <= as_of:
             try:
                 validate_resolution(shared)
             except ValidationError:
@@ -150,13 +188,18 @@ def report(*, as_of=None):
                 issue("immature_target_marked_missing", target.pk)
             for control in controls:
                 resolution = getattr(control, "resolution", None)
-                if resolution and (
-                    resolution.target_resolution_id != shared.pk
-                    or resolution.outcome != shared.outcome
+                if (
+                    resolution
+                    and resolution.resolved_at <= as_of
+                    and (
+                        resolution.target_resolution_id != shared.pk
+                        or resolution.outcome != shared.outcome
+                    )
                 ):
                     issue("forecast_shared_resolution_disagreement", control.pk)
     for member in (
-        PortfolioSelectionMember.objects.select_related("selection", "recommendation")
+        PortfolioSelectionMember.objects.filter(selection__selected_at__lte=as_of)
+        .select_related("selection", "recommendation")
         .order_by("pk")
         .iterator()
     ):
@@ -167,13 +210,16 @@ def report(*, as_of=None):
         ).exists():
             issue("selection_member_outside_cohort", member.pk)
         if not member.selection.admission_events.filter(
-            recommendation=member.recommendation, state="admitted"
+            recommendation=member.recommendation, state="admitted", occurred_at__lte=as_of
         ).exists():
             issue("selection_without_admission", member.pk)
     for cohort in (
-        PortfolioCohort.objects.filter(decision_deadline__isnull=False).order_by("pk").iterator()
+        PortfolioCohort.objects.filter(decision_deadline__isnull=False, generated_at__lte=as_of)
+        .order_by("pk")
+        .iterator()
     ):
-        if not getattr(cohort, "closure", None):
+        closure = getattr(cohort, "closure", None)
+        if not closure or closure.closed_at > as_of:
             if cohort.decision_deadline <= as_of:
                 issue("open_cohort_past_deadline", cohort.pk)
             identities = dict(
@@ -195,7 +241,8 @@ def report(*, as_of=None):
             ):
                 issue("superseded_cohort_without_closure", cohort.pk)
     for sample in (
-        ExperimentSample.objects.select_related("era__method", "recommendation")
+        ExperimentSample.objects.filter(assigned_at__lte=as_of)
+        .select_related("era__method", "recommendation")
         .order_by("pk")
         .iterator()
     ):
@@ -210,13 +257,16 @@ def report(*, as_of=None):
             issue("mixed_contract_era", sample.pk)
         if rec.generated_at < sample.era.starts_at:
             issue("sample_before_cutover", sample.pk)
-        if (
-            rec.target_occurrence_id
-            and sample.issuance_cluster_key != rec.target_occurrence.identity_sha256
+        if rec.target_occurrence_id and (
+            sample.issuance_cluster_key != rec.target_occurrence.identity_sha256
+            or sample.dependence_cluster_key
+            != rec.target_occurrence.reference_candle.timestamp.strftime("%G-W%V")
         ):
             issue("repeated_target_independence_mismatch", sample.pk)
     for assessment in (
-        ExperimentAssessment.objects.filter(attempt__era__method__contract_version=4)
+        ExperimentAssessment.objects.filter(
+            attempt__era__method__contract_version=4, attempt__assessed_at__lte=as_of
+        )
         .order_by("pk")
         .iterator()
     ):
@@ -228,9 +278,13 @@ def report(*, as_of=None):
                 recommendation__generated_at__lte=assessment.attempt.assessed_at,
             )
         )
-        expected = assessment_values(
-            assessment.attempt.era, samples, assessment.attempt.assessed_at
-        )
+        try:
+            expected = assessment_values(
+                assessment.attempt.era, samples, assessment.attempt.assessed_at
+            )
+        except (ValidationError, KeyError, ValueError, TypeError, AttributeError, ArithmeticError):
+            issue("assessment_source_invalid", assessment.pk)
+            continue
         if assessment.resolution_coverage != expected["resolution_coverage"].quantize(
             __import__("decimal").Decimal("0.000001")
         ):
