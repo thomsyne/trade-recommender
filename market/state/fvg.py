@@ -17,6 +17,7 @@ from market.state.canonical import format_decimal
 
 FVG_V = "fvg-v1"
 FVG_DISPLACEMENT_ATR = Decimal("1.0")  # g: middle-candle body threshold
+FVG_EXPIRY_BARS = 50  # candles after creation before an unfilled gap expires
 
 
 def _iso(value):
@@ -73,7 +74,12 @@ def _fill_state(direction, gap_low, gap_high, raw_gap, following):
     A bullish gap fills downward (price returns into it from above); a bearish
     gap fills upward. Full fill is a completed close through the far boundary."""
     if not following:
-        return {"partial_fill_pct": "0.0", "full_fill": False, "invalidated": False}
+        return {
+            "partial_fill_pct": "0.0",
+            "full_fill": False,
+            "invalidated": False,
+            "expired": False,
+        }
     if direction == "bullish":
         deepest = min(bar.low for bar in following)
         penetrated = gap_high - max(min(deepest, gap_high), gap_low)
@@ -83,8 +89,13 @@ def _fill_state(direction, gap_low, gap_high, raw_gap, following):
         penetrated = min(max(deepest, gap_low), gap_high) - gap_low
         full = any(bar.close >= gap_high for bar in following)
     pct = (penetrated / raw_gap) * Decimal(100) if raw_gap else Decimal(0)
+    # Expiry: an unfilled gap older than FVG_EXPIRY_BARS candles is expired.
+    # (Deterministic internal-swing-break invalidation is a documented deferral,
+    # design §7.4.)
+    expired = not full and len(following) > FVG_EXPIRY_BARS
     return {
         "partial_fill_pct": format_decimal(pct, Decimal("0.1")),
         "full_fill": full,
         "invalidated": full,
+        "expired": expired,
     }

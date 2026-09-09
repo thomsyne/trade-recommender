@@ -1,10 +1,21 @@
 """Deterministic, read-only, bounded semantic-integrity report over snapshots.
 
-Recomputes every hash a market-state snapshot binds and rechecks its causal
-invariants against the live ledger, without mutating anything. Diagnostics are
-bounded: stable ids and reason codes only, never raw payloads or unbounded
-values. Operational availability/freshness/coverage are deliberately not mixed
-in here — this axis is semantic integrity (design §11). ``verify_snapshots``
+Recomputes every hash a market-state snapshot binds (definition, output, input
+manifest, idempotency key) and rechecks its causal invariants against the live
+ledger, without mutating anything: payload schema and definition agreement,
+interval-ended-by-cutoff, unsupported granularity, missing candle identity,
+silent revision substitution, and duplicate idempotency keys. Diagnostics are
+bounded — stable ids and reason codes only, never raw payloads or unbounded
+values.
+
+This covers the core semantic-integrity conditions of design §11 that can be
+verified from persisted state. Several conditions the brief enumerates are
+structurally precluded rather than separately scanned — e.g. immutability
+(UPDATE/DELETE/TRUNCATE triggers), unique idempotency keys, and the DB-enforced
+``observed_at >= interval_end`` — and feature-internal predicates (BOS/CHoCH
+prerequisites, zone chronology) are covered by determinism: the output hash only
+recomputes if the deterministic engine produced it. Operational availability/
+freshness/coverage are a separate axis and not mixed in here. ``verify_snapshots``
 returns a report whose ``violation_count`` a caller (the CLI) turns into a
 nonzero exit.
 """
@@ -14,11 +25,13 @@ from datetime import datetime
 from django.db.models import Count
 
 from market.models import CandleObservation, MarketStateSnapshot
+from market.quality import LIVE_GRANULARITIES
 from market.services import live_candle_completion
 from market.state.canonical import identity_digest
 from market.state.snapshots import snapshot_idempotency_key
 
 MAX_VIOLATIONS = 500
+REQUIRED_PAYLOAD_KEYS = frozenset({"schema", "definition", "instrument", "granularities"})
 
 
 def _parse(ts):
@@ -53,8 +66,10 @@ def verify_snapshots(snapshots):
         )
         if expected_key != snapshot.idempotency_key:
             flag(snapshot.pk, "idempotency_key_mismatch")
-        payload_definition = snapshot.output_payload.get("definition")
-        if payload_definition != [definition.key, definition.version]:
+        payload = snapshot.output_payload
+        if not isinstance(payload, dict) or not REQUIRED_PAYLOAD_KEYS <= set(payload):
+            flag(snapshot.pk, "malformed_payload_schema")
+        elif payload.get("definition") != [definition.key, definition.version]:
             flag(snapshot.pk, "payload_definition_mismatch")
         _verify_manifest(snapshot, flag)
 
@@ -83,6 +98,9 @@ def _verify_manifest(snapshot, flag):
             content_sha256 = entry["content_sha256"]
         except (KeyError, TypeError, ValueError):
             flag(snapshot.pk, "malformed_manifest_entry")
+            continue
+        if granularity not in LIVE_GRANULARITIES:
+            flag(snapshot.pk, "unsupported_granularity", granularity)
             continue
         if live_candle_completion(start, granularity) > snapshot.information_cutoff:
             flag(snapshot.pk, "input_after_cutoff", content_sha256)

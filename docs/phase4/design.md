@@ -577,6 +577,30 @@ executor isolation, without concealing the known migration-suite limitations.
 
 ---
 
+## 16.5 Corrections from independent review (slice 9)
+
+The independent tester (no P0) surfaced contract gaps, corrected here:
+
+- **Bounded windows (was P1).** `compute` now applies explicit per-granularity
+  lookbacks (`LOOKBACKS`, pinned in the definition body) to every eligible-candle
+  fetch and to the input manifest, so a snapshot never scans or embeds unbounded
+  history. Definition version bumped to `0.7.0`.
+- **Zone identity (was P2).** `structure._zone_id` now binds
+  `[version, instrument, timeframe, low, high]` as §7.2 requires; the liquidity
+  level id uses the same helper.
+- **Consolidation (was P2).** `consolidation_state` now emits `breakout`,
+  `retest` and `failed` over a `failed_bars` tail window (the parameter is live).
+- **FVG (P3).** Adds an `expired` flag (unfilled after `FVG_EXPIRY_BARS`).
+  **Deterministic internal-swing-break invalidation remains a documented
+  deferral** — full-fill and expiry invalidation are implemented; internal-swing
+  break is not yet, and is not claimed by the code.
+- **Liquidity (P3).** Sweep/acceptance are tested only against bars at or after
+  the reference level's formation.
+- **Integrity (P3).** Adds `malformed_payload_schema` and `unsupported_granularity`
+  checks; the docstring now states honestly that it covers the core semantic-
+  integrity conditions verifiable from persisted state, with the remainder
+  structurally precluded by immutability/uniqueness or by determinism.
+
 ## 16. Commit plan
 
 1. M15 contract + calendar support (+ SQL parity migration).

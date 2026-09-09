@@ -21,10 +21,20 @@ from market.state.manifest import _iso, build_input_manifest, eligible_observati
 from market.state.snapshots import persist_snapshot
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.6.0"
+DESCRIPTOR_VERSION = "0.7.0"
 
 FVG_GRANULARITIES = frozenset({"M15", "H1", "H4"})
 ORB_SESSION_WINDOW_HOURS = 12
+
+#: Explicit bounded lookback (candles) per granularity. Every eligible-candle
+#: fetch and the input manifest use these, so a snapshot never scans or embeds
+#: unbounded history (design §14). The windows comfortably cover the deepest
+#: feature (volatility percentile: ~14 + 100 prior ATRs ≈ 214 bars).
+LOOKBACKS = {"M15": 500, "H1": 300, "H4": 300, "D": 400, "W": 300}
+#: Daily candles retained for the prior-completed-month aggregation (~3 months).
+PRIOR_MONTH_LOOKBACK = 70
+#: Most recent candle(s) needed for a prior-period extreme.
+PRIOR_EXTREME_LOOKBACK = 2
 
 #: The canonical body of the descriptor definition. Observable facts only; the
 #: feature list and thresholds are pinned so a snapshot binds the exact
@@ -67,7 +77,7 @@ DESCRIPTOR_DEFINITION = {
     "rounding": {"quantum": "0.000001", "mode": "ROUND_HALF_EVEN"},
     "calendar_policy": "ny-fx-week-v1",
     "missing_data_policy": "explicit-unavailable-v1",
-    "lookbacks": {},
+    "lookbacks": {"M15": 500, "H1": 300, "H4": 300, "D": 400, "W": 300},
     "thresholds": {
         "swing_left": features.SWING_LEFT,
         "swing_right": features.SWING_RIGHT,
@@ -118,7 +128,9 @@ def _bars_from_observations(rows):
 
 
 def _granularity_descriptor(instrument, granularity, information_cutoff):
-    rows = eligible_observations(instrument, granularity, information_cutoff)
+    rows = eligible_observations(
+        instrument, granularity, information_cutoff, lookback=LOOKBACKS.get(granularity)
+    )
     if not rows:
         return {"state": "unavailable", "reason_code": "insufficient_history"}
     latest = rows[-1]
@@ -137,15 +149,15 @@ def _granularity_descriptor(instrument, granularity, information_cutoff):
             "midpoint_close": format_decimal(bars[-1].close),
         },
         "higher_timeframe": features.higher_timeframe_context(bars),
-        "structure": structure.structure_context(bars, atr),
-        "liquidity": liquidity.liquidity_context(bars, atr),
+        "structure": structure.structure_context(bars, atr, instrument.code, granularity),
+        "liquidity": liquidity.liquidity_context(bars, atr, instrument.code, granularity),
         "fvg": fvg_block,
         "spread": context.spread_context(latest, atr),
     }
 
 
 def _orb_block(instrument, information_cutoff):
-    rows = eligible_observations(instrument, "M15", information_cutoff)
+    rows = eligible_observations(instrument, "M15", information_cutoff, lookback=LOOKBACKS["M15"])
     out = {}
     if not rows:
         for name in sessions.SESSIONS:
@@ -183,7 +195,9 @@ def _orb_block(instrument, information_cutoff):
 
 
 def _prior_extreme(instrument, granularity, information_cutoff):
-    rows = eligible_observations(instrument, granularity, information_cutoff)
+    rows = eligible_observations(
+        instrument, granularity, information_cutoff, lookback=PRIOR_EXTREME_LOOKBACK
+    )
     if not rows:
         return {
             "state": "unavailable",
@@ -194,7 +208,7 @@ def _prior_extreme(instrument, granularity, information_cutoff):
 
 
 def _prior_completed_month(instrument, information_cutoff):
-    rows = eligible_observations(instrument, "D", information_cutoff)
+    rows = eligible_observations(instrument, "D", information_cutoff, lookback=PRIOR_MONTH_LOOKBACK)
     if not rows:
         return {
             "state": "unavailable",
@@ -228,7 +242,9 @@ def build_market_state(instrument, definition, information_cutoff, granularities
     preview/dry-run command.
     """
     granularities = sorted(set(granularities))
-    manifest, manifest_sha256 = build_input_manifest(instrument, granularities, information_cutoff)
+    manifest, manifest_sha256 = build_input_manifest(
+        instrument, granularities, information_cutoff, lookbacks=LOOKBACKS
+    )
     per_granularity = {
         granularity: _granularity_descriptor(instrument, granularity, information_cutoff)
         for granularity in granularities

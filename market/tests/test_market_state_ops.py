@@ -101,7 +101,8 @@ class IntegrityAndTaskTests(TestCase):
         self.assertIn("output_hash_mismatch", codes)
         self.assertIn("input_manifest_hash_mismatch", codes)
         self.assertIn("idempotency_key_mismatch", codes)
-        self.assertIn("payload_definition_mismatch", codes)
+        # The forged payload lacks the required top-level keys.
+        self.assertIn("malformed_payload_schema", codes)
         self.assertIn("input_after_cutoff", codes)
         self.assertIn("missing_candle_identity", codes)
 

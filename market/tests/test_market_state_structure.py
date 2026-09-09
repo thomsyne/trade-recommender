@@ -57,7 +57,7 @@ ZONE_CLOSES = [8, 9, 10, 9, 8, 9, 10.2, 9, 8, 13, 15, 13, 11]
 
 class ZoneTests(TestCase):
     def test_zones_cluster_within_c_atr(self):
-        result = support_resistance_zones(flat_bars(ZONE_CLOSES), ATR1)
+        result = support_resistance_zones(flat_bars(ZONE_CLOSES), ATR1, "EUR_USD", "H1")
         self.assertEqual(result["state"], "available")
         ranges = [(z["range_low"], z["range_high"]) for z in result["zones"]]
         # margin = 0.25*1.0 = 0.25: 10 and 10.2 merge; 8,8 merge; 15 alone.
@@ -67,10 +67,13 @@ class ZoneTests(TestCase):
         merged = next(z for z in result["zones"] if z["range_low"] == "10.000000")
         self.assertEqual(merged["member_count"], 2)
 
-    def test_zone_id_depends_only_on_boundaries(self):
-        self.assertEqual(_zone_id(D(10), D("10.2")), _zone_id(D("10.0"), D("10.20")))
-        self.assertNotEqual(_zone_id(D(10), D("10.2")), _zone_id(D(10), D("10.3")))
-        self.assertEqual(len(_zone_id(D(10), D("10.2"))), 64)
+    def test_zone_id_binds_boundaries_instrument_and_timeframe(self):
+        a = _zone_id(D(10), D("10.2"), "EUR_USD", "H1")
+        self.assertEqual(a, _zone_id(D("10.0"), D("10.20"), "EUR_USD", "H1"))
+        self.assertNotEqual(a, _zone_id(D(10), D("10.3"), "EUR_USD", "H1"))  # boundary
+        self.assertNotEqual(a, _zone_id(D(10), D("10.2"), "EUR_USD", "H4"))  # timeframe
+        self.assertNotEqual(a, _zone_id(D(10), D("10.2"), "GBP_USD", "H1"))  # instrument
+        self.assertEqual(len(a), 64)
 
     def test_distinct_tests_count_separate_approaches(self):
         # Touch 10 twice with a far excursion (to 5) between; consecutive inside once.
@@ -84,7 +87,8 @@ class ZoneTests(TestCase):
 
     def test_atr_unavailable(self):
         self.assertEqual(
-            support_resistance_zones(flat_bars(ZONE_CLOSES), None)["reason_code"], "atr_unavailable"
+            support_resistance_zones(flat_bars(ZONE_CLOSES), None, "EUR_USD", "H1")["reason_code"],
+            "atr_unavailable",
         )
 
 
@@ -121,13 +125,23 @@ class DisplacementTests(TestCase):
 
 class ConsolidationTests(TestCase):
     def test_breakout_above_a_tight_range(self):
-        bars = flat_bars([10] * 20 + [12])  # 20 flat bars (range 0), then a close above
+        # 20-bar flat base + a 4-bar tail whose last close breaks above.
+        bars = flat_bars([10] * 23 + [12])
         result = consolidation_state(bars, ATR1)
         self.assertFalse(result["in_consolidation"])
         self.assertEqual(result["breakout"], "up")
+        self.assertFalse(result["failed"])
+        self.assertFalse(result["retest"])
+
+    def test_failed_breakout_reclaims_the_range(self):
+        # Break above, then a later bar closes back inside the range = failed.
+        bars = flat_bars([10] * 22 + [12, 10])  # 24 bars: 20-bar base + 4-bar tail
+        result = consolidation_state(bars, ATR1)
+        self.assertEqual(result["breakout"], "up")
+        self.assertTrue(result["failed"])
 
     def test_wide_base_is_not_consolidation(self):
-        bars = flat_bars(list(range(20)) + [21])  # range 19 >> 1.5*ATR
+        bars = flat_bars(list(range(23)) + [24])  # base range >> 1.5*ATR
         self.assertFalse(consolidation_state(bars, ATR1)["in_consolidation"])
 
 

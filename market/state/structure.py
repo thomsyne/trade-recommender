@@ -32,10 +32,13 @@ def _unavailable(version, reason):
     return {"state": "unavailable", "version": version, "reason_code": reason}
 
 
-def _zone_id(low, high):
-    # Identity depends only on the versioned rounded boundaries, never on row id
-    # or calculation order.
-    return identity_digest([ZONE_V, format_decimal(low), format_decimal(high)])
+def _zone_id(low, high, instrument_code, timeframe):
+    # Identity binds the version, instrument, timeframe and rounded boundaries
+    # (design §7.2) — never a database row id or calculation order — so the same
+    # price band on different instruments or timeframes does not collide.
+    return identity_digest(
+        [ZONE_V, instrument_code, timeframe, format_decimal(low), format_decimal(high)]
+    )
 
 
 def _single_linkage(points, key, margin):
@@ -66,7 +69,7 @@ def _zone_test_count(bars, low, high, margin):
     return count
 
 
-def support_resistance_zones(bars, atr, cluster=ZONE_CLUSTER_ATR):
+def support_resistance_zones(bars, atr, instrument_code, timeframe, cluster=ZONE_CLUSTER_ATR):
     if atr is None or atr == 0:
         return _unavailable(ZONE_V, "atr_unavailable")
     swings = confirmed_swings(bars)
@@ -80,7 +83,7 @@ def support_resistance_zones(bars, atr, cluster=ZONE_CLUSTER_ATR):
         earliest = min(m.index for m in cluster_members)
         zones.append(
             {
-                "zone_id": _zone_id(low, high),
+                "zone_id": _zone_id(low, high, instrument_code, timeframe),
                 "range_low": format_decimal(low),
                 "range_high": format_decimal(high),
                 "member_count": len(cluster_members),
@@ -170,20 +173,24 @@ def consolidation_state(
     reclaim back inside within ``failed_bars`` (a failed breakout)."""
     if atr is None or atr == 0:
         return _unavailable(CONSOLIDATION_V, "atr_unavailable")
-    if len(bars) < window + 1:
+    tail_len = failed_bars + 1
+    if len(bars) < window + tail_len:
         return _unavailable(CONSOLIDATION_V, "insufficient_history")
-    base = bars[-(window + 1) : -1]
+    base = bars[-(window + tail_len) : -tail_len]
+    tail = bars[-tail_len:]
     high = max(b.high for b in base)
     low = min(b.low for b in base)
     if high - low > ceiling * atr:
         return {"state": "available", "version": CONSOLIDATION_V, "in_consolidation": False}
-    tail = bars[-1:]
     breakout = None
-    for bar in tail:
+    breakout_index = None
+    for index, bar in enumerate(tail):
         if bar.close > high:
-            breakout = "up"
-        elif bar.close < low:
-            breakout = "down"
+            breakout, breakout_index = "up", index
+            break
+        if bar.close < low:
+            breakout, breakout_index = "down", index
+            break
     result = {
         "state": "available",
         "version": CONSOLIDATION_V,
@@ -192,7 +199,13 @@ def consolidation_state(
         "range_high": format_decimal(high),
     }
     if breakout is not None:
+        after = tail[breakout_index + 1 :]
+        boundary = high if breakout == "up" else low
         result["breakout"] = breakout
+        # Retest: a later bar returns to touch the broken boundary.
+        result["retest"] = any(bar.low <= boundary <= bar.high for bar in after)
+        # Failed breakout: a later completed close back inside the range.
+        result["failed"] = any(low <= bar.close <= high for bar in after)
     return result
 
 
@@ -208,10 +221,10 @@ def prior_period_extreme(period_bars):
     }
 
 
-def structure_context(bars, atr):
+def structure_context(bars, atr, instrument_code, timeframe):
     """Assemble the structure block for one granularity."""
     return {
-        "support_resistance_zones": support_resistance_zones(bars, atr),
+        "support_resistance_zones": support_resistance_zones(bars, atr, instrument_code, timeframe),
         "equal_levels": equal_levels(bars, atr),
         "displacement_candidates": displacement_candidates(bars, atr),
         "consolidation": consolidation_state(bars, atr),

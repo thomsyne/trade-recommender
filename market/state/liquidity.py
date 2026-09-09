@@ -38,8 +38,11 @@ def _unavailable(version, reason):
     return {"state": "unavailable", "version": version, "reason_code": reason}
 
 
-def detect_sweep(bars, atr, level, side, depth=SWEEP_DEPTH_ATR, window=RECLAIM_WINDOW):
-    """Latest wick-through-and-reclaim of ``level`` from ``side`` ('above'/'below')."""
+def detect_sweep(bars, atr, level, side, *, level_id, depth=SWEEP_DEPTH_ATR, window=RECLAIM_WINDOW):
+    """Latest wick-through-and-reclaim of ``level`` from ``side`` ('above'/'below').
+
+    ``bars`` should begin at (or after) the reference level's formation so a
+    breach that predates the level is not counted."""
     margin = depth * atr
     latest = None
     for i, bar in enumerate(bars):
@@ -59,7 +62,7 @@ def detect_sweep(bars, atr, level, side, depth=SWEEP_DEPTH_ATR, window=RECLAIM_W
                 )
                 latest = {
                     "level": format_decimal(level),
-                    "level_id": _zone_id(level, level),
+                    "level_id": level_id,
                     "side": side,
                     "first_breach": _iso(bar.timestamp),
                     "reclaim_close": _iso(bars[j].timestamp),
@@ -71,7 +74,7 @@ def detect_sweep(bars, atr, level, side, depth=SWEEP_DEPTH_ATR, window=RECLAIM_W
     return latest
 
 
-def detect_acceptance(bars, atr, level, side, window=RECLAIM_WINDOW):
+def detect_acceptance(bars, atr, level, side, *, level_id, window=RECLAIM_WINDOW):
     """Latest completed close beyond ``level`` that is not reclaimed within ``window``."""
     latest = None
     for i, bar in enumerate(bars):
@@ -85,15 +88,18 @@ def detect_acceptance(bars, atr, level, side, window=RECLAIM_WINDOW):
         if not reclaimed:
             latest = {
                 "level": format_decimal(level),
-                "level_id": _zone_id(level, level),
+                "level_id": level_id,
                 "side": side,
                 "acceptance_close": _iso(bar.timestamp),
             }
     return latest
 
 
-def liquidity_context(bars, atr):
-    """Sweep and acceptance proxies against the nearest confirmed swing extremes."""
+def liquidity_context(bars, atr, instrument_code, timeframe):
+    """Sweep and acceptance proxies against the nearest confirmed swing extremes.
+
+    Each level is only tested against bars at or after it formed, so a breach
+    that predates the level is not counted."""
     if atr is None or atr == 0:
         return _unavailable(SWEEP_V, "atr_unavailable")
     swings = confirmed_swings(bars)
@@ -103,13 +109,21 @@ def liquidity_context(bars, atr):
         return _unavailable(SWEEP_V, "insufficient_history")
     result = {"state": "available", "version": SWEEP_V}
     if highs:
-        resistance = highs[-1].price
-        result["resistance_level"] = format_decimal(resistance)
-        result["sweep_above"] = detect_sweep(bars, atr, resistance, "above")
-        result["acceptance_above"] = detect_acceptance(bars, atr, resistance, "above")
+        pivot = highs[-1]
+        after = bars[pivot.index :]
+        level_id = _zone_id(pivot.price, pivot.price, instrument_code, timeframe)
+        result["resistance_level"] = format_decimal(pivot.price)
+        result["sweep_above"] = detect_sweep(after, atr, pivot.price, "above", level_id=level_id)
+        result["acceptance_above"] = detect_acceptance(
+            after, atr, pivot.price, "above", level_id=level_id
+        )
     if lows:
-        support = lows[-1].price
-        result["support_level"] = format_decimal(support)
-        result["sweep_below"] = detect_sweep(bars, atr, support, "below")
-        result["acceptance_below"] = detect_acceptance(bars, atr, support, "below")
+        pivot = lows[-1]
+        after = bars[pivot.index :]
+        level_id = _zone_id(pivot.price, pivot.price, instrument_code, timeframe)
+        result["support_level"] = format_decimal(pivot.price)
+        result["sweep_below"] = detect_sweep(after, atr, pivot.price, "below", level_id=level_id)
+        result["acceptance_below"] = detect_acceptance(
+            after, atr, pivot.price, "below", level_id=level_id
+        )
     return result

@@ -23,9 +23,11 @@ records, and none calls a provider.
 | `market/state/integrity.py` | Read-only semantic-integrity verification |
 | `market/state/tasks.py` | Durable per-instrument calculation task (unscheduled) |
 
-The current descriptor definition is `market-state-descriptor@0.6.0`
-(`compute.DESCRIPTOR_DEFINITION`); the version is bumped whenever the feature set
-or a threshold changes, so every snapshot binds the exact algorithm versions.
+The current descriptor definition is `market-state-descriptor@0.7.0`
+(`compute.DESCRIPTOR_DEFINITION`); the version is bumped whenever the feature set,
+a threshold or a lookback changes, so every snapshot binds the exact algorithm
+versions. Bounded per-granularity lookbacks (`compute.LOOKBACKS`) are pinned in
+the definition body so no computation scans unbounded history.
 
 ## Dry-run / read-only commands
 
@@ -47,7 +49,10 @@ Computing a snapshot programmatically (durable task, one instrument, idempotent)
 
 ```python
 from operations.tasks import execute_task
-execute_task("market.compute_market_state", {"instrument": "EUR_USD", "cutoff": "2026-01-05T13:00:00+00:00"})
+
+execute_task(
+    "market.compute_market_state", {"instrument": "EUR_USD", "cutoff": "2026-01-05T13:00:00+00:00"}
+)
 ```
 
 The task is **not** registered as a `ScheduledJob`. Activating it later requires a
