@@ -10,16 +10,21 @@ here selects a trade — these are descriptive facts (docs/phase4/design.md §7.
 """
 
 from collections import defaultdict
+from datetime import timedelta
+from decimal import Decimal
 
 from market.quality import NEW_YORK
-from market.state import features, liquidity, structure
+from market.state import features, fvg, liquidity, orb, sessions, structure
 from market.state.canonical import format_decimal
 from market.state.definitions import register_definition
 from market.state.manifest import _iso, build_input_manifest, eligible_observations
 from market.state.snapshots import persist_snapshot
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.4.0"
+DESCRIPTOR_VERSION = "0.5.0"
+
+FVG_GRANULARITIES = frozenset({"M15", "H1", "H4"})
+ORB_SESSION_WINDOW_HOURS = 12
 
 #: The canonical body of the descriptor definition. Observable facts only; the
 #: feature list and thresholds are pinned so a snapshot binds the exact
@@ -51,6 +56,9 @@ DESCRIPTOR_DEFINITION = {
         structure.PRIOR_EXTREME_V,
         liquidity.SWEEP_V,
         liquidity.ACCEPTANCE_V,
+        fvg.FVG_V,
+        orb.ORB_V,
+        sessions.SESSION_V,
     ],
     "price_basis": "midpoint",
     "rounding": {"quantum": "0.000001", "mode": "ROUND_HALF_EVEN"},
@@ -74,6 +82,8 @@ DESCRIPTOR_DEFINITION = {
         "failed_breakout_bars": structure.FAILED_BREAKOUT_BARS,
         "sweep_depth_atr": str(liquidity.SWEEP_DEPTH_ATR),
         "reclaim_window": liquidity.RECLAIM_WINDOW,
+        "fvg_displacement_atr": str(fvg.FVG_DISPLACEMENT_ATR),
+        "orb_minutes": sessions.ORB_MINUTES,
     },
 }
 
@@ -85,6 +95,10 @@ def ensure_descriptor_definition():
 
 def _midpoint(bid, ask):
     return (bid + ask) / 2
+
+
+def _pip_size(instrument):
+    return Decimal("0.01") if instrument.quote_currency == "JPY" else Decimal("0.0001")
 
 
 def _bars_from_observations(rows):
@@ -107,6 +121,10 @@ def _granularity_descriptor(instrument, granularity, information_cutoff):
     latest = rows[-1]
     bars = _bars_from_observations(rows)
     atr = features._current_atr(bars)
+    if granularity in FVG_GRANULARITIES:
+        fvg_block = fvg.find_fvgs(bars, atr, _pip_size(instrument))
+    else:
+        fvg_block = {"state": "not_applicable", "reason_code": "unsupported_granularity"}
     return {
         "state": "available",
         "eligible_candle_count": len(rows),
@@ -118,7 +136,46 @@ def _granularity_descriptor(instrument, granularity, information_cutoff):
         "higher_timeframe": features.higher_timeframe_context(bars),
         "structure": structure.structure_context(bars, atr),
         "liquidity": liquidity.liquidity_context(bars, atr),
+        "fvg": fvg_block,
     }
+
+
+def _orb_block(instrument, information_cutoff):
+    rows = eligible_observations(instrument, "M15", information_cutoff)
+    out = {}
+    if not rows:
+        for name in sessions.SESSIONS:
+            out[name] = orb.orb_unavailable("insufficient_history", session_name=name)
+        return out
+    bars = _bars_from_observations(rows)
+    atr = features._current_atr(bars)
+    obs_by_ts = {row.timestamp: row for row in rows}
+    bar_by_ts = {row.timestamp: bar for row, bar in zip(rows, bars)}
+    for name in sessions.SESSIONS:
+        found = sessions.most_recent_completed_orb_open(information_cutoff, name)
+        if found is None:
+            out[name] = orb.orb_unavailable("session_market_closed", session_name=name)
+            continue
+        utc_open, local_open, tz = found
+        opening = obs_by_ts.get(utc_open)
+        if opening is None:
+            out[name] = orb.orb_unavailable("opening_interval_missing", session_name=name)
+            continue
+        window_end = utc_open + timedelta(hours=ORB_SESSION_WINDOW_HOURS)
+        session_bars = [
+            bar_by_ts[row.timestamp] for row in rows if utc_open < row.timestamp <= window_end
+        ]
+        spread = opening.ask_close - opening.bid_close
+        out[name] = orb.opening_range(
+            bar_by_ts[utc_open],
+            session_bars,
+            atr,
+            spread,
+            session_name=name,
+            local_open=local_open,
+            tzinfo=tz,
+        )
+    return out
 
 
 def _prior_extreme(instrument, granularity, information_cutoff):
@@ -183,6 +240,7 @@ def compute_market_state(instrument, definition, information_cutoff, granulariti
         "information_cutoff": _iso(information_cutoff),
         "granularities": per_granularity,
         "prior_extremes": prior_extremes,
+        "opening_range": _orb_block(instrument, information_cutoff),
     }
     all_available = all(g["state"] == "available" for g in per_granularity.values())
     data_quality_status = "complete" if all_available else "partial"
