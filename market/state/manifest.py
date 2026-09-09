@@ -44,16 +44,18 @@ def eligible_observations(instrument, granularity, information_cutoff, *, lookba
             observed_at__lte=information_cutoff,
         )
         .exclude(content_sha256="")
-        .order_by("timestamp", "-revision")
+        # Descending so the first row seen per candle is its highest eligible
+        # revision, and the newest candles come first — which lets a bounded
+        # lookback stop the scan instead of reading all of history (design §14).
+        .order_by("-timestamp", "-revision")
     )
     latest_by_timestamp = {}
-    for row in rows:
-        # First row seen for a timestamp is its highest eligible revision.
-        latest_by_timestamp.setdefault(row.timestamp, row)
-    ordered = [latest_by_timestamp[key] for key in sorted(latest_by_timestamp)]
-    if lookback is not None:
-        ordered = ordered[-lookback:]
-    return ordered
+    for row in rows.iterator():
+        if row.timestamp not in latest_by_timestamp:
+            if lookback is not None and len(latest_by_timestamp) >= lookback:
+                break  # already have the newest ``lookback`` distinct candles
+            latest_by_timestamp[row.timestamp] = row
+    return [latest_by_timestamp[key] for key in sorted(latest_by_timestamp)]
 
 
 def build_input_manifest(instrument, granularities, information_cutoff, *, lookbacks=None):
