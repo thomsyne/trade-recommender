@@ -18,6 +18,7 @@ REGISTERED_STEPS = {
     "D": timedelta(days=1),
     "H4": timedelta(hours=4),
     "H1": timedelta(hours=1),
+    "M15": timedelta(minutes=15),
 }
 
 # The one authoritative statement of when a candle interval may start, in
@@ -33,21 +34,38 @@ DAILY_SESSION_WEEKDAYS = frozenset({6, 0, 1, 2, 3})
 WEEKLY_SESSION_WEEKDAY = 4
 #: New York local hours that open a four-hour candle.
 FOUR_HOUR_SESSION_HOURS = frozenset({1, 5, 9, 13, 17, 21})
-#: The finite set of granularities the live observation ledger supports.
-LIVE_GRANULARITIES = frozenset({"H1", "H4", "D", "W"})
+#: The finite set of granularities the live observation ledger supports. M15 is
+#: a supported ledger/calculation granularity (Phase 4) but is deliberately NOT
+#: part of ``SCHEDULED_LIVE_GRANULARITIES``: adding it here does not create or
+#: expect any production ingestion schedule (see market/live_acquisition.py and
+#: docs/phase4/design.md §3).
+LIVE_GRANULARITIES = frozenset({"H1", "H4", "D", "W", "M15"})
+#: The Phase 2 canonical set of granularities that carry a durable ingestion
+#: schedule. This is the authority for the canonical job inventory and must stay
+#: exactly {H1, H4, D, W}; M15 is intentionally excluded so Phase 4 does not
+#: mutate the schedule inventory or activate a new schedule.
+SCHEDULED_LIVE_GRANULARITIES = frozenset({"H1", "H4", "D", "W"})
 
 
 def live_interval_is_aligned(timestamp, granularity):
     """Whether ``timestamp`` may open a live candle of ``granularity``.
 
-    H1 and H4 are absolute-duration intervals on the New York session grid; D
-    and W start at the 17:00 America/New_York close, daily on Sunday through
+    M15, H1 and H4 are absolute-duration intervals on the New York session grid;
+    D and W start at the 17:00 America/New_York close, daily on Sunday through
     Thursday and weekly on Friday. Unsupported granularities are never aligned.
+    M15 opens on the quarter-hour (minute in {0,15,30,45}); because
+    America/New_York's offset is always a whole number of hours, that quarter-
+    hour grid is identical in New York wall clock and UTC and DST never splits a
+    15-minute interval.
     """
     if granularity not in LIVE_GRANULARITIES:
         return False
     local = timestamp.astimezone(NEW_YORK)
-    if local.minute or local.second or local.microsecond:
+    if local.second or local.microsecond:
+        return False
+    if granularity == "M15":
+        return local.minute % 15 == 0
+    if local.minute:
         return False
     if granularity == "H1":
         return True

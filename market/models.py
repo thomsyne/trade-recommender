@@ -128,7 +128,13 @@ class SourceRegistry(models.Model):
         return self.name
 
 
-GRANULARITIES = (("W", "Weekly"), ("D", "Daily"), ("H4", "Four-hour"), ("H1", "Hourly"))
+GRANULARITIES = (
+    ("W", "Weekly"),
+    ("D", "Daily"),
+    ("H4", "Four-hour"),
+    ("H1", "Hourly"),
+    ("M15", "Fifteen-minute"),
+)
 HISTORICAL_GRANULARITIES = (("W", "Weekly"), ("D", "Daily"), ("H1", "Hourly"))
 
 

@@ -117,7 +117,7 @@ class ObservationLineageEnforcementTests(TransactionTestCase):
             "interval_end": overrides.get(
                 "interval_end",
                 live_candle_completion(timestamp, granularity)
-                if granularity in {"H1", "H4", "D", "W"}
+                if granularity in {"M15", "H1", "H4", "D", "W"}
                 else None,
             ),
             "complete": item.complete,
@@ -220,6 +220,8 @@ class ObservationLineageEnforcementTests(TransactionTestCase):
                 self.assert_insert_accepted(self.observation_values(row, run, item))
 
     def test_unsupported_granularity_is_rejected(self):
+        # M15 is now a supported live granularity (Phase 4); M1 remains
+        # unsupported, so it still exercises the unaligned-granularity rejection.
         row, run, item = self.make_candle(MONDAY_HOUR, "H1")
 
         self.assert_insert_rejected(
@@ -227,8 +229,8 @@ class ObservationLineageEnforcementTests(TransactionTestCase):
                 row,
                 run,
                 item,
-                granularity="M15",
-                interval_end=MONDAY_HOUR + timedelta(minutes=15),
+                granularity="M1",
+                interval_end=MONDAY_HOUR + timedelta(minutes=1),
             )
         )
 
@@ -519,7 +521,9 @@ class SqlPythonParityTests(TransactionTestCase):
             datetime(2026, 1, 1, tzinfo=UTC),
         ):
             for hours in range(0, 24 * 9):
-                for minutes in (0, 30):
+                # Every quarter-hour so the M15 grid ({0,15,30,45}) is exercised
+                # against the SQL mirror, alongside the session boundaries.
+                for minutes in (0, 15, 30, 45):
                     yield anchor + timedelta(hours=hours, minutes=minutes)
 
     def test_interval_alignment_matches_python_across_dst(self):
@@ -541,7 +545,7 @@ class SqlPythonParityTests(TransactionTestCase):
 
     def test_completion_matches_python_across_dst(self):
         for timestamp in self.alignment_matrix():
-            for granularity in ("H1", "H4", "D", "W"):
+            for granularity in ("M15", "H1", "H4", "D", "W"):
                 if not live_interval_is_aligned(timestamp, granularity):
                     continue
                 self.assertEqual(
