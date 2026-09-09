@@ -14,14 +14,14 @@ from datetime import timedelta
 from decimal import Decimal
 
 from market.quality import NEW_YORK
-from market.state import features, fvg, liquidity, orb, sessions, structure
+from market.state import context, features, fvg, liquidity, orb, sessions, structure
 from market.state.canonical import format_decimal
 from market.state.definitions import register_definition
 from market.state.manifest import _iso, build_input_manifest, eligible_observations
 from market.state.snapshots import persist_snapshot
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.5.0"
+DESCRIPTOR_VERSION = "0.6.0"
 
 FVG_GRANULARITIES = frozenset({"M15", "H1", "H4"})
 ORB_SESSION_WINDOW_HOURS = 12
@@ -59,6 +59,9 @@ DESCRIPTOR_DEFINITION = {
         fvg.FVG_V,
         orb.ORB_V,
         sessions.SESSION_V,
+        context.SPREAD_V,
+        context.EVENT_STATE_V,
+        context.MACRO_REGIME_V,
     ],
     "price_basis": "midpoint",
     "rounding": {"quantum": "0.000001", "mode": "ROUND_HALF_EVEN"},
@@ -137,6 +140,7 @@ def _granularity_descriptor(instrument, granularity, information_cutoff):
         "structure": structure.structure_context(bars, atr),
         "liquidity": liquidity.liquidity_context(bars, atr),
         "fvg": fvg_block,
+        "spread": context.spread_context(latest, atr),
     }
 
 
@@ -241,6 +245,8 @@ def compute_market_state(instrument, definition, information_cutoff, granulariti
         "granularities": per_granularity,
         "prior_extremes": prior_extremes,
         "opening_range": _orb_block(instrument, information_cutoff),
+        "event_state": context.event_state(instrument, information_cutoff),
+        "macro_regime": context.macro_regime(instrument, information_cutoff),
     }
     all_available = all(g["state"] == "available" for g in per_granularity.values())
     data_quality_status = "complete" if all_available else "partial"
