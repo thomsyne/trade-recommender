@@ -171,6 +171,22 @@ def validate_resolution(resolution):
             )
         ):
             raise ValidationError("immature_missing_forbidden")
+        if resolution.outcome == "missing" and eligible_endpoint(target, resolution.resolved_at):
+            raise ValidationError("available_endpoint_marked_missing")
+
+
+def eligible_endpoint(target, as_of):
+    endpoint = target_endpoint(target.reference_candle.timestamp, target.horizon_sessions)
+    if registered_candle_completion(endpoint, "D") > as_of:
+        return None
+    return Candle.objects.filter(
+        instrument=target.instrument,
+        granularity="D",
+        timestamp=endpoint,
+        complete=True,
+        ingestion_run__status=IngestionRun.Status.SUCCEEDED,
+        ingestion_run__finished_at__lte=as_of,
+    ).first()
 
 
 def target_contract():
@@ -314,14 +330,7 @@ def resolve_target(target, *, as_of=None):
     endpoint_time = target_endpoint(target.reference_candle.timestamp, target.horizon_sessions)
     if registered_candle_completion(endpoint_time, "D") > as_of:
         return None
-    endpoint = Candle.objects.filter(
-        instrument=target.instrument,
-        granularity="D",
-        timestamp=endpoint_time,
-        complete=True,
-        ingestion_run__status=IngestionRun.Status.SUCCEEDED,
-        ingestion_run__finished_at__lte=as_of,
-    ).first()
+    endpoint = eligible_endpoint(target, as_of)
     from forecasts.services import classify_change
 
     midpoint = (

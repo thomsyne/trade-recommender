@@ -67,20 +67,18 @@ def resolve_paper_trade(recommendation):
     }:
         return None
 
-    if recommendation.contract_version == 4:
-        from forecasts.targets import resolve_target
-
-        shared = resolve_target(recommendation.target_occurrence)
-        if shared and shared.outcome == "missing":
-            _record_lifecycle(
-                recommendation,
-                PaperLifecycleEvent.State.MISSING_DATA,
-                reason_code="daily_horizon_unavailable",
-                details={"target_resolution_id": shared.pk},
-            )
-            return None
     horizon = _horizon_candle(recommendation)
     expires_at = _session_close(horizon.timestamp) if horizon else None
+    shared = None
+    if recommendation.contract_version == 4:
+        from forecasts.targets import resolve_target, target_endpoint
+        from market.quality import registered_candle_completion
+
+        target = recommendation.target_occurrence
+        shared = resolve_target(target)
+        expires_at = registered_candle_completion(
+            target_endpoint(target.reference_candle.timestamp, target.horizon_sessions), "D"
+        )
     candles = list(
         Candle.objects.filter(
             instrument=recommendation.instrument,
@@ -212,6 +210,16 @@ def resolve_paper_trade(recommendation):
                     recommendation.target_level,
                     horizon,
                 )
+
+    # Prediction availability must not discard an independently proven H1 exit.
+    if shared and shared.outcome == "missing":
+        _record_lifecycle(
+            recommendation,
+            PaperLifecycleEvent.State.MISSING_DATA,
+            reason_code="daily_horizon_unavailable",
+            details={"target_resolution_id": shared.pk},
+        )
+        return entry if entry_created else None
 
     if not horizon or not _has_coverage(recommendation, expires_at, candles):
         if not horizon and timezone.now() > recommendation.generated_at + timedelta(days=14):

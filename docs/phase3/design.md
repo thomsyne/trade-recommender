@@ -126,7 +126,13 @@ Before entry, incomplete H1 observation through expiry means `expired_unobserved
 Complete H1 coverage with no activation means `expired_not_activated` and has a
 nonactivated paper result. After a proven entry, a coverage gap means
 `missing_data`, retaining the entry and producing no fabricated result. Missing
-registered daily endpoint evidence also means `missing_data`. Coverage-source
+registered daily endpoint evidence means `missing_data` only after eligible H1
+execution evidence has been processed without proving an exit. The occurrence
+defines maturity even when that daily candle is absent; a proven H1 target/stop
+result does not depend on shared prediction resolution availability. Nonactivation
+requires absence of observable entry triggers, not merely absence of an entry row.
+A shared missing resolution requires no completed exact endpoint available by its
+recorded cutoff; later arrivals do not rewrite that immutable outcome. Coverage-source
 records carry versioned details even when no candles were observed. Existing
 adverse intrabar ordering, bid/ask fills, costs, sizing and capacity limits remain.
 

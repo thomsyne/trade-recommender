@@ -73,6 +73,12 @@ def transition(rec, state, *, reason_code, source=None, occurred_at=None):
         return existing
     if latest and latest.state == state:
         return latest
+    if state == "expired_not_activated":
+        from forecasts.models import PaperTradeResult
+
+        if not isinstance(source, PaperTradeResult) or source.recommendation_id != rec.pk:
+            raise ValidationError("result_source_required")
+        validate_expiry_result(source)
     initial = "abstained" if rec.action == "abstain" else "awaiting_portfolio_assessment"
     if (
         state not in TRANSITIONS
@@ -368,7 +374,7 @@ def validate_coverage_fact(fact):
 
 def validate_expiry_result(result):
     from forecasts.models import Candle
-    from forecasts.paper import _has_coverage
+    from forecasts.paper import _entry_fill, _has_coverage
     from forecasts.targets import target_endpoint
     from market.quality import registered_candle_completion
 
@@ -392,3 +398,5 @@ def validate_expiry_result(result):
     )
     if not _has_coverage(rec, maturity, candles, as_of=result.resolved_at):
         raise ValidationError("expiry_coverage_required")
+    if result.outcome == "not_activated" and any(_entry_fill(rec, candle) for candle in candles):
+        raise ValidationError("nonactivation_contradicts_entry_evidence")

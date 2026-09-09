@@ -410,7 +410,8 @@ class TargetSemanticReviewTests(TestCase):
                     target=target,
                     outcome=outcome,
                     resolution_method=RESOLUTION_METHOD,
-                    resolved_at=values["resolved_at"],
+                    # Missing is valid only before this endpoint was available.
+                    resolved_at=values["resolved_at"] - timedelta(microseconds=1),
                     idempotency_key="shape-" + outcome,
                 )
                 self.assertIsNone(result.endpoint_midpoint)
