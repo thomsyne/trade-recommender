@@ -9,14 +9,17 @@ unavailable feature is never reported as a neutral or false value. No threshold
 here selects a trade — these are descriptive facts (docs/phase4/design.md §7.1).
 """
 
-from market.state import features
+from collections import defaultdict
+
+from market.quality import NEW_YORK
+from market.state import features, structure
 from market.state.canonical import format_decimal
 from market.state.definitions import register_definition
 from market.state.manifest import _iso, build_input_manifest, eligible_observations
 from market.state.snapshots import persist_snapshot
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.2.0"
+DESCRIPTOR_VERSION = "0.3.0"
 
 #: The canonical body of the descriptor definition. Observable facts only; the
 #: feature list and thresholds are pinned so a snapshot binds the exact
@@ -26,6 +29,7 @@ DESCRIPTOR_DEFINITION = {
         "input_manifest": "causal-eligibility-v1",
         "descriptor": "latest-eligible-candle-v1",
         "higher_timeframe": "htf-context-v1",
+        "structure": "structure-context-v1",
     },
     "features": [
         "eligible_candle_count",
@@ -40,6 +44,11 @@ DESCRIPTOR_DEFINITION = {
         features.PERSISTENCE_V,
         features.BOS_V,
         features.CHOCH_V,
+        structure.ZONE_V,
+        structure.EQUAL_LEVELS_V,
+        structure.SD_CANDIDATE_V,
+        structure.CONSOLIDATION_V,
+        structure.PRIOR_EXTREME_V,
     ],
     "price_basis": "midpoint",
     "rounding": {"quantum": "0.000001", "mode": "ROUND_HALF_EVEN"},
@@ -55,6 +64,12 @@ DESCRIPTOR_DEFINITION = {
         "compression_percentile": str(features.COMPRESSION_PCTL),
         "expansion_percentile": str(features.EXPANSION_PCTL),
         "persistence_window": features.PERSISTENCE_WINDOW,
+        "zone_cluster_atr": str(structure.ZONE_CLUSTER_ATR),
+        "equal_level_atr": str(structure.EQUAL_LEVEL_ATR),
+        "displacement_atr": str(structure.DISPLACEMENT_ATR),
+        "consolidation_atr": str(structure.CONSOLIDATION_ATR),
+        "consolidation_window": structure.CONSOLIDATION_WINDOW,
+        "failed_breakout_bars": structure.FAILED_BREAKOUT_BARS,
     },
 }
 
@@ -87,6 +102,7 @@ def _granularity_descriptor(instrument, granularity, information_cutoff):
         return {"state": "unavailable", "reason_code": "insufficient_history"}
     latest = rows[-1]
     bars = _bars_from_observations(rows)
+    atr = features._current_atr(bars)
     return {
         "state": "available",
         "eligible_candle_count": len(rows),
@@ -96,7 +112,46 @@ def _granularity_descriptor(instrument, granularity, information_cutoff):
             "midpoint_close": format_decimal(bars[-1].close),
         },
         "higher_timeframe": features.higher_timeframe_context(bars),
+        "structure": structure.structure_context(bars, atr),
     }
+
+
+def _prior_extreme(instrument, granularity, information_cutoff):
+    rows = eligible_observations(instrument, granularity, information_cutoff)
+    if not rows:
+        return {
+            "state": "unavailable",
+            "version": structure.PRIOR_EXTREME_V,
+            "reason_code": "insufficient_history",
+        }
+    return structure.prior_period_extreme(_bars_from_observations(rows[-1:]))
+
+
+def _prior_completed_month(instrument, information_cutoff):
+    rows = eligible_observations(instrument, "D", information_cutoff)
+    if not rows:
+        return {
+            "state": "unavailable",
+            "version": structure.PRIOR_EXTREME_V,
+            "reason_code": "insufficient_history",
+        }
+    cutoff_local = information_cutoff.astimezone(NEW_YORK)
+    cutoff_month = (cutoff_local.year, cutoff_local.month)
+    months = defaultdict(list)
+    for bar, row in zip(_bars_from_observations(rows), rows):
+        local = row.timestamp.astimezone(NEW_YORK)
+        months[(local.year, local.month)].append(bar)
+    completed = [m for m in months if m < cutoff_month]
+    if not completed:
+        return {
+            "state": "unavailable",
+            "version": structure.PRIOR_EXTREME_V,
+            "reason_code": "incomplete_period",
+        }
+    latest = max(completed)
+    result = structure.prior_period_extreme(months[latest])
+    result["month"] = f"{latest[0]:04d}-{latest[1]:02d}"
+    return result
 
 
 def compute_market_state(instrument, definition, information_cutoff, granularities):
@@ -111,12 +166,18 @@ def compute_market_state(instrument, definition, information_cutoff, granulariti
         granularity: _granularity_descriptor(instrument, granularity, information_cutoff)
         for granularity in granularities
     }
+    prior_extremes = {
+        "prior_day": _prior_extreme(instrument, "D", information_cutoff),
+        "prior_week": _prior_extreme(instrument, "W", information_cutoff),
+        "prior_completed_month": _prior_completed_month(instrument, information_cutoff),
+    }
     output_payload = {
         "schema": "market-state/descriptor-v0",
         "definition": [definition.key, definition.version],
         "instrument": instrument.code,
         "information_cutoff": _iso(information_cutoff),
         "granularities": per_granularity,
+        "prior_extremes": prior_extremes,
     }
     all_available = all(g["state"] == "available" for g in per_granularity.values())
     data_quality_status = "complete" if all_available else "partial"
