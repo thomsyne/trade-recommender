@@ -12,14 +12,14 @@ here selects a trade — these are descriptive facts (docs/phase4/design.md §7.
 from collections import defaultdict
 
 from market.quality import NEW_YORK
-from market.state import features, structure
+from market.state import features, liquidity, structure
 from market.state.canonical import format_decimal
 from market.state.definitions import register_definition
 from market.state.manifest import _iso, build_input_manifest, eligible_observations
 from market.state.snapshots import persist_snapshot
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.3.0"
+DESCRIPTOR_VERSION = "0.4.0"
 
 #: The canonical body of the descriptor definition. Observable facts only; the
 #: feature list and thresholds are pinned so a snapshot binds the exact
@@ -49,6 +49,8 @@ DESCRIPTOR_DEFINITION = {
         structure.SD_CANDIDATE_V,
         structure.CONSOLIDATION_V,
         structure.PRIOR_EXTREME_V,
+        liquidity.SWEEP_V,
+        liquidity.ACCEPTANCE_V,
     ],
     "price_basis": "midpoint",
     "rounding": {"quantum": "0.000001", "mode": "ROUND_HALF_EVEN"},
@@ -70,6 +72,8 @@ DESCRIPTOR_DEFINITION = {
         "consolidation_atr": str(structure.CONSOLIDATION_ATR),
         "consolidation_window": structure.CONSOLIDATION_WINDOW,
         "failed_breakout_bars": structure.FAILED_BREAKOUT_BARS,
+        "sweep_depth_atr": str(liquidity.SWEEP_DEPTH_ATR),
+        "reclaim_window": liquidity.RECLAIM_WINDOW,
     },
 }
 
@@ -113,6 +117,7 @@ def _granularity_descriptor(instrument, granularity, information_cutoff):
         },
         "higher_timeframe": features.higher_timeframe_context(bars),
         "structure": structure.structure_context(bars, atr),
+        "liquidity": liquidity.liquidity_context(bars, atr),
     }
 
 
