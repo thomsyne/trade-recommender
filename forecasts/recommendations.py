@@ -14,7 +14,6 @@ from django.utils import timezone
 
 from forecasts.models import (
     Forecast,
-    PaperLifecycleEvent,
     Recommendation,
     RecommendationResolution,
 )
@@ -30,7 +29,7 @@ from operations.services import (
 )
 from research.models import PairEvidenceSnapshot
 
-CONTRACT_VERSION = 3
+CONTRACT_VERSION = 4
 MAX_EVIDENCE_AGE = timedelta(hours=8)
 MAX_OPEN_MARKET_EVIDENCE_AGE = timedelta(hours=12)
 PRICE_QUANTUM = Decimal("0.000001")
@@ -181,6 +180,9 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
         instrument, generated_at, allow_fixture=allow_fixture
     )
 
+    from forecasts.targets import exact_control
+
+    target, control = exact_control(instrument, reference_candle, outcome_contract, generated_at)
     provider = provider or configured_provider()
     from forecasts.experiments import (
         assign_recommendation,
@@ -251,15 +253,6 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
             output["probability_down_percent"],
         ),
     }[output["action"]]
-    control = (
-        Forecast.objects.filter(
-            instrument=instrument,
-            target_contract__product="tactical",
-            issued_at__lte=generated_at,
-        )
-        .select_related("target_contract")
-        .first()
-    )
     setup = (
         deterministic_setup[output["action"]]
         if output["action"] != Recommendation.Action.ABSTAIN
@@ -276,13 +269,14 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
             evidence_snapshot=snapshot,
             reference_candle=reference_candle,
             control_forecast=control,
+            target_occurrence=target,
             provider=provider.name,
             model=provider.model,
             returned_model=returned_model,
             pricing_version=settings.RECOMMENDATION_PRICING_VERSION,
             contract_version=CONTRACT_VERSION,
             generated_at=generated_at,
-            information_cutoff=snapshot.information_cutoff,
+            information_cutoff=target.information_cutoff,
             action=output["action"],
             confidence_percent=confidence_percent,
             reference_midpoint=Decimal(outcome_contract["reference_midpoint"]),
@@ -300,13 +294,9 @@ def generate_recommendation(instrument, *, provider=None, generated_at=None, all
             idempotency_key=key,
             **setup,
         )
-        PaperLifecycleEvent.objects.create(
-            recommendation=recommendation,
-            state=PaperLifecycleEvent.State.PENDING,
-            reason_code="prospective_contract_v3",
-            details={"contract_version": CONTRACT_VERSION},
-            occurred_at=generated_at,
-        )
+        from forecasts.lifecycle import initialize
+
+        initialize(recommendation)
         AuditEvent.objects.create(
             event_type="forecast.recommendation_generated",
             actor="forecasts.recommendations.generate_recommendation",
@@ -518,7 +508,7 @@ def _build_input(snapshot, outcome_contract):
     }
     return (
         {
-            "contract": "governed-fx-recommendation-v3",
+            "contract": f"governed-fx-recommendation-v{CONTRACT_VERSION}",
             "outcome_contract": {
                 "version": outcome_contract["version"],
                 "horizon": outcome_contract["horizon"],
@@ -665,7 +655,7 @@ def _probabilities(output):
 
 def resolve_due_recommendations(instrument=None):
     recommendations = Recommendation.objects.filter(
-        contract_version__in=(2, 3), resolution__isnull=True
+        contract_version__in=(2, 3, 4), resolution__isnull=True
     ).select_related("reference_candle")
     if instrument:
         recommendations = recommendations.filter(instrument=instrument)
@@ -683,9 +673,13 @@ def resolve_recommendation(recommendation):
     existing = RecommendationResolution.objects.filter(recommendation=recommendation).first()
     if existing:
         return existing
+    if recommendation.target_occurrence_id:
+        from forecasts.targets import derive_resolution
+
+        return derive_resolution(recommendation)
     if recommendation.contract_version == 1:
         return None
-    if recommendation.contract_version not in {2, 3}:
+    if recommendation.contract_version not in {2, 3, 4}:
         raise ValidationError("Unsupported recommendation contract version")
     if not recommendation.reference_candle_id:
         raise ValidationError("Supported recommendation is missing its reference candle")

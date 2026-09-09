@@ -206,6 +206,8 @@ def today(request):
 
 @owner_required
 def market_detail(request, code):
+    from forecasts.targets import control_readiness
+
     instrument = get_object_or_404(Instrument, code=code, active=True)
     granularity = request.GET.get("granularity", "H4")
     if granularity not in {"H4", "D"}:
@@ -309,6 +311,7 @@ def market_detail(request, code):
             "chart": chart,
             "granularity": granularity,
             "forecast": tactical_forecast,
+            "prospective_control_readiness": control_readiness(instrument),
             "recommendation": recommendation,
             "recommendations": recommendations,
             "timeline": timeline,
@@ -795,7 +798,7 @@ def calibration(request):
                 ExperimentAssessment.Status.PROMOTION_ELIGIBLE,
             },
             "open_count": Recommendation.objects.filter(
-                contract_version__in=(2, 3), resolution__isnull=True
+                contract_version__in=(2, 3, 4), resolution__isnull=True
             ).count(),
             "legacy_count": Recommendation.objects.filter(contract_version__lt=2).count(),
             "pair_rows": pair_rows,
@@ -813,7 +816,7 @@ def paper_trades(request):
     )
     recommendations = list(
         Recommendation.objects.filter(
-            contract_version__in=(2, 3),
+            contract_version__in=(2, 3, 4),
             action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
         )
         .select_related(
@@ -829,15 +832,10 @@ def paper_trades(request):
         entry = getattr(recommendation, "paper_entry", None)
         result = getattr(recommendation, "paper_result", None)
         cost = getattr(result, "cost_assessment", None) if result else None
-        if result:
-            state = result.outcome
-            state_label = result.get_outcome_display()
-        elif entry:
-            state = "entered"
-            state_label = "Entered; monitoring exit"
-        else:
-            state = "waiting"
-            state_label = "Waiting for entry"
+        from forecasts.lifecycle import project_lifecycle
+
+        lifecycle = project_lifecycle(recommendation)
+        state, state_label = lifecycle["state"], lifecycle["label"]
         rows.append(
             {
                 "recommendation": recommendation,
@@ -862,7 +860,7 @@ def paper_trades(request):
         "dashboard/paper_trades.html",
         {
             "rows": rows,
-            "waiting_count": sum(row["state"] == "waiting" for row in rows),
+            "waiting_count": sum(row["state"] == "admitted_awaiting_entry" for row in rows),
             "entered_count": sum(row["state"] == "entered" for row in rows),
             "resolved_count": len(results),
             "executed_count": len(executed_results),
@@ -940,12 +938,22 @@ def inbox(request):
                 "open": cohort_is_open(cohort),
             }
         )
+    notifications = list(OwnerNotification.objects.all()[:30])
+    for notification in notifications:
+        notification.decision_closed = False
+        if (
+            notification.subject_type == "PortfolioCohort"
+            and len(str(notification.subject_id)) <= 18
+            and str(notification.subject_id).isdigit()
+        ):
+            decision = PortfolioCohort.objects.filter(pk=int(notification.subject_id)).first()
+            notification.decision_closed = bool(decision and not cohort_is_open(decision))
     return render(
         request,
         "dashboard/inbox.html",
         {
             "cohorts": cohorts,
-            "notifications": OwnerNotification.objects.all()[:30],
+            "notifications": notifications,
         },
     )
 

@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
+from functools import wraps
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -10,7 +11,6 @@ from django.test import Client, TransactionTestCase
 from django.urls import reverse
 
 from forecasts.models import (
-    PortfolioAdmissionEvent,
     PortfolioPolicyActivation,
     PortfolioSelection,
 )
@@ -29,10 +29,21 @@ from market.tests.timeline import EvidenceTimeline, completed_intervals
 from operations.models import OwnerNotification
 
 
-class PortfolioAdmissionTests(TransactionTestCase):
-    reset_sequences = True
+def decision_clock(test):
+    @wraps(test)
+    def wrapped(self, *args, **kwargs):
+        with self.timeline.at(self.now + timedelta(minutes=1)):
+            return test(self, *args, **kwargs)
 
+    return wrapped
+
+
+class PortfolioAdmissionTests(TransactionTestCase):
     def setUp(self):
+        for module in ("forecasts.portfolio", "forecasts.sizing"):
+            policy_patch = patch(module + ".POLICY_KEY", "phase3-fixture-cad-risk")
+            policy_patch.start()
+            self.addCleanup(policy_patch.stop)
         self.owner = get_user_model().objects.create_superuser(
             username="owner-test", password="test"
         )
@@ -84,6 +95,11 @@ class PortfolioAdmissionTests(TransactionTestCase):
             manifest={"test": "portfolio-conversion", "requests": []},
         )
 
+        if self._testMethodName != "test_pre_activation_recommendation_remains_research_only":
+            PortfolioPolicyActivation.objects.create(
+                policy_key="phase3-fixture-cad-risk", policy_version=1, effective_at=self.now
+            )
+
     def admit(self, recommendations, *, seconds=0):
         """Assess a batch at the scenario's decision instant.
 
@@ -109,6 +125,7 @@ class PortfolioAdmissionTests(TransactionTestCase):
         size_recommendation(recommendation, sized_at=self.now)
         return recommendation
 
+    @decision_clock
     def test_competing_setups_require_owner_and_allow_pending_supersession(self):
         base = self.recommendation("USD_CAD", "sell")
         first = self.admit([base])
@@ -143,23 +160,20 @@ class PortfolioAdmissionTests(TransactionTestCase):
             set(active_admitted_recommendation_ids()),
             {base.pk, eur.pk},
         )
-        superseding = select_portfolio_cohort(cohort, [gbp.pk], actor=self.owner)
-        self.assertEqual(superseding.supersedes, selected)
-        self.assertEqual(set(active_admitted_recommendation_ids()), {base.pk, gbp.pk})
-        self.assertEqual(
-            PortfolioAdmissionEvent.objects.filter(
-                recommendation=eur, state=PortfolioAdmissionEvent.State.REVOKED
-            ).count(),
-            1,
-        )
+        with self.assertRaisesMessage(ValidationError, "closed"):
+            select_portfolio_cohort(cohort, [gbp.pk], actor=self.owner)
+        self.assertEqual(set(active_admitted_recommendation_ids()), {base.pk, eur.pk})
+        cohort.refresh_from_db()
+        self.assertEqual(cohort.closure.reason_code, "selection_recorded")
+        self.assertEqual(gbp.lifecycle["state"], "closed_unselected")
         with self.assertRaises(DatabaseError), transaction.atomic():
-            PortfolioSelection.objects.filter(pk=superseding.pk).update(mode="automatic")
+            PortfolioSelection.objects.filter(pk=selected.pk).update(mode="automatic")
 
     def test_pre_activation_recommendation_remains_research_only(self):
         # The policy only becomes effective after this recommendation, so the
         # recommendation stays research-only.
         PortfolioPolicyActivation.objects.create(
-            policy_key="fixed-cad-risk",
+            policy_key="phase3-fixture-cad-risk",
             policy_version=1,
             effective_at=self.now + timedelta(days=1),
         )
@@ -191,6 +205,7 @@ class PortfolioAdmissionTests(TransactionTestCase):
         with self.assertRaisesMessage(ValidationError, "closed"):
             select_portfolio_cohort(cohort, [gbp.pk], actor=self.owner)
 
+    @decision_clock
     def test_concurrent_owner_selections_cannot_over_admit(self):
         base = self.recommendation("USD_CAD", "sell")
         self.admit([base])
@@ -206,17 +221,20 @@ class PortfolioAdmissionTests(TransactionTestCase):
                     [recommendation_id],
                     actor=get_user_model().objects.get(pk=self.owner.pk),
                 ).pk
+            except ValidationError:
+                return None
             finally:
                 connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             selection_ids = list(executor.map(choose, (eur.pk, gbp.pk)))
 
-        self.assertEqual(len(set(selection_ids)), 2)
+        self.assertEqual(sum(value is not None for value in selection_ids), 1)
         active = set(active_admitted_recommendation_ids())
         self.assertIn(base.pk, active)
         self.assertEqual(len(active & {eur.pk, gbp.pk}), 1)
 
+    @decision_clock
     def test_owner_selector_is_csrf_protected_and_records_decision(self):
         base = self.recommendation("USD_CAD", "sell")
         self.admit([base])

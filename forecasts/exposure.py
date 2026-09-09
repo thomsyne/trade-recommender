@@ -23,7 +23,7 @@ def active_directional_recommendations():
     return (
         Recommendation.objects.filter(
             pk__in=active_admitted_recommendation_ids(),
-            contract_version__in=(2, 3),
+            contract_version__in=(2, 3, 4),
             action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
             paper_result__isnull=True,
         )
@@ -61,7 +61,7 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
     total_risk_cad = Decimal("0")
     sizing_missing_count = 0
     for recommendation in recommendations:
-        if recommendation.contract_version not in {2, 3} or recommendation.action not in {
+        if recommendation.contract_version not in {2, 3, 4} or recommendation.action not in {
             Recommendation.Action.BUY,
             Recommendation.Action.SELL,
         }:
@@ -69,7 +69,6 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
         if getattr(recommendation, "paper_result", None):
             continue
 
-        entry = getattr(recommendation, "paper_entry", None)
         current_sizes = getattr(recommendation, "current_position_sizes", None)
         size = current_sizes[0] if current_sizes else getattr(recommendation, "position_size", None)
         if size:
@@ -81,10 +80,13 @@ def build_exposure_report(recommendations, budget=CURRENCY_SETUP_BUDGET):
             recommendation.instrument.quote_currency,
             recommendation.action,
         )
+        from forecasts.lifecycle import project_lifecycle
+
+        lifecycle = project_lifecycle(recommendation)
         setup = {
             "recommendation": recommendation,
-            "state": "entered" if entry else "waiting",
-            "state_label": "Entered paper position" if entry else "Waiting for entry",
+            "state": lifecycle["state"],
+            "state_label": lifecycle["label"],
             "size": size,
             "legs": [
                 {"currency": currency, "direction": "long" if direction > 0 else "short"}

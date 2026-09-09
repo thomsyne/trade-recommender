@@ -143,6 +143,9 @@ class BoundedInterpretationTests(TestCase):
         )
         with self.timeline.at(self.timeline.after(thesis_run)):
             resolve_recommendation(self.recommendation)
+        from forecasts.lifecycle import reconcile_lifecycle
+
+        reconcile_lifecycle(as_of=self.generated_at + timedelta(days=10))
         self.cohort = build_due_review_cohort(cutoff_at=self.generated_at + timedelta(days=10))
         self.member = (
             self.cohort.members.select_related("recommendation__instrument")

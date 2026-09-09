@@ -108,7 +108,7 @@ def size_recommendation(recommendation, *, sized_at=None):
     ).first()
     if existing:
         return existing
-    if recommendation.contract_version not in {2, 3} or recommendation.action not in {
+    if recommendation.contract_version not in {2, 3, 4} or recommendation.action not in {
         Recommendation.Action.BUY,
         Recommendation.Action.SELL,
     }:
@@ -157,7 +157,7 @@ def size_recommendation(recommendation, *, sized_at=None):
 def size_active_recommendations(*, sized_at=None):
     sized_at = sized_at or timezone.now()
     recommendations = Recommendation.objects.filter(
-        contract_version__in=(2, 3),
+        contract_version__in=(2, 3, 4),
         action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
         paper_result__isnull=True,
     ).select_related("instrument")

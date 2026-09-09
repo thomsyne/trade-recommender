@@ -1,5 +1,6 @@
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
@@ -15,6 +16,7 @@ def setup(pair, action, *, contract_version=2, entered=False, resolved=False, ri
         instrument=SimpleNamespace(base_currency=base, quote_currency=quote),
         paper_entry=object() if entered else None,
         paper_result=object() if resolved else None,
+        projected_state="entered" if entered else "admitted_awaiting_entry",
         position_size=(
             SimpleNamespace(projected_risk_cad=Decimal(str(risk)), recommended_units=10000)
             if risk is not None
@@ -24,6 +26,19 @@ def setup(pair, action, *, contract_version=2, entered=False, resolved=False, ri
 
 
 class ExposureTests(SimpleTestCase):
+    def setUp(self):
+        # These isolated currency-arithmetic fixtures explicitly model admitted
+        # setups; the real projection boundary has database tests in Phase3.
+        projection = patch(
+            "forecasts.lifecycle.project_lifecycle",
+            side_effect=lambda rec: {
+                "state": rec.projected_state,
+                "label": rec.projected_state.replace("_", " "),
+            },
+        )
+        projection.start()
+        self.addCleanup(projection.stop)
+
     def test_pair_decomposition_uses_base_and_quote_directions(self):
         self.assertEqual(
             decompose_pair("EUR", "USD", Recommendation.Action.BUY),
@@ -97,7 +112,9 @@ class ExposureTests(SimpleTestCase):
             ]
         )
 
-        self.assertEqual([item["state"] for item in report["setups"]], ["waiting", "entered"])
+        self.assertEqual(
+            [item["state"] for item in report["setups"]], ["admitted_awaiting_entry", "entered"]
+        )
 
     def test_cash_risk_is_aggregated_by_setup_and_currency_direction(self):
         report = build_exposure_report(

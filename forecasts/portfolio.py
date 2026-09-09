@@ -1,10 +1,10 @@
 import hashlib
 from collections import defaultdict
+from datetime import timedelta
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 
 from forecasts.exposure import decompose_pair
@@ -31,7 +31,9 @@ from operations.notifications import create_owner_notification
 
 def _latest_admission_states():
     states = {}
-    for event in PortfolioAdmissionEvent.objects.order_by("recommendation_id", "occurred_at", "id"):
+    for event in PortfolioAdmissionEvent.objects.filter(occurred_at__lte=timezone.now()).order_by(
+        "recommendation_id", "occurred_at", "id"
+    ):
         states[event.recommendation_id] = event.state
     return states
 
@@ -96,7 +98,7 @@ def _selection_fits_snapshot(cohort, selected_members):
 
 
 def _active_admitted(excluding=()):
-    return list(
+    rows = list(
         Recommendation.objects.filter(
             pk__in=active_admitted_recommendation_ids(), paper_result__isnull=True
         )
@@ -104,6 +106,9 @@ def _active_admitted(excluding=()):
         .select_related("instrument")
         .prefetch_related("position_sizes")
     )
+    from forecasts.lifecycle import project_lifecycle
+
+    return [r for r in rows if r.contract_version != 4 or not project_lifecycle(r)["terminal"]]
 
 
 def _lock_portfolio():
@@ -120,9 +125,57 @@ def _policy_activation():
     return activation
 
 
+def owner_decision_deadline(rec):
+    from forecasts.targets import target_endpoint
+    from market.quality import registered_candle_completion
+
+    target = rec.target_occurrence
+    return min(
+        rec.generated_at + timedelta(hours=24),
+        registered_candle_completion(
+            target_endpoint(target.reference_candle.timestamp, target.horizon_sessions), "D"
+        ),
+    )
+
+
 @transaction.atomic
 def assess_recommendation_batch(recommendations, *, generated_at=None):
     generated_at = generated_at or timezone.now()
+    from forecasts.lifecycle import project_lifecycle, transition
+    from forecasts.models import PortfolioPolicyActivation
+
+    prospective = [r for r in recommendations if r.contract_version == 4]
+    if prospective:
+        _lock_portfolio()
+        eligible = []
+        activation = PortfolioPolicyActivation.objects.filter(
+            policy_key=POLICY_KEY, policy_version=POLICY_VERSION
+        ).first()
+        for rec in prospective:
+            if (
+                rec.action == "abstain"
+                or project_lifecycle(rec)["state"] != "awaiting_portfolio_assessment"
+            ):
+                continue
+            reason = None
+            if not activation or rec.generated_at < activation.effective_at:
+                reason = "policy_not_effective"
+            elif generated_at >= owner_decision_deadline(rec):
+                reason = "decision_window_expired"
+            elif not rec.position_size:
+                reason = "missing_versioned_sizing"
+            elif PortfolioCohortMember.objects.filter(
+                recommendation__target_occurrence_id=rec.target_occurrence_id,
+                cohort__closure__isnull=True,
+            ).exists():
+                reason = "existing_open_target_decision"
+            if reason:
+                transition(rec, "portfolio_ineligible", reason_code=reason)
+            else:
+                eligible.append(rec)
+        recommendations = eligible + [r for r in recommendations if r.contract_version != 4]
+        if not recommendations:
+            return None
     effective_at = _policy_activation().effective_at
     already_assessed = set(
         PortfolioCohortMember.objects.filter(
@@ -153,6 +206,9 @@ def assess_recommendation_batch(recommendations, *, generated_at=None):
         policy_key=POLICY_KEY,
         policy_version=POLICY_VERSION,
         generated_at=generated_at,
+        decision_deadline=min(owner_decision_deadline(r) for r in candidates)
+        if prospective
+        else None,
         capacity_snapshot={
             "base_recommendation_ids": [item.pk for item in base],
             "base_total_risk_cad": str(base_total),
@@ -169,13 +225,36 @@ def assess_recommendation_batch(recommendations, *, generated_at=None):
         size = recommendation.position_size
         if not size:
             raise ValidationError("A portfolio candidate requires versioned position sizing")
-        PortfolioCohortMember.objects.create(
+        member = PortfolioCohortMember.objects.create(
             cohort=cohort,
             recommendation=recommendation,
             position_size=size,
             projected_risk_cad=size.projected_risk_cad,
             currency_legs=_legs(recommendation),
         )
+        if recommendation.contract_version == 4:
+            transition(
+                recommendation,
+                "awaiting_owner_decision",
+                reason_code="cohort_member",
+                source=member,
+            )
+
+    if prospective:
+        from forecasts.lifecycle import close_cohort
+
+        old_cohorts = (
+            PortfolioCohort.objects.filter(
+                members__recommendation__instrument_id__in=[r.instrument_id for r in candidates],
+                closure__isnull=True,
+                decision_deadline__isnull=False,
+                generated_at__lt=cohort.generated_at,
+            )
+            .exclude(pk=cohort.pk)
+            .distinct()
+        )
+        for old in old_cohorts:
+            close_cohort(old, "new_target_superseded", superseding=cohort)
 
     if _fits(base + candidates):
         _record_selection(
@@ -201,13 +280,17 @@ def assess_recommendation_batch(recommendations, *, generated_at=None):
     return cohort
 
 
-def cohort_has_triggered(cohort):
+def cohort_has_triggered(cohort, *, as_of=None):
+    as_of = as_of or timezone.now()
     for member in cohort.members.select_related("recommendation__instrument"):
         recommendation = member.recommendation
         candles = Candle.objects.filter(
             instrument=recommendation.instrument,
             granularity="H1",
             timestamp__gte=recommendation.generated_at,
+            timestamp__lte=as_of - timedelta(hours=1),
+            ingestion_run__finished_at__lte=as_of,
+            ingestion_run__status="succeeded",
             complete=True,
         )
         if recommendation.action == Recommendation.Action.BUY:
@@ -222,11 +305,11 @@ def cohort_is_open(cohort):
     latest_selection = cohort.selections.first()
     if latest_selection and latest_selection.mode == PortfolioSelection.Mode.AUTOMATIC:
         return False
-    if PortfolioCohort.objects.filter(
-        Q(generated_at__gt=cohort.generated_at)
-        | Q(generated_at=cohort.generated_at, pk__gt=cohort.pk)
-    ).exists():
-        return False
+    if cohort.decision_deadline:
+        if getattr(cohort, "closure", None) or timezone.now() >= cohort.decision_deadline:
+            return False
+        if latest_selection:
+            return False
     terminal = {
         PaperLifecycleEvent.State.ENTERED,
         PaperLifecycleEvent.State.CLOSED,
@@ -272,7 +355,9 @@ def select_portfolio_cohort(cohort, selected_ids, *, actor):
             "This selection cohort is closed because prices moved or a newer batch exists"
         )
     selected = [member for member in members if member.recommendation_id in selected_ids]
-    if not _selection_fits_snapshot(cohort, selected):
+    if not _selection_fits_snapshot(cohort, selected) or not _fits(
+        _active_admitted(excluding=member_ids) + [member.recommendation for member in selected]
+    ):
         raise ValidationError("The selected setups exceed the frozen portfolio risk policy")
     return _record_selection(
         cohort,
@@ -299,6 +384,7 @@ def _record_selection(
         supersedes=supersedes,
         actor=actor,
         mode=mode,
+        selected_at=timezone.now(),
         idempotency_key=idempotency_key or f"portfolio-auto:{cohort.pk}",
     )
     previous_ids = (
@@ -316,6 +402,7 @@ def _record_selection(
                 cohort=cohort,
                 selection=selection,
                 state=PortfolioAdmissionEvent.State.ADMITTED,
+                occurred_at=selection.selected_at,
                 reason_code="all_fit"
                 if mode == PortfolioSelection.Mode.AUTOMATIC
                 else "owner_selected",
@@ -326,6 +413,7 @@ def _record_selection(
             cohort=cohort,
             selection=selection,
             state=PortfolioAdmissionEvent.State.REVOKED,
+            occurred_at=selection.selected_at,
             reason_code="owner_superseded_while_pending",
         )
     AuditEvent.objects.create(
@@ -340,4 +428,19 @@ def _record_selection(
             "confidence_used_for_ranking": False,
         },
     )
+    from forecasts.lifecycle import close_cohort, project_lifecycle, transition
+
+    for member in cohort.members.select_related("recommendation"):
+        rec = member.recommendation
+        if rec.contract_version != 4:
+            continue
+        state = project_lifecycle(rec)["state"]
+        if rec.pk in selected_ids and state == "awaiting_owner_decision":
+            admission = rec.portfolio_admission_events.order_by("-occurred_at", "-id").first()
+            transition(rec, "admitted_awaiting_entry", reason_code="selected", source=admission)
+        elif rec.pk not in selected_ids and state == "admitted_awaiting_entry":
+            admission = rec.portfolio_admission_events.order_by("-occurred_at", "-id").first()
+            transition(rec, "admission_revoked", reason_code="revoked", source=admission)
+    if cohort.decision_deadline:
+        close_cohort(cohort, "selection_recorded")
     return selection

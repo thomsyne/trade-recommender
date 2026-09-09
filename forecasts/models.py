@@ -48,6 +48,49 @@ class TargetContract(ImmutableModel):
         return f"{self.key} v{self.version}"
 
 
+class TargetOccurrence(ImmutableModel):
+    instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
+    target_contract = models.ForeignKey(TargetContract, on_delete=models.PROTECT)
+    reference_candle = models.ForeignKey(Candle, on_delete=models.PROTECT)
+    reference_content_sha256 = models.CharField(max_length=64)
+    information_cutoff = models.DateTimeField()
+    reference_midpoint = models.DecimalField(max_digits=12, decimal_places=6)
+    neutral_band = models.DecimalField(max_digits=12, decimal_places=6)
+    horizon_sessions = models.PositiveSmallIntegerField()
+    resolution_method = models.CharField(max_length=80)
+    neutral_rule = models.CharField(max_length=80)
+    definition_sha256 = models.CharField(max_length=64)
+    identity_sha256 = models.CharField(max_length=64, unique=True)
+    registered_at = models.DateTimeField(default=timezone.now)
+
+    def save(self, *args, **kwargs):
+        from forecasts.targets import validate_target
+
+        validate_target(self)
+        return super().save(*args, **kwargs)
+
+
+class TargetResolution(ImmutableModel):
+    target = models.OneToOneField(
+        TargetOccurrence, on_delete=models.PROTECT, related_name="resolution"
+    )
+    outcome = models.CharField(max_length=12)
+    horizon_candle = models.ForeignKey(Candle, on_delete=models.PROTECT, null=True, blank=True)
+    horizon_content_sha256 = models.CharField(max_length=64, blank=True)
+    endpoint_midpoint = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    midpoint_change = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    resolution_method = models.CharField(max_length=80)
+    details = models.JSONField(default=dict)
+    resolved_at = models.DateTimeField(default=timezone.now)
+    idempotency_key = models.CharField(max_length=100, unique=True)
+
+    def save(self, *args, **kwargs):
+        from forecasts.targets import validate_resolution
+
+        validate_resolution(self)
+        return super().save(*args, **kwargs)
+
+
 class EvidenceSnapshot(ImmutableModel):
     instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
     anchor_candle = models.ForeignKey(Candle, on_delete=models.PROTECT)
@@ -62,6 +105,10 @@ class EvidenceSnapshot(ImmutableModel):
 
 
 class Forecast(ImmutableModel):
+    target_occurrence = models.ForeignKey(
+        TargetOccurrence, on_delete=models.PROTECT, null=True, blank=True, related_name="controls"
+    )
+
     class Direction(models.TextChoices):
         UP = "up", "Up"
         NEUTRAL = "neutral", "Neutral"
@@ -178,6 +225,10 @@ class Forecast(ImmutableModel):
 
 
 class ForecastResolution(ImmutableModel):
+    target_resolution = models.ForeignKey(
+        TargetResolution, on_delete=models.PROTECT, null=True, blank=True
+    )
+
     class Outcome(models.TextChoices):
         UP = "up", "Up"
         NEUTRAL = "neutral", "Neutral"
@@ -228,6 +279,14 @@ class ForecastResolution(ImmutableModel):
 
 
 class Recommendation(ImmutableModel):
+    target_occurrence = models.ForeignKey(
+        TargetOccurrence,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="recommendations",
+    )
+
     class Action(models.TextChoices):
         ABSTAIN = "abstain", "Abstain"
         BUY = "buy", "Buy"
@@ -334,13 +393,17 @@ class Recommendation(ImmutableModel):
         ]
 
     def clean(self):
+        if self.contract_version == 4:
+            from forecasts.targets import validate_recommendation
+
+            validate_recommendation(self)
         if self.evidence_snapshot.instrument_id != self.instrument_id:
             raise ValidationError("Recommendation and evidence instruments must match")
         if self.control_forecast_id and self.control_forecast.instrument_id != self.instrument_id:
             raise ValidationError("Recommendation and control instruments must match")
-        if self.contract_version not in {1, 2, 3}:
+        if self.contract_version not in {1, 2, 3, 4}:
             raise ValidationError("Unsupported recommendation contract version")
-        if self.contract_version in {2, 3}:
+        if self.contract_version in {2, 3, 4}:
             if (
                 not self.reference_candle_id
                 or self.reference_candle.instrument_id != self.instrument_id
@@ -374,6 +437,24 @@ class Recommendation(ImmutableModel):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+    @property
+    def comparison_status(self):
+        from forecasts.targets import comparable_control
+
+        if self.contract_version != 4:
+            return "Unpaired legacy"
+        return (
+            "Exact prospective control"
+            if comparable_control(self)
+            else "Missing or incompatible control"
+        )
+
+    @property
+    def lifecycle(self):
+        from forecasts.lifecycle import project_lifecycle
+
+        return project_lifecycle(self)
 
     @property
     def position_size(self):
@@ -441,7 +522,7 @@ class PositionSizeAdvice(ImmutableModel):
 
     def clean(self):
         recommendation = self.recommendation
-        if recommendation.contract_version not in {2, 3} or recommendation.action not in {
+        if recommendation.contract_version not in {2, 3, 4} or recommendation.action not in {
             Recommendation.Action.BUY,
             Recommendation.Action.SELL,
         }:
@@ -470,15 +551,18 @@ class PositionSizeAdvice(ImmutableModel):
 
 
 class RecommendationResolution(ImmutableModel):
+    target_resolution = models.ForeignKey(
+        TargetResolution, on_delete=models.PROTECT, null=True, blank=True
+    )
     recommendation = models.OneToOneField(
         Recommendation, on_delete=models.PROTECT, related_name="resolution"
     )
-    outcome = models.CharField(max_length=8, choices=Forecast.Direction)
-    horizon_candle = models.ForeignKey(Candle, on_delete=models.PROTECT)
-    endpoint_midpoint = models.DecimalField(max_digits=12, decimal_places=6)
-    midpoint_change = models.DecimalField(max_digits=12, decimal_places=6)
+    outcome = models.CharField(max_length=12, choices=ForecastResolution.Outcome)
+    horizon_candle = models.ForeignKey(Candle, on_delete=models.PROTECT, null=True, blank=True)
+    endpoint_midpoint = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
+    midpoint_change = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
     directional_hit = models.BooleanField(null=True, blank=True)
-    brier_score = models.DecimalField(max_digits=8, decimal_places=6)
+    brier_score = models.DecimalField(max_digits=8, decimal_places=6, null=True, blank=True)
     details = models.JSONField(default=dict)
     resolved_at = models.DateTimeField(default=timezone.now)
 
@@ -487,16 +571,19 @@ class RecommendationResolution(ImmutableModel):
 
     def clean(self):
         recommendation = self.recommendation
-        if recommendation.contract_version not in {2, 3}:
+        if recommendation.contract_version not in {2, 3, 4}:
             raise ValidationError("Legacy recommendations do not have a scorable outcome contract")
-        if self.horizon_candle.instrument_id != recommendation.instrument_id:
+        if (
+            self.horizon_candle
+            and self.horizon_candle.instrument_id != recommendation.instrument_id
+        ):
             raise ValidationError(
                 "Resolution horizon candle must match the recommendation instrument"
             )
         if recommendation.action == Recommendation.Action.ABSTAIN:
             if self.directional_hit is not None:
                 raise ValidationError("An abstention cannot have a directional hit result")
-        elif self.directional_hit is None:
+        elif self.outcome in {"up", "neutral", "down"} and self.directional_hit is None:
             raise ValidationError("A directional recommendation requires a hit result")
 
     def save(self, *args, **kwargs):
@@ -527,7 +614,7 @@ class PaperTradeEntry(ImmutableModel):
     def clean(self):
         recommendation = self.recommendation
         if (
-            recommendation.contract_version not in {2, 3}
+            recommendation.contract_version not in {2, 3, 4}
             or recommendation.action == Recommendation.Action.ABSTAIN
         ):
             raise ValidationError(
@@ -626,7 +713,7 @@ class PaperTradeResult(ImmutableModel):
     def clean(self):
         recommendation = self.recommendation
         if (
-            recommendation.contract_version not in {2, 3}
+            recommendation.contract_version not in {2, 3, 4}
             or recommendation.action == Recommendation.Action.ABSTAIN
         ):
             raise ValidationError("Only supported directional recommendations have paper results")
@@ -769,6 +856,7 @@ class PortfolioGuard(models.Model):
 
 
 class PortfolioCohort(ImmutableModel):
+    decision_deadline = models.DateTimeField(null=True, blank=True)
     idempotency_key = models.CharField(max_length=240, unique=True)
     policy_key = models.CharField(max_length=80)
     policy_version = models.PositiveSmallIntegerField()
@@ -1455,3 +1543,51 @@ class PromotionRecord(ImmutableModel):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class PortfolioDisposition(ImmutableModel):
+    recommendation = models.OneToOneField(
+        Recommendation, on_delete=models.PROTECT, related_name="portfolio_disposition"
+    )
+    kind = models.CharField(max_length=24)
+    reason_code = models.CharField(max_length=80)
+    created_at = models.DateTimeField(default=timezone.now)
+
+
+class CohortClosure(ImmutableModel):
+    cohort = models.OneToOneField(PortfolioCohort, on_delete=models.PROTECT, related_name="closure")
+    superseding_cohort = models.ForeignKey(
+        PortfolioCohort,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="superseded_closures",
+    )
+    reason_code = models.CharField(max_length=80)
+    closed_at = models.DateTimeField(default=timezone.now)
+
+
+class RecommendationLifecycleEvent(ImmutableModel):
+    recommendation = models.ForeignKey(
+        Recommendation, on_delete=models.PROTECT, related_name="lifecycle_events"
+    )
+    predecessor = models.OneToOneField(
+        "self", on_delete=models.PROTECT, null=True, blank=True, related_name="successor"
+    )
+    state = models.CharField(max_length=40)
+    reason_code = models.CharField(max_length=80)
+    source_type = models.CharField(max_length=80)
+    source_id = models.PositiveBigIntegerField()
+    details = models.JSONField(default=dict)
+    occurred_at = models.DateTimeField(default=timezone.now)
+    idempotency_key = models.CharField(max_length=64, unique=True)
+
+    class Meta:
+        ordering = ("-occurred_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("recommendation",),
+                condition=models.Q(predecessor__isnull=True),
+                name="unique_lifecycle_root",
+            )
+        ]

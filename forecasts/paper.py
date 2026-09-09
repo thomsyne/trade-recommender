@@ -24,7 +24,7 @@ NEW_YORK = ZoneInfo("America/New_York")
 def resolve_due_paper_trades(instrument=None):
     assess_due_paper_costs()
     recommendations = Recommendation.objects.filter(
-        contract_version__in=(2, 3),
+        contract_version__in=(2, 3, 4),
         action__in=(Recommendation.Action.BUY, Recommendation.Action.SELL),
         paper_result__isnull=True,
     ).select_related("reference_candle", "paper_entry")
@@ -45,7 +45,7 @@ def resolve_paper_trade(recommendation):
     if existing:
         return existing
     if (
-        recommendation.contract_version not in {2, 3}
+        recommendation.contract_version not in {2, 3, 4}
         or recommendation.action == Recommendation.Action.ABSTAIN
     ):
         return None
@@ -54,7 +54,12 @@ def resolve_paper_trade(recommendation):
     if recommendation.pk not in active_admitted_recommendation_ids():
         return None
     lifecycle = recommendation.paper_lifecycle_events.order_by("-occurred_at", "-id").first()
-    if not lifecycle or lifecycle.state in {
+    if recommendation.contract_version == 4:
+        from forecasts.lifecycle import project_lifecycle
+
+        if project_lifecycle(recommendation)["state"] not in {"admitted_awaiting_entry", "entered"}:
+            return None
+    elif not lifecycle or lifecycle.state in {
         PaperLifecycleEvent.State.LEGACY_UNADJUDICATED,
         PaperLifecycleEvent.State.EXPIRED_UNOBSERVED,
         PaperLifecycleEvent.State.CANCELLED,
@@ -62,6 +67,18 @@ def resolve_paper_trade(recommendation):
     }:
         return None
 
+    if recommendation.contract_version == 4:
+        from forecasts.targets import resolve_target
+
+        shared = resolve_target(recommendation.target_occurrence)
+        if shared and shared.outcome == "missing":
+            _record_lifecycle(
+                recommendation,
+                PaperLifecycleEvent.State.MISSING_DATA,
+                reason_code="daily_horizon_unavailable",
+                details={"target_resolution_id": shared.pk},
+            )
+            return None
     horizon = _horizon_candle(recommendation)
     expires_at = _session_close(horizon.timestamp) if horizon else None
     candles = list(
@@ -69,12 +86,41 @@ def resolve_paper_trade(recommendation):
             instrument=recommendation.instrument,
             granularity="H1",
             timestamp__gte=recommendation.generated_at,
-            **({"timestamp__lte": expires_at - timedelta(hours=1)} if expires_at else {}),
+            **(
+                {
+                    "complete": True,
+                    "ingestion_run__status": IngestionRun.Status.SUCCEEDED,
+                    "ingestion_run__finished_at__lte": timezone.now(),
+                    "timestamp__lte": min(timezone.now(), expires_at or timezone.now())
+                    - timedelta(hours=1),
+                }
+                if recommendation.contract_version == 4
+                else {"timestamp__lte": expires_at - timedelta(hours=1)}
+                if expires_at
+                else {}
+            ),
         ).order_by("timestamp")
     )
-    if candles and not _has_coverage(
-        recommendation, candles[-1].timestamp + timedelta(hours=1), candles
+    if (
+        recommendation.contract_version != 4
+        and candles
+        and not _has_coverage(recommendation, candles[-1].timestamp + timedelta(hours=1), candles)
     ):
+        return None
+
+    if (
+        recommendation.contract_version == 4
+        and candles
+        and not _has_coverage(recommendation, candles[-1].timestamp + timedelta(hours=1), candles)
+    ):
+        if expires_at and timezone.now() >= expires_at:
+            _record_lifecycle(
+                recommendation,
+                PaperLifecycleEvent.State.MISSING_DATA
+                if PaperTradeEntry.objects.filter(recommendation=recommendation).exists()
+                else PaperLifecycleEvent.State.EXPIRED_UNOBSERVED,
+                reason_code="hourly_coverage_unavailable",
+            )
         return None
 
     entry = PaperTradeEntry.objects.filter(recommendation=recommendation).first()
@@ -175,10 +221,14 @@ def resolve_paper_trade(recommendation):
                 reason_code="daily_horizon_unavailable",
                 details={"sessions_required": recommendation.expires_after_sessions},
             )
-        if expires_at and timezone.now() > expires_at + timedelta(hours=24):
+        if expires_at and timezone.now() >= expires_at + (
+            timedelta(0) if recommendation.contract_version == 4 else timedelta(hours=24)
+        ):
             _record_lifecycle(
                 recommendation,
-                PaperLifecycleEvent.State.EXPIRED_UNOBSERVED,
+                PaperLifecycleEvent.State.MISSING_DATA
+                if recommendation.contract_version == 4 and entry
+                else PaperLifecycleEvent.State.EXPIRED_UNOBSERVED,
                 reason_code="hourly_coverage_unavailable",
                 details={"expected_through": expires_at.isoformat()},
             )
@@ -311,6 +361,17 @@ def _create_result(
 
 
 def _horizon_candle(recommendation):
+    if recommendation.target_occurrence_id:
+        from forecasts.targets import target_endpoint
+
+        target = recommendation.target_occurrence
+        return Candle.objects.filter(
+            instrument=recommendation.instrument,
+            granularity="D",
+            complete=True,
+            timestamp=target_endpoint(target.reference_candle.timestamp, target.horizon_sessions),
+            ingestion_run__finished_at__lte=timezone.now(),
+        ).first()
     candles = list(
         Candle.objects.filter(
             instrument=recommendation.instrument,
@@ -335,6 +396,7 @@ def _has_coverage(recommendation, through, candles):
         status=IngestionRun.Status.SUCCEEDED,
         requested_from__lte=recommendation.generated_at,
         requested_to__gte=through,
+        **({"finished_at__lte": timezone.now()} if recommendation.contract_version == 4 else {}),
     ).exists()
     if not manifest_covers_range or not candles:
         return False
@@ -388,6 +450,34 @@ def _audit_entry(entry):
 
 
 def _record_lifecycle(recommendation, state, *, reason_code="", details=None):
+    if recommendation.contract_version == 4:
+        from forecasts.lifecycle import transition
+
+        source = recommendation
+        desired = state
+        if state in {"expired_unobserved", "missing_data", "cancelled"}:
+            source, _ = PaperLifecycleEvent.objects.get_or_create(
+                recommendation=recommendation,
+                state=state,
+                defaults={
+                    "reason_code": reason_code,
+                    "details": {"schema_version": 1, **(details or {})},
+                    "occurred_at": timezone.now(),
+                },
+            )
+        if state == PaperLifecycleEvent.State.ENTERED:
+            source = recommendation.paper_entry
+        elif state == PaperLifecycleEvent.State.CLOSED:
+            source = recommendation.paper_result
+            desired = {
+                "target": "target_hit",
+                "invalidated": "invalidated",
+                "expired": "expired_after_entry",
+                "not_activated": "expired_not_activated",
+            }[source.outcome]
+        return transition(
+            recommendation, desired, reason_code=reason_code or "paper_fact", source=source
+        )
     event, _ = PaperLifecycleEvent.objects.get_or_create(
         recommendation=recommendation,
         state=state,

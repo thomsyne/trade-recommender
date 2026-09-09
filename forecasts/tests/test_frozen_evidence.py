@@ -18,6 +18,7 @@ from forecasts.recommendations import (
 from forecasts.services import issue_baselines, resolve_forecast
 from forecasts.tests.test_recommendations import (
     FakeProvider,
+    activate_fixture_policy,
     evidence,
     hourly_candle,
     output,
@@ -59,6 +60,7 @@ class FrozenEvidenceTests(TestCase):
         reference_run = self.daily(self.reference_at, "reference")
         self.now = self.timeline.after(reference_run)
         self.snapshot = evidence(self.instrument, self.now)
+        activate_fixture_policy(self, self.now)
 
     def daily(self, timestamp, batch, **changes):
         return self.timeline.ingest(
@@ -140,7 +142,8 @@ class FrozenEvidenceTests(TestCase):
             resolution.details["reference_candle_content_sha256"],
             recommendation.reference_candle.content_sha256,
         )
-        self.assertEqual(len(resolution.details["candle_content_sha256s"]), 5)
+        self.assertEqual(resolution.target_resolution.target.horizon_sessions, 5)
+        self.assertEqual(resolution.target_resolution.horizon_candle_id, endpoint.pk)
         original_outcome = (
             resolution.outcome,
             resolution.endpoint_midpoint,
@@ -221,7 +224,8 @@ class FrozenEvidenceTests(TestCase):
             requested_from=recommendation.generated_at,
         )
 
-        result = resolve_paper_trade(recommendation)
+        with self.timeline.at(self.timeline.poll_instant(hours, "H1") + timedelta(seconds=1)):
+            result = resolve_paper_trade(recommendation)
 
         self.assertIsInstance(result, PaperTradeResult)
         entry = PaperTradeEntry.objects.get(recommendation=recommendation)
@@ -271,17 +275,12 @@ class FrozenEvidenceTests(TestCase):
         self.assertEqual(macro.evidence_snapshot.technical_snapshot_id, snapshot.pk)
         self.assertEqual(resolve_forecast(tactical), resolution)
 
-    def test_migration_accepts_a_revision_recorded_during_generation(self):
-        """A revision recorded while the provider was still generating stays one.
+    def test_prospective_control_freezes_reference_before_model_generation(self):
+        """A pre-issued control already freezes the reference during model work.
 
-        ``Recommendation.generated_at`` is fixed before ``provider.generate()``
-        is called and the row is inserted only after it returns, so a revision
-        recorded inside that window is legitimately a revision even though the
-        recommendation that later appears carries an earlier generated_at.
-        Migration 0029 must not read that business timestamp as visibility.
+        The conflicting provider observation remains audit evidence, and the
+        historical migration must accept its truthful classification.
         """
-        # The provider call is under way from self.now; the revision lands part
-        # way through it, while nothing yet cites the candle.
         observed_during_call = self.now + timedelta(minutes=5)
         self.timeline.ingest(
             self.source,
@@ -293,7 +292,9 @@ class FrozenEvidenceTests(TestCase):
         )
         revised = Candle.objects.get(timestamp=self.reference_at)
         head = revised.authoritative_observation()
-        self.assertEqual(head.kind, CandleObservation.Kind.REVISION)
+        self.assertEqual(head.kind, CandleObservation.Kind.CONFLICT)
+        conflict = CandleObservation.objects.get(candle=revised, revision=2)
+        self.assertEqual(conflict.kind, CandleObservation.Kind.CONFLICT)
 
         # The row is only inserted once the provider returns, but it carries the
         # generated_at fixed before the call -- earlier than the revision.
@@ -301,7 +302,7 @@ class FrozenEvidenceTests(TestCase):
             recommendation = generate_recommendation(
                 self.instrument, provider=FakeProvider(), generated_at=self.now
             )
-        self.assertLess(recommendation.generated_at, head.observed_at)
+        self.assertLess(recommendation.generated_at, conflict.observed_at)
         self.assertEqual(recommendation.reference_candle_id, revised.pk)
 
         lineage = import_module("market.migrations.0029_candle_observation_lineage")

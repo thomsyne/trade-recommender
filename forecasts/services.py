@@ -160,23 +160,31 @@ def _capture_market_evidence(instrument, captured_at):
     )
 
 
-def _issue_baseline(contract, evidence, issued_at, parent=None):
+def _issue_baseline(contract, evidence, issued_at, parent=None, target=None):
     key = (
         f"mechanical-ewma-v1:{evidence.instrument.code}:{contract.key}:"
         f"{contract.version}:{evidence.sha256}"
     )
+    if target:
+        key = f"target-control:{target.identity_sha256}:mechanical-ewma:1"
     existing = Forecast.objects.filter(idempotency_key=key).first()
     if existing:
         return existing
 
     anchor = evidence.anchor_candle
     snapshot = evidence.technical_snapshot
-    midpoint = anchor.midpoint_close.quantize(PRICE_QUANTUM)
+    midpoint = (
+        target.reference_midpoint if target else anchor.midpoint_close.quantize(PRICE_QUANTUM)
+    )
     spread = anchor.ask_close - anchor.bid_close
-    neutral_band = max(
-        snapshot.atr_14 * contract.neutral_atr_multiplier,
-        spread * contract.spread_multiplier,
-    ).quantize(PRICE_QUANTUM)
+    neutral_band = (
+        target.neutral_band
+        if target
+        else max(
+            snapshot.atr_14 * contract.neutral_atr_multiplier,
+            spread * contract.spread_multiplier,
+        ).quantize(PRICE_QUANTUM)
+    )
     direction = classify_change(midpoint - snapshot.ewma_20, neutral_band)
     probabilities = {
         Forecast.Direction.UP: (Decimal("0.5000"), Decimal("0.3000"), Decimal("0.2000")),
@@ -194,13 +202,14 @@ def _issue_baseline(contract, evidence, issued_at, parent=None):
     fixture = anchor.ingestion_run.source.name == "Development fixtures"
     forecast = Forecast.objects.create(
         instrument=evidence.instrument,
+        target_occurrence=target,
         target_contract=contract,
         evidence_snapshot=evidence,
         parent=parent,
         method="fixture-mechanical-ewma" if fixture else "mechanical-ewma",
         method_version=1,
         issued_at=issued_at,
-        information_cutoff=issued_at,
+        information_cutoff=target.information_cutoff if target else issued_at,
         reference_midpoint=midpoint,
         neutral_band=neutral_band,
         direction=direction,
@@ -212,7 +221,9 @@ def _issue_baseline(contract, evidence, issued_at, parent=None):
             "Mechanical controls forecast direction only; no conditional trade setup is authorized."
         ),
         entry_condition=Forecast.EntryCondition.NONE,
-        setup_expires_after_sessions=contract.horizon_sessions,
+        setup_expires_after_sessions=target.horizon_sessions
+        if target
+        else contract.horizon_sessions,
         rationale=(
             f"Frozen EWMA control: issue midpoint {midpoint} is {direction} relative to EWMA(20) "
             f"{snapshot.ewma_20} after applying neutral band {neutral_band}."
@@ -253,6 +264,10 @@ def resolve_forecast(forecast):
     forecast = Forecast.objects.select_for_update().get(pk=forecast.pk)
     if ForecastResolution.objects.filter(forecast=forecast).exists():
         return ForecastResolution.objects.get(forecast=forecast)
+    if forecast.target_occurrence_id:
+        from forecasts.targets import derive_resolution
+
+        return derive_resolution(forecast)
     later_candles = list(
         Candle.objects.filter(
             instrument=forecast.instrument,

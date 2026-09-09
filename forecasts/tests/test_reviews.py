@@ -20,6 +20,7 @@ from forecasts.reviews import build_due_review_cohort, reassess_review_cohort
 from forecasts.sizing import size_recommendation
 from forecasts.tests.test_recommendations import (
     FakeProvider,
+    activate_fixture_policy,
     evidence,
     hourly_candle,
     output,
@@ -52,6 +53,7 @@ class DeterministicReviewTests(TestCase):
         )
         self.generated_at = self.timeline.after(reference_run, seconds=2)
         evidence(self.instrument, self.generated_at)
+        activate_fixture_policy(self, self.generated_at)
 
     def recommendation(self):
         with self.timeline.at(self.generated_at):
@@ -184,11 +186,20 @@ class DeterministicReviewTests(TestCase):
         self.resolve_thesis(recommendation)
         historical_cutoff = self.generated_at + timedelta(days=8)
         future_terminal_at = historical_cutoff + timedelta(days=1)
-        PaperLifecycleEvent.objects.create(
+        fact = PaperLifecycleEvent.objects.create(
             recommendation=recommendation,
             state=PaperLifecycleEvent.State.MISSING_DATA,
             reason_code="future_gap",
             details={"fixture": True},
+            occurred_at=future_terminal_at,
+        )
+        from forecasts.lifecycle import transition
+
+        transition(
+            recommendation,
+            "missing_data",
+            reason_code="future_gap",
+            source=fact,
             occurred_at=future_terminal_at,
         )
 
@@ -203,11 +214,14 @@ class DeterministicReviewTests(TestCase):
             generated_at=self.generated_at,
         )
         self.resolve_thesis(recommendation)
+        from forecasts.lifecycle import reconcile_lifecycle
+
+        reconcile_lifecycle(as_of=self.generated_at + timedelta(days=10))
 
         cohort = build_due_review_cohort(cutoff_at=self.generated_at + timedelta(days=10))
         execution = cohort.members.get().reviews.get(kind=DeterministicReview.Kind.EXECUTION)
         self.assertEqual(execution.coverage, DeterministicReview.Coverage.NOT_APPLICABLE)
-        self.assertEqual(execution.facts["readiness_reason"], "outside_admission_era")
+        self.assertEqual(execution.facts["readiness_reason"], "cancelled")
 
     def test_abstention_receives_thesis_review_without_execution_penalty(self):
         abstention = output(
@@ -237,11 +251,20 @@ class DeterministicReviewTests(TestCase):
         recommendation = self.recommendation()
         self.resolve_thesis(recommendation)
         missing_at = self.generated_at + timedelta(days=9)
-        PaperLifecycleEvent.objects.create(
+        fact = PaperLifecycleEvent.objects.create(
             recommendation=recommendation,
             state=PaperLifecycleEvent.State.MISSING_DATA,
             reason_code="hourly_test_gap",
             details={"fixture": True},
+            occurred_at=missing_at,
+        )
+        from forecasts.lifecycle import transition
+
+        transition(
+            recommendation,
+            "missing_data",
+            reason_code="hourly_test_gap",
+            source=fact,
             occurred_at=missing_at,
         )
 

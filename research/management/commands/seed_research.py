@@ -708,10 +708,8 @@ class Command(BaseCommand):
             {},
             86_400,
         )
-        from forecasts.experiments import ensure_champion_era
-        from forecasts.recommendations import configured_provider
-
-        ensure_champion_era(configured_provider())
+        # Phase3 era registration is an explicit owner action; reseeding does
+        # not register/cut over an evaluation method.
         ProviderEvaluation.objects.update_or_create(
             category="economic-calendar",
             provider="Official statistical agencies",

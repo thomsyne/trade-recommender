@@ -28,7 +28,6 @@ from forecasts.models import (
     Recommendation,
     RecommendationResolution,
 )
-from forecasts.recommendations import generate_recommendation
 from forecasts.tests.test_recommendations import FakeProvider, evidence
 from market.models import Instrument, SourceRegistry
 from market.tests.factories import candle
@@ -42,6 +41,11 @@ from market.tests.timeline import EvidenceTimeline
 )
 class ExperimentHealthTests(TestCase):
     def setUp(self):
+        # Preserve v3-era regression coverage as historical fixtures. New v4
+        # populations, controls and shared endpoints have separate Phase3 tests.
+        version = patch("forecasts.recommendations.CONTRACT_VERSION", 3)
+        version.start()
+        self.addCleanup(version.stop)
         self.instrument = Instrument.objects.create(
             code="USD_CAD", base_currency="USD", quote_currency="CAD", display_order=1
         )
@@ -63,14 +67,38 @@ class ExperimentHealthTests(TestCase):
         self.started_at = (timezone.now() + timedelta(days=1)).replace(
             hour=12, minute=0, second=0, microsecond=0
         )
-        evidence(self.instrument, self.started_at)
-        self.base = generate_recommendation(
-            self.instrument,
-            provider=FakeProvider(),
-            generated_at=self.started_at,
+        snapshot = evidence(self.instrument, self.started_at, prospective=False)
+        from forecasts.recommendations import _build_outcome_contract, _deterministic_setup
+
+        reference, outcome = _build_outcome_contract(
+            self.instrument, self.started_at, allow_fixture=False
         )
+        setup = _deterministic_setup(snapshot, outcome)["buy"]
         self.method = ensure_forecast_method(FakeProvider())
-        self.era = ExperimentEra.objects.get(kind=ExperimentEra.Kind.CHAMPION)
+        self.era = ensure_champion_era(FakeProvider(), starts_at=self.started_at, register=True)
+        self.base = Recommendation.objects.create(
+            instrument=self.instrument,
+            evidence_snapshot=snapshot,
+            reference_candle=reference,
+            provider="fake",
+            model="fixed-v1",
+            contract_version=3,
+            generated_at=self.started_at,
+            information_cutoff=self.started_at,
+            action="buy",
+            confidence_percent=62,
+            reference_midpoint=Decimal(outcome["reference_midpoint"]),
+            neutral_band=Decimal(outcome["neutral_band"]),
+            probability_up=Decimal(".62"),
+            probability_neutral=Decimal(".23"),
+            probability_down=Decimal(".15"),
+            output={"legacy_fixture": True},
+            input_payload={"legacy_fixture": True},
+            request_sha256="e" * 64,
+            idempotency_key="legacy-experiment-base",
+            **setup,
+        )
+        assign_recommendation(self.base, self.method)
 
     def _resolved_recommendation(self, index, generated_at, *, method=None):
         base = self.base
@@ -211,7 +239,7 @@ class ExperimentHealthTests(TestCase):
 
         with override_settings(RECOMMENDATION_METHOD_VERSION=2):
             changed = ensure_champion_era(
-                ChangedProvider(), starts_at=self.started_at + timedelta(days=1)
+                ChangedProvider(), starts_at=self.started_at + timedelta(days=1), register=True
             )
 
         self.assertNotEqual(changed.pk, self.era.pk)
@@ -227,7 +255,7 @@ class ExperimentHealthTests(TestCase):
         with override_settings(RECOMMENDATION_METHOD_VERSION=2):
             changed_method = ensure_forecast_method(ChangedProvider())
             changed_era = ensure_champion_era(
-                ChangedProvider(), starts_at=self.started_at + timedelta(days=1)
+                ChangedProvider(), starts_at=self.started_at + timedelta(days=1), register=True
             )
 
         self.assertEqual(assign_recommendation(self.base, changed_method), [])
@@ -238,7 +266,7 @@ class ExperimentHealthTests(TestCase):
 
         with override_settings(RECOMMENDATION_METHOD_VERSION=3):
             newest = ensure_champion_era(
-                ChangedAgainProvider(), starts_at=self.started_at + timedelta(days=2)
+                ChangedAgainProvider(), starts_at=self.started_at + timedelta(days=2), register=True
             )
         with override_settings(RECOMMENDATION_METHOD_VERSION=3):
             newest_method = ensure_forecast_method(ChangedAgainProvider())

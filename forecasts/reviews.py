@@ -11,7 +11,6 @@ from forecasts.models import (
     DeterministicReview,
     PaperLifecycleEvent,
     PaperTradeResult,
-    PortfolioAdmissionEvent,
     PortfolioCohort,
     PortfolioCohortMember,
     PortfolioGuard,
@@ -52,6 +51,8 @@ def _latest_admission(recommendation, as_of):
 
 
 def _latest_lifecycle(recommendation, as_of):
+    if recommendation.contract_version == 4:
+        return recommendation.lifecycle_events.filter(occurred_at__lte=as_of).first()
     return (
         recommendation.paper_lifecycle_events.filter(occurred_at__lte=as_of)
         .order_by("-occurred_at", "-id")
@@ -103,28 +104,10 @@ def _cohort_is_open_as_of(cohort, as_of):
 
 
 def _execution_readiness(recommendation, as_of):
-    if recommendation.action == Recommendation.Action.ABSTAIN:
-        return "abstention"
-    membership = (
-        PortfolioCohortMember.objects.filter(recommendation=recommendation)
-        .select_related("cohort")
-        .first()
-    )
-    if not membership:
-        return "outside_admission_era"
-    admission = _latest_admission(recommendation, as_of)
-    if not admission:
-        return None if _cohort_is_open_as_of(membership.cohort, as_of) else "owner_not_selected"
-    if admission.state == PortfolioAdmissionEvent.State.REVOKED:
-        return "admission_revoked"
-    if PaperTradeResult.objects.filter(
-        recommendation=recommendation, resolved_at__lte=as_of
-    ).exists():
-        return "paper_result"
-    lifecycle = _latest_lifecycle(recommendation, as_of)
-    if lifecycle and lifecycle.state in TERMINAL_EXECUTION_STATES:
-        return "terminal_without_result"
-    return None
+    from forecasts.lifecycle import project_lifecycle
+
+    projected = project_lifecycle(recommendation, as_of=as_of)
+    return projected["state"] if projected["terminal"] else None
 
 
 def _evidence_lineage(recommendation):
@@ -169,7 +152,10 @@ def _evidence_lineage(recommendation):
 
 
 def _thesis_projection(recommendation, resolution):
-    if recommendation.action == Recommendation.Action.ABSTAIN:
+    if resolution.outcome in {"missing", "cancelled"}:
+        classification = "outcome_unavailable"
+        supported = None
+    elif recommendation.action == Recommendation.Action.ABSTAIN:
         classification = "abstention_observed"
         supported = None
     else:
@@ -203,7 +189,9 @@ def _thesis_projection(recommendation, resolution):
     }
     return {
         "kind": DeterministicReview.Kind.THESIS,
-        "coverage": DeterministicReview.Coverage.COMPLETE,
+        "coverage": DeterministicReview.Coverage.COMPLETE
+        if resolution.outcome in {"up", "neutral", "down"}
+        else DeterministicReview.Coverage.MISSING,
         "facts": facts,
         "source_lineage": lineage,
     }
@@ -248,6 +236,10 @@ def _execution_projection(recommendation, readiness, as_of):
     }
     if readiness in {
         "abstention",
+        "abstained",
+        "portfolio_ineligible",
+        "closed_unselected",
+        "cancelled",
         "outside_admission_era",
         "owner_not_selected",
         "admission_revoked",
@@ -326,7 +318,10 @@ def _execution_projection(recommendation, readiness, as_of):
 def _reconciliation_projection(thesis, execution):
     thesis_facts = thesis["facts"]
     execution_facts = execution["facts"]
-    if execution["coverage"] == DeterministicReview.Coverage.MISSING:
+    if thesis["coverage"] == DeterministicReview.Coverage.MISSING:
+        classification = "target_outcome_missing"
+        coverage = DeterministicReview.Coverage.MISSING
+    elif execution["coverage"] == DeterministicReview.Coverage.MISSING:
         classification = "execution_coverage_missing"
         coverage = DeterministicReview.Coverage.MISSING
     elif execution["coverage"] == DeterministicReview.Coverage.NOT_APPLICABLE:
@@ -422,7 +417,7 @@ def build_due_review_cohort(*, instrument=None, cutoff_at=None):
     cutoff_at = cutoff_at or timezone.now()
     _lock_reviews()
     candidates = Recommendation.objects.select_for_update(of=("self",)).filter(
-        contract_version__in=(2, 3),
+        contract_version__in=(2, 3, 4),
         generated_at__lte=cutoff_at,
         resolution__resolved_at__lte=cutoff_at,
         review_membership__isnull=True,

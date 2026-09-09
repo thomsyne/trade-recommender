@@ -12,7 +12,6 @@ from django.utils import timezone
 
 from forecasts.models import (
     Forecast,
-    PaperLifecycleEvent,
     PaperTradeCostAssessment,
     PaperTradeEntry,
     PaperTradeResult,
@@ -35,7 +34,7 @@ from market.tests.timeline import EvidenceTimeline
 from research.models import PairEvidenceSnapshot
 
 
-def evidence(instrument, captured_at=None, market_as_of=None, sha256=None):
+def evidence(instrument, captured_at=None, market_as_of=None, sha256=None, *, prospective=True):
     captured_at = captured_at or timezone.now()
     market_as_of = market_as_of or captured_at
     payload = {
@@ -92,12 +91,53 @@ def evidence(instrument, captured_at=None, market_as_of=None, sha256=None):
         ],
         "boundaries": {"read_only": True, "forecast_write_authorized": False},
     }
-    return PairEvidenceSnapshot.objects.create(
+    snapshot = PairEvidenceSnapshot.objects.create(
         instrument=instrument,
         information_cutoff=captured_at,
         payload=payload,
         sha256=sha256 or ("a" if not PairEvidenceSnapshot.objects.exists() else "b") * 64,
         captured_at=captured_at,
+    )
+    # Positive model fixtures now need the prospective v4 preconditions that
+    # production must satisfy before reservation. Negative control tests call
+    # the real boundary directly without this fixture preparation.
+    from forecasts.experiments import ensure_champion_era
+    from forecasts.targets import reconcile_targets
+    from market.tests.timeline import application_clock
+
+    if not prospective:
+        return snapshot
+    with application_clock(captured_at):
+        try:
+            reconcile_targets(instrument, as_of=captured_at)
+        except ValidationError:
+            # Missing-market-evidence fixtures intentionally exercise earlier
+            # validation and do not manufacture a target or control.
+            pass
+        from forecasts.models import ExperimentEra, PortfolioPolicyActivation
+
+        if not ExperimentEra.objects.filter(method__contract_version=4).exists():
+            ensure_champion_era(FakeProvider(), starts_at=captured_at, register=True)
+        PortfolioPolicyActivation.objects.get_or_create(
+            policy_key="fixed-cad-risk", policy_version=1, defaults={"effective_at": captured_at}
+        )
+    return snapshot
+
+
+def activate_fixture_policy(testcase, effective_at):
+    """Register a separate test policy without changing migration-era history."""
+    from unittest.mock import patch
+
+    from forecasts.models import PortfolioPolicyActivation
+
+    for module in ("forecasts.portfolio", "forecasts.sizing"):
+        override = patch(module + ".POLICY_KEY", "phase3-execution-fixture-risk")
+        override.start()
+        testcase.addCleanup(override.stop)
+    PortfolioPolicyActivation.objects.get_or_create(
+        policy_key="phase3-execution-fixture-risk",
+        policy_version=1,
+        defaults={"effective_at": effective_at},
     )
 
 
@@ -211,6 +251,7 @@ class RecommendationTests(TestCase):
         )
         self.now = self.timeline.after(reference_run)
         self.snapshot = evidence(self.instrument, self.now)
+        activate_fixture_policy(self, self.now)
 
     def admit(self, recommendation):
         # Sizing and admission are part of the decision, so they are recorded at
@@ -233,7 +274,7 @@ class RecommendationTests(TestCase):
         self.assertEqual(first, second)
         self.assertEqual(provider.calls, 1)
         self.assertEqual(first.entry_level, Decimal("1.350000"))
-        self.assertEqual(first.contract_version, 3)
+        self.assertEqual(first.contract_version, 4)
         self.assertEqual(first.probability_up, Decimal("0.6200"))
         self.assertEqual(first.probability_neutral, Decimal("0.2300"))
         self.assertEqual(first.probability_down, Decimal("0.1500"))
@@ -254,9 +295,7 @@ class RecommendationTests(TestCase):
         self.assertEqual(first.cost_usd, Decimal("0.005400"))
         self.assertEqual(Forecast.objects.count(), forecast_count)
         self.assertTrue(
-            PaperLifecycleEvent.objects.filter(
-                recommendation=first, state=PaperLifecycleEvent.State.PENDING
-            ).exists()
+            first.lifecycle_events.filter(state="awaiting_portfolio_assessment").exists()
         )
         self.assertTrue(
             AuditEvent.objects.filter(
@@ -341,7 +380,8 @@ class RecommendationTests(TestCase):
             [rising_candle(value) for value in four],
             manifest={"test": "recommendation-future-four", "requests": []},
         )
-        self.assertIsNone(resolve_recommendation(recommendation))
+        with self.timeline.at(self.timeline.poll_instant(four, "D")):
+            self.assertIsNone(resolve_recommendation(recommendation))
 
         self.timeline.ingest(
             self.source,
@@ -381,17 +421,16 @@ class RecommendationTests(TestCase):
                 ask_high=Decimal("1.3604"),
             ),
         ]
-        store_ingestion(
+        run = self.timeline.ingest(
             self.source,
             self.instrument,
             "H1",
-            recommendation.generated_at - timedelta(hours=1),
-            first + timedelta(hours=2),
             candles,
-            {"test": "paper-target", "requests": []},
+            manifest={"test": "paper-target", "requests": []},
+            requested_from=recommendation.generated_at - timedelta(hours=1),
         )
-
-        result = resolve_paper_trade(recommendation)
+        with self.timeline.at(self.timeline.after(run)):
+            result = resolve_paper_trade(recommendation)
 
         self.assertEqual(result.outcome, PaperTradeResult.Outcome.TARGET)
         self.assertEqual(result.entry.execution_side, "ask")
@@ -427,12 +466,10 @@ class RecommendationTests(TestCase):
         first = open_market_hours(
             recommendation.generated_at, recommendation.generated_at + timedelta(days=4)
         )[0]
-        store_ingestion(
+        run = self.timeline.ingest(
             self.source,
             self.instrument,
             "H1",
-            recommendation.generated_at - timedelta(hours=1),
-            first + timedelta(hours=1),
             [
                 hourly_candle(
                     first,
@@ -444,10 +481,12 @@ class RecommendationTests(TestCase):
                     ask_low=Decimal("1.3392"),
                 )
             ],
-            {"test": "paper-ambiguous", "requests": []},
+            manifest={"test": "paper-ambiguous", "requests": []},
+            requested_from=recommendation.generated_at - timedelta(hours=1),
         )
 
-        result = resolve_paper_trade(recommendation)
+        with self.timeline.at(self.timeline.after(run)):
+            result = resolve_paper_trade(recommendation)
 
         self.assertEqual(result.outcome, PaperTradeResult.Outcome.INVALIDATED)
         self.assertTrue(result.details["same_candle_target_and_stop"])
@@ -626,6 +665,7 @@ class RecommendationDatabaseTests(TransactionTestCase):
         )
         now = timeline.after(reference_run)
         evidence(instrument, now)
+        activate_fixture_policy(self, now)
         decided_at = now + timedelta(seconds=1)
         with timeline.at(decided_at):
             recommendation = generate_recommendation(
@@ -676,7 +716,8 @@ class RecommendationDatabaseTests(TransactionTestCase):
             manifest={"test": "database-paper-result", "requests": []},
             requested_from=recommendation.generated_at - timedelta(hours=1),
         )
-        paper_result = resolve_paper_trade(recommendation)
+        with timeline.at(timeline.poll_instant([first_hour], "H1") + timedelta(seconds=1)):
+            paper_result = resolve_paper_trade(recommendation)
         with self.assertRaises(DatabaseError), transaction.atomic():
             PaperTradeEntry.objects.filter(pk=paper_result.entry_id).update(fill_price=0)
         with self.assertRaises(DatabaseError), transaction.atomic():

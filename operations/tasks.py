@@ -24,6 +24,10 @@ from research.services import (
 
 
 def execute_task(task_name, parameters):
+    if task_name == "forecast.reconcile_target_lifecycle":
+        from forecasts.operations import reconcile
+
+        return reconcile(parameters)
     if task_name == "market.ingest_oanda":
         return ingest_oanda(parameters)
     if task_name == "market.capture_oanda_terms":
@@ -98,6 +102,10 @@ def ingest_oanda(parameters):
     # Recheck decision eligibility after the provider round trip.
     instrument.refresh_from_db(fields=("active",))
     if instrument.active and run.status == IngestionRun.Status.SUCCEEDED and granularity == "D":
+        from forecasts.operations import enabled, reconcile
+
+        if enabled():
+            reconcile({"instrument": instrument.code})
         with task_stage("resolve"):
             resolve_due_forecasts(instrument)
             resolve_due_recommendations(instrument)
@@ -106,6 +114,12 @@ def ingest_oanda(parameters):
         and run.status == IngestionRun.Status.SUCCEEDED
         and granularity in {"H1", "D"}
     ):
+        from forecasts.operations import enabled
+
+        if enabled():
+            from forecasts.lifecycle import reconcile_lifecycle
+
+            reconcile_lifecycle(instrument)
         with task_stage("paper"):
             resolve_due_paper_trades(instrument)
             build_due_review_cohort(instrument=instrument)

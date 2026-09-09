@@ -19,7 +19,7 @@
   <div><span>Effective weekly clusters</span><strong>{% if experiment_assessment %}{{ experiment_assessment.effective_cluster_count }}{% else %}0{% endif %}</strong><small>{% if experiment_policy %}{{ experiment_policy.minimum_effective_clusters }} required{% else %}Rows are not independence{% endif %}</small></div>
   <div><span>Mean multiclass Brier</span><strong>{% if experiment_assessment.mean_brier_score is not None %}{{ experiment_assessment.mean_brier_score|floatformat:4 }}{% else %}—{% endif %}</strong><small>{% if experiment_assessment.brier_interval_low is not None %}95% cluster bound {{ experiment_assessment.brier_interval_low|floatformat:4 }}–{{ experiment_assessment.brier_interval_high|floatformat:4 }}{% else %}Lower is better{% endif %}</small></div>
 </div>
-{% if not health_ready %}<section class="sample-warning"><strong>Insufficient sample—do not infer skill.</strong><p>A raw total can never unlock this page by itself. Policy v1 requires 50 prospective recommendations, 180 elapsed days, 24 distinct UTC weekly dependence clusters, at least 90% resolution coverage, calibration error no greater than 0.15, and performance better than the uniform baseline.</p></section>{% endif %}
+{% if not health_ready %}<section class="sample-warning"><strong>Insufficient sample—do not infer skill.</strong><p>A raw total can never unlock this page by itself. The registered policy requires 50 prospective recommendations, 180 elapsed days, 24 distinct UTC weekly dependence clusters, at least 90% mature-target resolution coverage for v4, calibration error no greater than 0.15, and performance better than the uniform baseline and exact prospective mechanical controls for v4.</p></section>{% endif %}
 {% if experiment_era %}
 <section class="experiment-health-panel">
   <div class="panel-head"><div><p class="eyebrow">FROZEN EVALUATION CONTRACT</p><h2>Raw observations are not independent evidence</h2></div><span><code>{{ experiment_era.registration_sha256|slice:":10" }}</code></span></div>
@@ -27,10 +27,20 @@
     <article><span>Raw samples</span><strong>{% if experiment_assessment %}{{ experiment_assessment.raw_sample_count }}{% else %}0{% endif %} / {{ experiment_policy.minimum_raw_samples }}</strong><small>Every assigned recommendation</small></article>
     <article><span>Effective evidence</span><strong>{% if experiment_assessment %}{{ experiment_assessment.effective_cluster_count }}{% else %}0{% endif %} / {{ experiment_policy.minimum_effective_clusters }}</strong><small>All common-factor calls in one UTC week count together</small></article>
     <article><span>Elapsed time</span><strong>{% if experiment_assessment %}{{ experiment_assessment.observation_days }}{% else %}0{% endif %} / {{ experiment_policy.minimum_calendar_days }} days</strong><small>Cannot be accelerated with fixtures</small></article>
-    <article><span>Resolution coverage</span><strong>{% if experiment_assessment %}{{ experiment_assessment.resolution_coverage|floatformat:2 }}{% else %}0.00{% endif %} / {{ experiment_policy.minimum_resolution_coverage|floatformat:2 }}</strong><small>Missing outcomes remain in the denominator</small></article>
+    <article><span>Resolution coverage</span><strong>{% if experiment_assessment %}{{ experiment_assessment.resolution_coverage|floatformat:2 }}{% else %}0.00{% endif %} / {{ experiment_policy.minimum_resolution_coverage|floatformat:2 }}</strong><small>Mature missing outcomes remain in the denominator; immature v4 targets are excluded</small></article>
     <article><span>Calibration error</span><strong>{% if experiment_assessment.calibration_error is not None %}{{ experiment_assessment.calibration_error|floatformat:4 }}{% else %}—{% endif %}</strong><small>Maximum {{ experiment_policy.maximum_calibration_error|floatformat:2 }}</small></article>
     <article><span>Sharpness</span><strong>{% if experiment_assessment.sharpness is not None %}{{ experiment_assessment.sharpness|floatformat:4 }}{% else %}—{% endif %}</strong><small>Distance from uniform probabilities; not accuracy</small></article>
   </div>
+  {% if experiment_era.method.contract_version == 4 %}
+  <dl class="experiment-gates" aria-label="Prospective target populations">
+    <div><dt>Distinct targets</dt><dd>{{ experiment_assessment.metrics.populations.distinct_targets|default:0 }}</dd></div>
+    <div><dt>Immature targets</dt><dd>{{ experiment_assessment.metrics.populations.immature_targets|default:0 }}</dd></div>
+    <div><dt>Mature targets</dt><dd>{{ experiment_assessment.metrics.populations.mature_targets|default:0 }}</dd></div>
+    <div><dt>Scored mature targets</dt><dd>{{ experiment_assessment.metrics.populations.scored_mature_targets|default:0 }}</dd></div>
+    <div><dt>Missing mature targets</dt><dd>{{ experiment_assessment.metrics.populations.missing_data_mature_targets|default:0 }}</dd></div>
+    <div><dt>Paired targets</dt><dd>{{ experiment_assessment.metrics.mechanical_comparison.distinct_target_count|default:0 }}</dd></div>
+  </dl>
+  {% endif %}
   <div class="experiment-baselines"><div><span>Uniform baseline</span><strong>{% if experiment_assessment.uniform_baseline_brier is not None %}{{ experiment_assessment.uniform_baseline_brier|floatformat:4 }}{% else %}—{% endif %}</strong></div><div><span>Linked mechanical control</span><strong>{% if experiment_assessment.mechanical_baseline_brier is not None %}{{ experiment_assessment.mechanical_baseline_brier|floatformat:4 }}{% else %}Insufficient paired controls{% endif %}</strong></div><div><span>Method identity</span><strong>{{ experiment_era.method.requested_model }} · v{{ experiment_era.method.method_version }}</strong></div></div>
 </section>
 {% endif %}

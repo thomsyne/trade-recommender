@@ -22,8 +22,8 @@ from forecasts.models import (
 from market.models import AuditEvent
 
 POLICY_KEY = "dependence-aware-forecast-health"
-POLICY_VERSION = 1
-METHOD_KEY = "governed-fx-recommendation"
+POLICY_VERSION = 2
+METHOD_KEY = "governed-fx-recommendation-v4"
 UNIFORM_BRIER = Decimal("0.222222")
 SCORE_QUANTUM = Decimal("0.000001")
 RATE_QUANTUM = Decimal("0.000001")
@@ -45,12 +45,12 @@ def ensure_evaluation_policy():
         "minimum_resolution_coverage": Decimal("0.9000"),
         "maximum_calibration_error": Decimal("0.1500"),
         "confidence_level": Decimal("0.9500"),
-        "cluster_method": "utc-iso-week-common-factor-v1",
+        "cluster_method": "target-then-utc-week-common-factor-v2",
         "interval_method": "cluster-mean-hoeffding-v1",
         "primary_metric": "mean-multiclass-brier-v1",
         "baseline_contract": {
             "uniform": "one-third-each-outcome-v1",
-            "mechanical": "linked-tactical-control-when-comparable-v1",
+            "mechanical": "exact-prospective-target-shared-resolution-v2",
         },
         "guardrails": {
             "baseline_outperformance_required": True,
@@ -85,7 +85,8 @@ def ensure_forecast_method(provider):
         "output_schema_sha256": _digest(OUTPUT_SCHEMA),
         "input_contract_sha256": _digest(
             {
-                "contract": "governed-fx-recommendation-v3",
+                "contract": "governed-fx-recommendation-v4",
+                "target": "canonical-shared-resolution-v2",
                 "technical_context": "non-reconstructable-labels-v1",
                 "numeric_market_values_withheld": True,
             }
@@ -117,13 +118,21 @@ def ensure_forecast_method(provider):
 
 
 @transaction.atomic
-def ensure_champion_era(provider, *, starts_at=None):
+def ensure_champion_era(provider, *, starts_at=None, register=False):
     starts_at = starts_at or timezone.now()
     method = ensure_forecast_method(provider)
     policy = ensure_evaluation_policy()
     latest = ExperimentEra.objects.filter(kind=ExperimentEra.Kind.CHAMPION).first()
     if latest and latest.method_id == method.pk and latest.evaluation_policy_id == policy.pk:
+        if starts_at < latest.starts_at:
+            raise ValidationError("prospective_cutover_not_reached")
+        if register and starts_at != latest.starts_at:
+            raise ValidationError("era_registration_already_exists")
         return latest
+    if not register:
+        raise ValidationError("prospective_era_registration_required")
+    if starts_at < timezone.now():
+        raise ValidationError("retrospective_era_forbidden")
     material = {
         "kind": ExperimentEra.Kind.CHAMPION,
         "method": method.identity_sha256,
@@ -139,7 +148,7 @@ def ensure_champion_era(provider, *, starts_at=None):
         hypothesis_snapshot={},
         registration_sha256=_digest(material),
         starts_at=starts_at,
-        registered_at=starts_at,
+        registered_at=timezone.now(),
     )
     AuditEvent.objects.create(
         event_type="forecast.experiment_era_started",
@@ -197,7 +206,7 @@ def start_challenger_era(authorization, method, *, actor, starts_at=None):
         hypothesis_snapshot=snapshot,
         registration_sha256=_digest(material),
         starts_at=starts_at,
-        registered_at=starts_at,
+        registered_at=timezone.now(),
     )
     AuditEvent.objects.create(
         event_type="forecast.challenger_era_started",
@@ -241,13 +250,20 @@ def assign_recommendation(recommendation, method, *, assigned_at=None):
         )
     )
     samples = []
-    iso_year, iso_week, _ = recommendation.generated_at.isocalendar()
+    cluster_time = (
+        recommendation.target_occurrence.reference_candle.timestamp
+        if recommendation.target_occurrence_id
+        else recommendation.generated_at
+    )
+    iso_year, iso_week, _ = cluster_time.isocalendar()
     for era in eras:
         sample, _ = ExperimentSample.objects.get_or_create(
             era=era,
             recommendation=recommendation,
             defaults={
-                "issuance_cluster_key": recommendation.generated_at.isoformat(),
+                "issuance_cluster_key": recommendation.target_occurrence.identity_sha256
+                if recommendation.target_occurrence_id
+                else recommendation.generated_at.isoformat(),
                 "dependence_cluster_key": f"{iso_year}-W{iso_week:02d}",
                 "factor_keys": _factor_keys(recommendation),
                 "assigned_at": assigned_at,
@@ -272,15 +288,23 @@ def _mean(values):
     return (sum(values, start=Decimal(0)) / Decimal(len(values))).quantize(SCORE_QUANTUM)
 
 
-def _calibration_error(resolved):
+def _calibration_error(resolved, *, target_balanced=False):
     bins = defaultdict(list)
     clusters = defaultdict(list)
     for sample in resolved:
         clusters[sample.dependence_cluster_key].append(sample)
     for cluster_samples in clusters.values():
-        weight = Decimal(1) / Decimal(len(cluster_samples))
+        target_counts = defaultdict(int)
+        if target_balanced:
+            for sample in cluster_samples:
+                target_counts[sample.recommendation.target_occurrence_id] += 1
         for sample in cluster_samples:
             recommendation = sample.recommendation
+            weight = (
+                Decimal(1) / len(target_counts) / target_counts[recommendation.target_occurrence_id]
+                if target_balanced
+                else Decimal(1) / len(cluster_samples)
+            )
             probabilities = (
                 recommendation.probability_up,
                 recommendation.probability_neutral,
@@ -342,27 +366,43 @@ def _cluster_interval(values_by_cluster, *, confidence, value_range):
 
 
 def _sample_set(samples, assessed_at):
-    return _digest(
-        [
-            {
-                "sample": sample.pk,
-                "recommendation": sample.recommendation_id,
-                "resolution": (
-                    sample.recommendation.resolution.pk
-                    if hasattr(sample.recommendation, "resolution")
-                    and sample.recommendation.resolution.resolved_at <= assessed_at
-                    else None
-                ),
-                "paper_result": (
-                    sample.recommendation.paper_result.pk
-                    if hasattr(sample.recommendation, "paper_result")
-                    and sample.recommendation.paper_result.resolved_at <= assessed_at
-                    else None
-                ),
-            }
-            for sample in samples
-        ]
-    )
+    rows = []
+    for sample in samples:
+        rec = sample.recommendation
+        row = {"sample": sample.pk, "recommendation": sample.recommendation_id}
+        for key, fact in (
+            ("resolution", getattr(rec, "resolution", None)),
+            ("paper_result", getattr(rec, "paper_result", None)),
+        ):
+            row[key] = fact.pk if fact and fact.resolved_at <= assessed_at else None
+        if rec.contract_version == 4:
+            from forecasts.lifecycle import project_lifecycle
+            from forecasts.targets import target_endpoint
+            from market.quality import registered_candle_completion
+
+            target = rec.target_occurrence
+            control = rec.control_forecast
+            shared = getattr(target, "resolution", None) if target else None
+            control_resolution = getattr(control, "resolution", None) if control else None
+            row["target"] = target.identity_sha256 if target else None
+            row["mature"] = bool(
+                target
+                and registered_candle_completion(
+                    target_endpoint(target.reference_candle.timestamp, target.horizon_sessions), "D"
+                )
+                <= assessed_at
+            )
+            row["shared_resolution"] = (
+                shared.pk if shared and shared.resolved_at <= assessed_at else None
+            )
+            row["control_resolution"] = (
+                control_resolution.pk
+                if control_resolution and control_resolution.resolved_at <= assessed_at
+                else None
+            )
+            row["lifecycle"] = project_lifecycle(rec, as_of=assessed_at)
+        rows.append(row)
+    return _digest(rows)
 
 
 def _mechanical_comparison(resolved):
@@ -471,6 +511,10 @@ def _execution_metrics(samples, policy, assessed_at):
 
 def _assessment_values(era, samples, assessed_at):
     policy = era.evaluation_policy
+    if era.method.contract_version == 4:
+        from forecasts.populations import assessment_values
+
+        return assessment_values(era, samples, assessed_at)
     resolved = [
         sample
         for sample in samples
@@ -601,7 +645,9 @@ def _assessment_values(era, samples, assessed_at):
 def refresh_experiment_assessment(era, *, assessed_at=None, idempotency_key=None):
     assessed_at = assessed_at or timezone.now()
     samples = list(
-        era.samples.filter(recommendation__generated_at__lte=assessed_at).select_related(
+        era.samples.filter(
+            recommendation__generated_at__lte=assessed_at, assigned_at__lte=assessed_at
+        ).select_related(
             "era__evaluation_policy",
             "recommendation__instrument",
             "recommendation__evidence_snapshot",
@@ -614,6 +660,11 @@ def refresh_experiment_assessment(era, *, assessed_at=None, idempotency_key=None
         {
             "samples": _sample_set(samples, assessed_at),
             "assessment_date": assessed_at.date().isoformat(),
+            **(
+                {"assessment_cutoff": assessed_at.isoformat()}
+                if era.method.contract_version == 4
+                else {}
+            ),
         }
     )
     existing = ExperimentAssessment.objects.filter(

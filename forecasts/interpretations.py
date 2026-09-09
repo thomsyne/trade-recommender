@@ -238,11 +238,19 @@ def _current_reviews(member):
 
 
 def _evidence_projection(recommendation):
-    if recommendation.contract_version != 3:
-        raise ValidationError("Only rights-cleared recommendation contract v3 is interpretable")
+    if recommendation.contract_version not in {3, 4}:
+        raise ValidationError(
+            "Only rights-cleared recommendation contract v3 or v4 are interpretable"
+        )
     source = recommendation.input_payload
-    if source.get("contract") != "governed-fx-recommendation-v3":
-        raise ValidationError("Recommendation packet contract is not rights-cleared v3")
+    if (
+        not isinstance(source, dict)
+        or source.get("contract")
+        != f"governed-fx-recommendation-v{recommendation.contract_version}"
+    ):
+        raise ValidationError(
+            "Recommendation packet contract does not match its rights-cleared version"
+        )
     outcome = source.get("outcome_contract", {})
     if outcome.get("numeric_market_values_withheld") is not True:
         raise ValidationError("Recommendation packet did not withhold numeric market values")

@@ -105,6 +105,9 @@ class Command(BaseCommand):
             interval=3_600,
             enabled=bool(settings.OANDA_TOKEN and settings.OANDA_ACCOUNT_ID),
         )
+        from forecasts.schedules import seed_schedules
+
+        seed_schedules()
         call_command("seed_research", verbosity=options.get("verbosity", 1))
         self.stdout.write(self.style.SUCCESS("canonical production registry ready"))
 
