@@ -32,6 +32,11 @@ def execute_task(task_name, parameters):
         return ingest_oanda(parameters)
     if task_name == "market.capture_oanda_terms":
         return capture_oanda_terms()
+    if task_name == "market.compute_market_state":
+        from market.state.tasks import run_compute_market_state
+
+        with task_stage("market_state_compute"):
+            return run_compute_market_state(parameters)
     if task_name == "research.ingest_feed":
         policy = SourcePolicy.objects.get(slug=parameters["source"])
         with task_stage("research_fetch"):

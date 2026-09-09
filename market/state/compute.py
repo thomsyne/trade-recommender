@@ -220,11 +220,12 @@ def _prior_completed_month(instrument, information_cutoff):
     return result
 
 
-def compute_market_state(instrument, definition, information_cutoff, granularities):
-    """Compute and persist the descriptive snapshot for ``instrument`` at cutoff.
+def build_market_state(instrument, definition, information_cutoff, granularities):
+    """Build the canonical payload and input manifest without persisting.
 
-    Returns ``(snapshot, created)``. Idempotent: recomputing the same identity
-    returns the existing snapshot.
+    Returns ``(output_payload, manifest, manifest_sha256, data_quality_status)``.
+    This is the pure computation shared by the persisting path and the read-only
+    preview/dry-run command.
     """
     granularities = sorted(set(granularities))
     manifest, manifest_sha256 = build_input_manifest(instrument, granularities, information_cutoff)
@@ -250,12 +251,24 @@ def compute_market_state(instrument, definition, information_cutoff, granulariti
     }
     all_available = all(g["state"] == "available" for g in per_granularity.values())
     data_quality_status = "complete" if all_available else "partial"
+    return output_payload, manifest, manifest_sha256, data_quality_status
+
+
+def compute_market_state(instrument, definition, information_cutoff, granularities):
+    """Compute and persist the descriptive snapshot for ``instrument`` at cutoff.
+
+    Returns ``(snapshot, created)``. Idempotent: recomputing the same identity
+    returns the existing snapshot.
+    """
+    payload, manifest, manifest_sha256, data_quality_status = build_market_state(
+        instrument, definition, information_cutoff, granularities
+    )
     return persist_snapshot(
         instrument,
         definition,
         information_cutoff,
         manifest,
         manifest_sha256,
-        output_payload,
+        payload,
         data_quality_status=data_quality_status,
     )
