@@ -6,7 +6,9 @@ not a fact.
 ## Branch / base / status
 
 - Branch: `phase4/deterministic-market-state`
-- HEAD: `ede9407f02dc060d53d5e556f06da9429ec110da`
+- HEAD: `3abcecc` (design record + slices 1–8, engineer docs, slice-9 review
+  corrections, and the bounded-scan follow-up). Independent tester has re-reviewed
+  and returned **ACCEPT for PM review** (see docs/phase4/review-lessons.md).
 - Base / merge-base with `main`: `a3fbe6ce7fc08895c5696a2a25744f46e5d6e284`
 - `origin/main`: `a3fbe6ce7fc08895c5696a2a25744f46e5d6e284` (unchanged; verified by fetch)
 - Branch is **not pushed** (`git ls-remote --heads origin phase4/…` is empty)
@@ -89,9 +91,9 @@ Key assumptions worth adversarial attention:
 
 ## Test results (disposable test DB, market0027 accommodation, --keepdb)
 
-- Focused market-state suite (9 modules): **112 tests, 0 failures/errors**
+- Focused market-state suite (9 modules): **113 tests, 0 failures/errors**
   (`test_m15_live_granularity`, `test_market_state_{persistence,features,
-  structure,liquidity,orb_fvg,context,ops}`).
+  structure,liquidity,orb_fvg,context,ops}`) after the slice-9 corrections.
 - Cross-module regression incl. `test_observation_lineage`,
   `test_live_observations`, `test_schedule_integrity`, `operations.tests`:
   **all green** (largest single run 193 tests, 0 failures).
