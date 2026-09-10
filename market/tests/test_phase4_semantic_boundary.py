@@ -132,7 +132,9 @@ class SemanticBoundaryTests(TestCase):
         for sql, message in (
             ("UPDATE market_marketstatesnapshot SET output_sha256=repeat('0',64)", "immutable"),
             ("DELETE FROM market_marketstatesnapshot", "immutable"),
-            ("TRUNCATE market_marketstatesnapshot", "must not be truncated"),
+            # Reach the evidence guard even when later research tables reference
+            # snapshots; plain TRUNCATE now fails earlier on those foreign keys.
+            ("TRUNCATE market_marketstatesnapshot CASCADE", "must not be truncated"),
         ):
             with (
                 self.subTest(sql=sql),

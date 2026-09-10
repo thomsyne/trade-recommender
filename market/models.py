@@ -1308,3 +1308,40 @@ class MarketStateSnapshot(ImmutableModel):
 
     def __str__(self):
         return f"{self.instrument_id}:{self.definition_id}@{self.information_cutoff.isoformat()}"
+
+
+class StrategyDefinition(ImmutableModel):
+    """Offline preregistration only; never a promotion or execution authority."""
+
+    strategy = models.CharField(max_length=100, unique=True)
+    body = models.JSONField()
+    body_sha256 = models.CharField(max_length=64, unique=True)
+    registered_at = models.DateTimeField(auto_now_add=True)
+
+
+class StrategyEvaluation(ImmutableModel):
+    """One attributed calculation from an exact immutable descriptor snapshot."""
+
+    definition = models.ForeignKey(StrategyDefinition, on_delete=models.PROTECT)
+    snapshot = models.ForeignKey(MarketStateSnapshot, on_delete=models.PROTECT)
+    previous = models.ForeignKey("self", on_delete=models.PROTECT, null=True)
+    evidence = models.JSONField()
+    evidence_sha256 = models.CharField(max_length=64)
+    output = models.JSONField()
+    output_sha256 = models.CharField(max_length=64)
+    identity = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class StrategySimulation(ImmutableModel):
+    """Offline modeled outcome, separately stored from decision-time evidence."""
+
+    evaluation = models.ForeignKey(StrategyEvaluation, on_delete=models.PROTECT)
+    outcome_snapshot = models.ForeignKey(MarketStateSnapshot, on_delete=models.PROTECT)
+    attempt_key = models.CharField(max_length=64, unique=True)
+    intent = models.JSONField()
+    outcome_evidence = models.JSONField()
+    output = models.JSONField()
+    output_sha256 = models.CharField(max_length=64)
+    identity = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
