@@ -20,7 +20,6 @@ from django.db import Error, connection, transaction
 from django.test import TestCase
 
 from market.models import MarketStateDefinition, MarketStateSnapshot
-from market.services import store_ingestion
 from market.state.canonical import (
     NonCanonicalValue,
     canonical_json,
@@ -44,6 +43,7 @@ from market.state.definitions import (
 from market.state.manifest import build_input_manifest, eligible_observations
 from market.state.snapshots import DeterminismViolation, persist_snapshot
 from market.tests.factories import candle
+from market.tests.legacy_state_evidence import store_ingestion
 from market.tests.test_live_observations import make_market
 
 MON_0800 = datetime(2026, 1, 5, 8, 0, tzinfo=UTC)  # Monday, market open, H1-aligned

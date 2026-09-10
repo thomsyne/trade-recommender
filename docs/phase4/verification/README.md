@@ -1,52 +1,66 @@
-# Local correction evidence
+# Final-boundary verification — not acceptance
 
-Synthetic, disposable PostgreSQL evidence only. No provider, production, AWS,
-deployment, or schedule activation was involved. These artifacts are engineering
-measurements, not acceptance or a production capacity claim.
+Descriptor 0.11.0 / migration 0036 continues the intentional uncommitted work from
+[the implementation thread](https://ampcode.com/threads/T-01a08a15-98ec-77a4-a8b6-0bcb3eb67ac6).
+Starting HEAD was
+[`817d5ef`](https://github.com/thomsyne/trade-recommender/commit/817d5ef1cac2de495310eed46e1baddf8b28806e),
+on `phase4/deterministic-market-state`. Acceptance remains superseded pending
+fresh independent review. This is engineering verification, not rollout approval.
 
-- `performance.json`: actual SQL, EXPLAIN ANALYZE/BUFFERS, 200 and 3,501 H1
-  observations, build and persistence/verification query counts and latency,
-  canonical JSON bytes, PostgreSQL heap/index/TOAST and column storage.
-- `research-performance.json`: 3,501 H1 observations, 201 event vintages and
-  200 macro observation revisions. Includes the reschedule-out-of-window case.
-- `preservation.json`: table row counts and fingerprints before/after applying
-  0034 to a fixture populated by the starting committed implementation.
-- `protected.json`: source-file SHA-256 and an asymmetric 28-candle technical
-  output fingerprint, compared at exact main base, starting commit, and correction.
-- `differential.json`: exact failing identities and normalized exception causes
-  from `manage.py test market operations forecasts --keepdb --noinput -v 2` on
-  equivalently bootstrapped databases. Repeated teardown errors are retained per
-  identity; raw failure counts are not unique test counts.
-- `concurrency.json`: six non-superuser writers, one snapshot and one created
-  result; all outputs equal.
-- `checks.txt`: test/check output, migration accommodation and reversal evidence,
-  protected checks, cleanup and final Git/remote verification.
-- `changed-files.txt`: correction paths relative to the starting implementation.
-- `*.py.txt`: the synthetic measurement/preservation probes, retained as text for
-  reproducibility. Run only in an explicitly created disposable database through
-  a sanitized environment as described below; these scripts insert fixtures.
+## Evidence and reproduction
 
-All database bootstraps used UTF-8/template0, migrated normally to market 0026,
-faked **only** the documented data-dependent market 0027, then migrated the
-remaining graph normally. This is not an unqualified fresh-install claim.
-The last performance database was cloned from the already normally migrated,
-emptied disposable test database; it did not reuse prior performance fixtures.
+`results.json` records commands, outcomes, differential identity/cause checksums,
+populated preservation, protections, cleanup and limitations. `sha256.json`
+inventories this compact artifact set. Raw/gzip logs, duplicate inventories and
+machine-path output have been removed. Historical evidence remains retrievable
+from the starting commit, without rewriting Git history.
 
-To reproduce the probes, bootstrap a new private UTF-8 PostgreSQL cluster and
-database using the runbook's 0027 accommodation. Run from the repository root,
-with `env -i`, an explicit PATH/HOME, `DJANGO_SETTINGS_MODULE=config.settings`,
-and explicit `POSTGRES_HOST` (the new Unix socket), `POSTGRES_PORT`,
-`POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_CONN_MAX_AGE=0`. Invoke the repository's
-`.venv/bin/python` on `performance.py.txt`, then `concurrency.py.txt`, then
-`research_performance.py.txt`, redirecting stdout to new artifacts. Use a new DB
-for each repeat; the probes intentionally create unique fixture identities.
-For preservation, bootstrap the starting checkout, run `preservation.py.txt seed`,
-migrate forward with the correction checkout and compare `preservation.py.txt
-inspect`. Never substitute an existing unrelated database or source `.env.local`.
+Run `bash docs/phase4/verification/verify.sh.txt` from the repository root with
+`PG_BIN` pointing to PostgreSQL 15 executables. It creates its own UTF-8,
+socket-only cluster and removes it on exit. It never uses an existing database
+or `.env.local`. It retains output only when `RESULT_DIR` explicitly names a new
+directory. Tests use synthetic fixtures and mocked providers.
 
-RSS values cover the whole Python process, including synthetic ingestion. They
-are not isolated snapshot working-set measurements. WAL was not measured because
-other disposable databases shared the cluster. Production scheduler load,
-multi-instrument throughput, retention growth, and production capacity remain
-unmeasured. PostgreSQL plans are planner choices for these fixtures, not a promise
-that every selectivity/revision density uses the same plan.
+The bootstrap normally migrates to market0026, fakes **only** the known
+data-dependent0027, then normally installs the rest. This is not a fresh-install
+certification. PostgreSQL15.5 was exercised; PostgreSQL17 was not.
+
+`test_phase4_final_boundary` contains real non-superuser, multi-connection races
+with lock/statement/event/future timeouts. Candle insertion first is checked
+through ORM re-selection and rejection of stale raw SQL; snapshot first retains
+late evidence only for later cutoff. Both research transaction orders reject
+semantic edits while allowing editorial edits. Post-commit integrity is checked.
+Historical fixtures alone use `legacy_state_evidence`; it disables only the new
+recording trigger during synthetic legacy insertion. New-evidence/race tests
+never use that helper.
+
+For populated preservation the script archives exact starting HEAD, seeds its
+0035 schema using `preservation.py.txt`, then compares all application rows
+through 0035→0036→0035→0036 using `final_preservation.py.txt`. The new column is
+excluded from historical row hashes but independently asserted NULL. Migration
+history is excluded. Reversal with new recording facts is separately tested to
+refuse before discarding evidence.
+
+The exact historical test ordering is
+`test_zzzzzzzz_live_observation_migration` followed by
+`test_observation_lineage.SqlPythonParityTests`, in one command, with no parity
+setup repair. Focused, affected, research and broad commands are in the script.
+
+Compare new logs with retained verified base logs using
+`python docs/phase4/verification/eight/compare_broad.py.txt BASE_LOG FINAL_LOG`.
+It compares every exact failing identity, terminal exception cause and occurrence
+count; only memory addresses are normalized. Results retain compact digests and
+differences rather than repeating hundreds of identical irreversible-migration
+tracebacks. A broad suite with inherited failures is **not green**.
+
+Protection evidence compares the 92-file historical fingerprint inventory from
+the starting commit against current bytes. Forecasts, technicals, settings,
+canonical seed and schedule sources remain unchanged. Disposable schedule
+inventory is not evidence about uninspected production schedules. No M15 or
+descriptor activation, forecast consumer, provider access, production/AWS/OANDA
+access, push, PR or deployment is authorized or performed.
+
+Production capacity, RSS/WAL, PostgreSQL17 and exceptional-holiday calendars are
+unverified. Historical performance artifacts are not republished as current
+measurements. SQL does not duplicate every market formula; Python integrity
+replays formulas. Superuser trigger bypass is outside runtime enforcement.

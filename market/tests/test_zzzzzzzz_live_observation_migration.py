@@ -229,9 +229,13 @@ class LiveObservationMigrationTests(HistoricalDatabaseMixin, TransactionTestCase
             self.assertEqual(cursor.fetchone()[0], 3)
 
     def record_live_observation(self):
-        """One provider observation through the real ingestion path at the 0028 schema."""
+        """One attested observation using the actual historical schema.
+
+        Current ingestion targets 0036 and must not be run against a 0028 table
+        missing its recording column. Current ingestion has separate coverage.
+        """
         from market.models import SourceRegistry
-        from market.services import store_ingestion
+        from market.services import candle_content_sha256
         from market.tests.factories import candle
 
         instrument = instrument_at_0028(
@@ -245,16 +249,60 @@ class LiveObservationMigrationTests(HistoricalDatabaseMixin, TransactionTestCase
             retention_policy="migration test",
         )
         start = datetime(2026, 1, 5, 8, tzinfo=UTC)
-        run = store_ingestion(
-            source,
-            instrument,
-            "H1",
-            start,
-            start + timedelta(hours=1),
-            [candle(start)],
-            {"batch": "ledger", "requests": []},
+        item = candle(start)
+        observed = start + timedelta(hours=2)
+        run = IngestionRun.objects.create(
+            source=source,
+            instrument=instrument,
+            granularity="H1",
+            requested_from=start,
+            requested_to=observed,
+            parameters={},
+            request_manifest_hash="historical-ledger",
+            status="running",
         )
-        self.assertEqual(run.status, "succeeded")
+        values = {
+            name: getattr(item, name)
+            for name in (
+                "complete",
+                "volume",
+                "bid_open",
+                "bid_high",
+                "bid_low",
+                "bid_close",
+                "ask_open",
+                "ask_high",
+                "ask_low",
+                "ask_close",
+            )
+        }
+        digest = candle_content_sha256(instrument.code, "H1", item)
+        frozen = Candle.objects.create(
+            instrument=instrument,
+            ingestion_run=run,
+            granularity="H1",
+            timestamp=start,
+            provenance="observed",
+            content_sha256=digest,
+            observed_at=observed,
+            **values,
+        )
+        historical = MigrationExecutor(connection).loader.project_state(AFTER).apps
+        historical.get_model("market", "CandleObservation").objects.create(
+            instrument_id=instrument.pk,
+            ingestion_run_id=run.pk,
+            source_id=source.pk,
+            candle_id=frozen.pk,
+            granularity="H1",
+            timestamp=start,
+            interval_end=start + timedelta(hours=1),
+            observed_at=observed,
+            content_sha256=digest,
+            kind="initial",
+            revision=1,
+            differing_fields=[],
+            **values,
+        )
 
     def assert_schema_untouched_at_0028(self):
         self.assertEqual(trigger_names(), set(PROTECTIONS))
@@ -627,7 +675,10 @@ class LineageRenumberMigrationTests(HistoricalDatabaseMixin, TransactionTestCase
         MigrationExecutor(connection).migrate(AFTER_0029)
 
         chains = {}
-        for observation in CandleObservation.objects.order_by("id"):
+        historical = MigrationExecutor(connection).loader.project_state(AFTER_0029).apps
+        for observation in historical.get_model("market", "CandleObservation").objects.order_by(
+            "id"
+        ):
             chains.setdefault(observation.candle_id, []).append(observation)
         candle_chain = chains.get(Candle.objects.get(timestamp=START_TS).pk)
         self.assertEqual(

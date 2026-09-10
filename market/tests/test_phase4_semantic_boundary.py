@@ -47,8 +47,8 @@ class SemanticBoundaryTests(TestCase):
 
         from market.state.compute import DESCRIPTOR_DEFINITION
 
-        migration = import_module("market.migrations.0035_market_state_evidence_guards")
-        self.assertEqual(migration.DESCRIPTOR_0100_SHA256, identity_digest(DESCRIPTOR_DEFINITION))
+        migration = import_module("market.migrations.0036_market_state_recording_boundary")
+        self.assertIn(identity_digest(DESCRIPTOR_DEFINITION), migration.NEW_FUNCTIONS)
 
     def setUp(self):
         self.instrument, _ = make_market()
@@ -169,7 +169,7 @@ class SemanticBoundaryTests(TestCase):
 
         from market.state.snapshots import persist_snapshot
         from market.tests.factories import candle
-        from market.tests.test_live_observations import ingest
+        from market.tests.legacy_state_evidence import ingest
         from market.tests.test_market_state_context import event, policy
 
         # Historical contradiction: valid at insertion, then backdated evidence
@@ -210,7 +210,7 @@ class SemanticBoundaryTests(TestCase):
         from unittest.mock import patch
 
         from market.tests.factories import candle
-        from market.tests.test_live_observations import ingest
+        from market.tests.legacy_state_evidence import ingest
 
         _, source = make_market()
         start = self.cutoff - timedelta(hours=4)

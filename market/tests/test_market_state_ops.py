@@ -10,7 +10,6 @@ from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
 
 from market.models import MarketStateDefinition, MarketStateSnapshot
-from market.services import store_ingestion
 from market.state.compute import (
     DESCRIPTOR_DEFINITION,
     DESCRIPTOR_KEY,
@@ -21,6 +20,7 @@ from market.state.definitions import register_definition
 from market.state.integrity import verify_snapshots
 from market.state.tasks import run_compute_market_state
 from market.tests.factories import candle
+from market.tests.legacy_state_evidence import store_ingestion
 from market.tests.test_live_observations import make_market
 
 MON_0800 = datetime(2026, 1, 5, 8, 0, tzinfo=UTC)

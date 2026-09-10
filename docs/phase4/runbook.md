@@ -23,7 +23,7 @@ records, and none calls a provider.
 | `market/state/integrity.py` | Read-only semantic-integrity verification |
 | `market/state/tasks.py` | Durable per-instrument calculation task (unscheduled) |
 
-The current descriptor definition is `market-state-descriptor@0.10.0`
+The current descriptor definition is `market-state-descriptor@0.11.0`
 (`compute.DESCRIPTOR_DEFINITION`); the version is bumped whenever the feature set,
 a threshold or a lookback changes, so every snapshot binds the exact algorithm
 versions. Bounded per-granularity lookbacks (`compute.LOOKBACKS`) are pinned in
@@ -139,6 +139,10 @@ Postgres credentials. Only one test process may use a keepdb at a time.
 - **Recovery default**: leave immutable evidence in place and deploy a separately
   approved forward correction. Never migrate a populated production database
   backward merely to disable the feature.
+- **0036 reversal** to `market 0035` preserves populated legacy rows but refuses
+  if any observation has non-NULL `recorded_at`. Do not clear recording facts or
+  disable the refusal to force a downgrade. Pair a permitted legacy-only downgrade
+  with compatible code; older snapshots are not re-certified under another version.
 - **0034 reversal** removes only its prospective semantic triggers/functions;
   `migrate market 0033` retains every definition/snapshot and the M15 SQL mirrors.
 - **0031 reversal** occurs only when targeting `market 0030`, not `0031`.
@@ -169,7 +173,8 @@ and authorize nothing. Local synthetic performance numbers are in
 
 ## Correction verification and limitations
 
-See [verification](verification/README.md) for measured SQL plans and storage.
+See [verification](verification/README.md) for current checks and historical provenance.
+The following performance measurements predate 0036 and are not current benchmarks.
 The 200/3,501-observation probes include build, persisted replay/verification,
 payload/manifest bytes, old-cutoff plans and PostgreSQL relation sizes. A separate
 probe includes 201 event vintages and 200 macro observations. Process RSS includes
@@ -189,7 +194,28 @@ basic prerequisites and research existence/availability. Full formula replay is
 an application/integrity check, not a duplicate SQL implementation. The existing
 superuser trigger-bypass caveat remains; no new production privilege is required.
 
-## Eight-finding correction verification (0035)
+## Final-boundary verification (0036)
+
+Design §19 and the [current evidence](verification/README.md) govern 0.11.0.
+Use the retained disposable-only script for focused, concurrent, affected,
+research, broad, populated migration and historical→M15 parity checks. Baseline
+comparisons must match exact test commands, identities, causes and multiplicities.
+
+New candle evidence receives DB-owned `recorded_at` under the shared series lock;
+NULL on legacy evidence means unknown, not zero or a fabricated historical time.
+Cutoff eligibility uses both source observation and recording availability.
+Late arrival is retained, not rejected or retroactively inserted into old snapshots.
+Persisted cutoffs must not exceed database time after lock acquisition. Durable
+future-cutoff work fails with `future_market_state_cutoff`; retry no earlier than
+the requested time, without silently moving its cutoff. READ COMMITTED is required.
+For multi-series transactions acquire the full sorted series set before writing.
+
+Policy/series semantic fields are immutable from registration, including before
+their first reference; register a new semantic identity rather than editing one.
+Editorial/acquisition settings remain editable. No scheduling or activation follows
+from passing tests. Acceptance remains superseded pending independent review.
+
+## Historical eight-finding correction verification (0035)
 
 Design §18 governs the 0.10.0 changes. New evidence lives in
 [`verification/eight`](verification/eight/README.md); earlier measurements above

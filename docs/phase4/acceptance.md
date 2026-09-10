@@ -1,5 +1,10 @@
 # Phase 4 — acceptance superseded
 
+Descriptor 0.11.0 and migration 0036 add the final recording/concurrency and
+prerequisite-chronology corrections. The [current handoff](handoff.md) and
+[verification](verification/README.md) are engineering evidence only.
+**Acceptance remains superseded pending independent review.**
+
 Descriptor 0.10.0 and migration 0035 are the engineering response to the
 [eight-finding independent review](https://ampcode.com/threads/T-01a08985-818d-7698-aa9c-f843744479db).
 They are **not self-accepted**. Fresh independent re-review of the committed

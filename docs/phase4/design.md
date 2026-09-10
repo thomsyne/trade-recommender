@@ -2,7 +2,7 @@
 
 **Acceptance is superseded and pending independent review.** This document
 contains requirements and historical design notes, not a certification of their
-implementation. The correction contracts in §17–18 and the current handoff supersede
+implementation. The correction contracts in §17–19 and the current handoff supersede
 the earlier completion claims in §16.5–16.6.
 
 Status: **living design record** (mandatory preliminary artifact, authored before
@@ -766,3 +766,50 @@ work; 0034 and historical records remain unchanged.
 The earlier FVG minima, registered succession, monthly completeness, session
 coverage, preview read-only behavior, task cutoff/concurrency, M15 parity without
 repair, schedule isolation, and prohibition on forecast consumption remain intact.
+
+## 19. Retrospective evidence and full prerequisite chronology (0.11.0)
+
+Migration 0036 adds nullable `CandleObservation.recorded_at`. NULL explicitly
+means that the system recording boundary of a pre-migration row is unknown;
+no historical rows or source `observed_at` values are backfilled. For new rows,
+the database assigns recording availability after acquiring the series lock,
+ignoring any caller value. Effective availability is the later of source
+observation and system recording availability. It is never before database
+first-known time, or at/before a previously persisted instrument cutoff. The
+append-only ledger retains late arrivals; they become eligible only later.
+
+Snapshots are retrospective/current evidence records, never speculative.
+The cutoff must be <= `clock_timestamp()` after acquiring synchronization.
+Future durable work fails with `future_market_state_cutoff`; retry at/after the
+cutoff, without changing the occurrence's requested cutoff. ORM computation
+locks before freezing, and persistence validates again while holding the locks.
+SQL INSERT acquires the same locks before semantic checks and reselects eligible
+evidence. READ COMMITTED is required: older transaction snapshots cannot provide
+the post-wait visibility contract, so other isolation levels fail closed.
+
+The lock identity is the existing `live-candles:<instrument-id>:<granularity>`
+advisory transaction lock. Snapshot writers acquire the sorted union of requested
+granularities and M15/D/W, then the snapshot identity lock. Ingestion takes the
+same series lock before revision selection; raw observation INSERT takes it
+before lineage validation. Writers hold locks through commit. Multi-series
+callers must acquire their full sorted input set before writes.
+
+Research policy `(source, jurisdiction, currency)` and series
+`(source_policy, code, indicator, unit, transformation)` are immutable from
+registration, not from a racy first reference. Editorial/acquisition settings
+remain editable. This removes the first-consumption lock race without adding
+parent-lock ordering to the research ingestion path.
+
+Liquidity event knowledge time includes the complete left/right pivot window,
+event confirmation and, for normalized sweeps, the breach-time ATR inputs and
+previous close. Physical formation does not move when a prerequisite arrives
+late. Consolidation uses range-end ATR, not a later tail candle's ATR. Range,
+breakout, failure and retest availability take the maximum of their actual
+range/ATR/lifecycle prerequisites. Physical times are separate `formed_at`,
+`breakout_at`, `failure_at`, and `retest_formed_at`; `failed_at`/`retest_at` remain
+knowledge times. An unrelated late suffix does not delay an earlier event.
+
+0036 reverses over populated legacy data without changing any row. Once new
+non-NULL recording facts exist, reversal refuses before removing the column or
+guards: rolling back code must not erase system evidence. Unsupported historical
+descriptor versions remain diagnostic records, not rewritten or re-certified.

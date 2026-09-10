@@ -275,6 +275,9 @@ def consolidation_state(
     tail = bars[-tail_len:]
     if not contiguous(base + tail):
         return _unavailable(CONSOLIDATION_V, "missing_registered_interval")
+    base_end = len(bars) - tail_len - 1
+    prerequisites = bars[max(0, base_end - max(window - 1, ATR_PERIOD)) : base_end + 1]
+    available_at = max(b.available_at for b in prerequisites)
     high = max(b.high for b in base)
     low = min(b.low for b in base)
     if high - low > ceiling * atr:
@@ -294,27 +297,37 @@ def consolidation_state(
         "in_consolidation": breakout is None,
         "range_low": format_decimal(low),
         "range_high": format_decimal(high),
+        "formed_at": _iso(base[-1].end or base[-1].timestamp),
+        "available_at": _iso(available_at),
     }
     if breakout is not None:
         after = tail[breakout_index + 1 :]
         boundary = high if breakout == "up" else low
         result["breakout"] = breakout
+        breakout_bar = tail[breakout_index]
+        result["breakout_at"] = _iso(breakout_bar.end or breakout_bar.timestamp)
+        available_at = max(available_at, *(b.available_at for b in tail[: breakout_index + 1]))
+        result["breakout_available_at"] = _iso(available_at)
         failed = False
         retest = False
         for bar in after:
+            available_at = max(available_at, bar.available_at)
             if (breakout == "up" and bar.close <= high) or (
                 breakout == "down" and bar.close >= low
             ):
                 failed = True
-                result["failed_at"] = _iso(bar.available_at)
+                result["failure_at"] = _iso(bar.end or bar.timestamp)
+                result["failed_at"] = _iso(available_at)
                 break
             elif breakout == "up" and bar.low <= boundary and bar.close > high:
                 # Touched the broken boundary from above but held beyond it.
                 retest = True
-                result.setdefault("retest_at", _iso(bar.available_at))
+                result.setdefault("retest_formed_at", _iso(bar.end or bar.timestamp))
+                result.setdefault("retest_at", _iso(available_at))
             elif breakout == "down" and bar.high >= boundary and bar.close < low:
                 retest = True
-                result.setdefault("retest_at", _iso(bar.available_at))
+                result.setdefault("retest_formed_at", _iso(bar.end or bar.timestamp))
+                result.setdefault("retest_at", _iso(available_at))
         result["failed"] = failed
         result["retest"] = retest
     return result
@@ -340,5 +353,10 @@ def structure_context(bars, atr, instrument_code, timeframe):
         ),
         "equal_levels": equal_levels(bars, atr),
         "displacement_candidates": displacement_candidates(bars),
-        "consolidation": consolidation_state(bars, atr),
+        "consolidation": consolidation_state(
+            bars,
+            atr_at_index(bars, len(bars) - FAILED_BREAKOUT_BARS - 2)
+            if len(bars) > FAILED_BREAKOUT_BARS + 1
+            else None,
+        ),
     }

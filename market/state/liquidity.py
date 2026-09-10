@@ -17,6 +17,7 @@ from decimal import Decimal
 from market.state.canonical import format_decimal
 from market.state.features import (
     ATR_PERIOD,
+    SWING_LEFT,
     SWING_RIGHT,
     _by_kind,
     atr_at_index,
@@ -146,9 +147,10 @@ def liquidity_context(bars, atr, instrument_code, timeframe):
     if highs:
         pivot = highs[-1]
         available_at = max(
-            b.available_at for b in bars[pivot.index : pivot.index + SWING_RIGHT + 1]
+            b.available_at
+            for b in bars[max(0, pivot.index - SWING_LEFT) : pivot.index + SWING_RIGHT + 1]
         )
-        after = [b for b in bars[pivot.index + SWING_RIGHT + 1 :] if b.timestamp >= available_at]
+        after = bars[pivot.index + SWING_RIGHT + 1 :]
         level_id = _zone_id(pivot.price, pivot.price, instrument_code, timeframe)
         result["resistance_level"] = format_decimal(pivot.price)
         result["sweep_above"] = detect_sweep(
@@ -157,12 +159,18 @@ def liquidity_context(bars, atr, instrument_code, timeframe):
         result["acceptance_above"] = detect_acceptance(
             after, atr, pivot.price, "above", level_id=level_id
         )
+        for name in ("sweep_above", "acceptance_above"):
+            if result[name]:
+                result[name]["available_at"] = _iso(
+                    max(available_at, datetime.fromisoformat(result[name]["available_at"]))
+                )
     if lows:
         pivot = lows[-1]
         available_at = max(
-            b.available_at for b in bars[pivot.index : pivot.index + SWING_RIGHT + 1]
+            b.available_at
+            for b in bars[max(0, pivot.index - SWING_LEFT) : pivot.index + SWING_RIGHT + 1]
         )
-        after = [b for b in bars[pivot.index + SWING_RIGHT + 1 :] if b.timestamp >= available_at]
+        after = bars[pivot.index + SWING_RIGHT + 1 :]
         level_id = _zone_id(pivot.price, pivot.price, instrument_code, timeframe)
         result["support_level"] = format_decimal(pivot.price)
         result["sweep_below"] = detect_sweep(
@@ -171,6 +179,11 @@ def liquidity_context(bars, atr, instrument_code, timeframe):
         result["acceptance_below"] = detect_acceptance(
             after, atr, pivot.price, "below", level_id=level_id
         )
+        for name in ("sweep_below", "acceptance_below"):
+            if result[name]:
+                result[name]["available_at"] = _iso(
+                    max(available_at, datetime.fromisoformat(result[name]["available_at"]))
+                )
     for name in ("sweep_above", "sweep_below"):
         event = result.get(name)
         if event:

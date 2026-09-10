@@ -877,6 +877,7 @@ class CandleObservation(ImmutableModel):
     content_sha256 = models.CharField(max_length=64)
     differing_fields = models.JSONField(default=list)
     observed_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(null=True, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

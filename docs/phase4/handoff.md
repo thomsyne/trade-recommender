@@ -1,6 +1,33 @@
 # Phase 4 — correction handoff, not acceptance
 
-## Current: eight-finding response, descriptor 0.10.0
+## Current: final recording boundary, descriptor 0.11.0
+
+**Acceptance remains superseded pending fresh independent review.** Migration
+0036 and this continuation preserve the intentional prior worktree. The four
+engineering dispositions are:
+
+| Finding | Disposition and evidence |
+|---|---|
+| System first-known time | DB-owned nullable `recorded_at`; no legacy backfill. Caller backdating fails through ORM and raw SQL. Late evidence is retained for later cutoffs. |
+| Ingestion/snapshot race and future cutoff | Shared per-series transaction locks; READ COMMITTED; non-future database cutoff. Both transaction orders, ORM reselection and stale SQL rejection pass with non-superuser connections and timeouts; committed snapshots pass integrity. |
+| Research first-consumption race | Policy/series semantic identity is immutable from registration. Both concurrent orders reject semantic updates; editorial fields remain editable and committed evidence remains valid. |
+| Liquidity/consolidation knowledge time | Full actual pivot/ATR/range/lifecycle prerequisites determine availability; physical times remain separate. Before/equality/after and irrelevant-prefix/suffix checks pass, including persisted integrity replay. |
+
+The 187-test focused Phase4 suite and exact 10-test historical migration→M15
+parity sequence pass on PostgreSQL15.5 UTF-8. Populated 0035→0036→0035→0036
+preserves 549 rows across 110 tables; no system timestamp is fabricated. Reversal
+refuses once new recording facts exist. All nine original baseline failing test
+identities (eight failures/one missing-field error) now pass. The sweep baseline
+expectation was corrected to the same-bar reclaim, not a later unused candle.
+
+See [compact verification](verification/README.md) and its result manifest for
+exact commands, broad/research differential, fingerprints, resource cleanup and
+final Git checks. Broad suites are not green; inherited failures are not waived.
+No activation, forecast consumer, external provider/production access or push is
+part of this work. The older sections below are historical; their removed raw
+artifacts remain in Git at the starting checkpoint, not in the current tree.
+
+## Historical eight-finding response, descriptor 0.10.0
 
 **Acceptance remains superseded pending fresh independent re-review.** The
 following engineering dispositions replace the historical 0.9.0 residuals below.

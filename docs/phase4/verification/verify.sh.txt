@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Run from the repository root. Only synthetic, task-owned local resources.
+set -eu
+: "${PG_BIN:?Set PG_BIN to the PostgreSQL executable directory}"
+ROOT=$(pwd)
+PY="$ROOT/.venv/bin/python"
+START=817d5ef1cac2de495310eed46e1baddf8b28806e
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/p4-verify.XXXXXX")
+PORT=55490
+if [ -n "${RESULT_DIR:-}" ]; then mkdir "$RESULT_DIR"; fi
+cleanup() {
+    if "$PG_BIN/pg_ctl" -D "$SCRATCH/data" status >/dev/null 2>&1; then
+        "$PG_BIN/pg_ctl" -D "$SCRATCH/data" -m fast -w stop || return 1
+    fi
+    if [ -n "${RESULT_DIR:-}" ]; then
+        for file in "$SCRATCH"/*.log "$SCRATCH"/*.json; do
+            [ ! -f "$file" ] || cp "$file" "$RESULT_DIR/"
+        done
+    fi
+    rm -rf "$SCRATCH"
+}
+trap cleanup EXIT
+"$PG_BIN/initdb" -D "$SCRATCH/data" -U p4admin -A trust -E UTF8 --locale=C >"$SCRATCH/init.log"
+"$PG_BIN/pg_ctl" -D "$SCRATCH/data" -l "$SCRATCH/server.log" \
+    -o "-k $SCRATCH -p $PORT -h ''" -w start
+run() {
+    env -i PATH=/usr/bin:/bin HOME="$SCRATCH" DJANGO_SETTINGS_MODULE=config.settings \
+        POSTGRES_HOST="$SCRATCH" POSTGRES_PORT="$PORT" POSTGRES_USER=p4admin \
+        POSTGRES_DB="$DB" POSTGRES_CONN_MAX_AGE=0 "$PY" "$@"
+}
+bootstrap() {
+    "$PG_BIN/createdb" -h "$SCRATCH" -p "$PORT" -U p4admin -T template0 "$DB"
+    run manage.py migrate market 0026 --noinput
+    run manage.py migrate market 0027 --fake --noinput
+    run manage.py migrate --noinput
+}
+DB=test_verify
+bootstrap >"$SCRATCH/bootstrap.log" 2>&1
+DB=verify
+status=0
+tests() {
+    label=$1; shift
+    if run manage.py test "$@" --keepdb --noinput -v 2 >"$SCRATCH/$label.log" 2>&1; then
+        echo "$label: exit 0"
+    else
+        code=$?; echo "$label: exit $code"; status=1
+    fi
+}
+tests boundary market.tests.test_phase4_final_boundary
+focused=(test_m15_live_granularity test_market_state_context test_market_state_features
+    test_market_state_liquidity test_market_state_ops test_market_state_orb_fvg
+    test_market_state_persistence test_market_state_review_fixes test_market_state_structure
+    test_phase4_corrections test_phase4_eight_findings test_phase4_semantic_boundary
+    test_phase4_final_boundary)
+modules=()
+for module in "${focused[@]}"; do modules+=("market.tests.$module"); done
+tests focused "${modules[@]}"
+tests history-parity market.tests.test_zzzzzzzz_live_observation_migration \
+    market.tests.test_observation_lineage.SqlPythonParityTests
+tests affected market.tests.test_phase4_final_boundary \
+    market.tests.test_live_observations market.tests.test_observation_lineage \
+    market.tests.test_phase2_ingestion market.tests.test_schedule_integrity operations
+tests research research
+tests broad market operations forecasts
+
+# Exact starting-code populated fixture, not a fixture built by the new code.
+mkdir "$SCRATCH/base"
+git archive "$START" | tar -x -C "$SCRATCH/base"
+DB=test_preserve
+(
+    cd "$SCRATCH/base"
+    bootstrap >"$SCRATCH/preserve-bootstrap.log" 2>&1
+    run docs/phase4/verification/preservation.py.txt seed >"$SCRATCH/before.json"
+)
+for migration in 0035 0036 0035 0036; do
+    run manage.py migrate market "$migration" --noinput >>"$SCRATCH/migration.log" 2>&1
+    run docs/phase4/verification/final_preservation.py.txt "$SCRATCH/before.json" \
+        >>"$SCRATCH/preservation.log"
+done
+env -i PATH=/usr/bin:/bin HOME="$SCRATCH" POSTGRES_HOST="$SCRATCH" \
+    POSTGRES_PORT="$PORT" POSTGRES_USER=p4admin POSTGRES_DB=test_verify \
+    POSTGRES_CONN_MAX_AGE=0 make check >"$SCRATCH/checks.log" 2>&1
+git diff --check
+exit "$status"

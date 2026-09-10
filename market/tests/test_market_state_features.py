@@ -14,7 +14,6 @@ from unittest.mock import patch
 
 from django.test import TestCase
 
-from market.services import store_ingestion
 from market.state import features
 from market.state.compute import compute_market_state, ensure_descriptor_definition
 from market.state.features import (
@@ -29,6 +28,7 @@ from market.state.features import (
     volatility_percentile_feature,
 )
 from market.tests.factories import candle
+from market.tests.legacy_state_evidence import store_ingestion
 from market.tests.test_live_observations import make_market
 
 BASE = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)

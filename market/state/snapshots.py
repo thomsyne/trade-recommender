@@ -13,6 +13,20 @@ class DeterminismViolation(ValueError):
     """A snapshot with the same identity already exists with a different output."""
 
 
+def synchronize_inputs(instrument, scope, information_cutoff):
+    """Hold input-series locks through commit; compare cutoff to DB time after waiting."""
+    if not timezone.is_aware(information_cutoff):
+        raise ValueError("naive_information_cutoff")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT market_state_lock_series(%s, %s::text[])",
+            [instrument.pk, sorted(set(scope) | {"M15", "D", "W"})],
+        )
+        cursor.execute("SELECT %s <= clock_timestamp()", [information_cutoff])
+        if not cursor.fetchone()[0]:
+            raise ValueError("future_market_state_cutoff")
+
+
 def snapshot_idempotency_key(
     definition_sha256,
     instrument_code,
@@ -64,6 +78,7 @@ def persist_snapshot(
     """
     if not timezone.is_aware(information_cutoff):
         raise ValueError("naive_information_cutoff")
+    synchronize_inputs(instrument, scope, information_cutoff)
     if input_manifest_sha256 != identity_digest(
         input_manifest
     ) or evidence_sha256 != identity_digest(evidence_manifest):

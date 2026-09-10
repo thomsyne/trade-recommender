@@ -7,20 +7,28 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.getcwd())
 import django
+
 django.setup()
 from django.db import connection
 
 if sys.argv[1] == "seed":
-    from market.tests.test_live_observations import make_market
-    from market.tests.factories import candle
     from market.services import store_ingestion
     from market.state.compute import compute_market_state, ensure_descriptor_definition
+    from market.tests.factories import candle
+    from market.tests.test_live_observations import make_market
+
     inst, source = make_market()
     start = datetime(2026, 1, 5, 8, tzinfo=UTC)
     with patch("market.services.timezone.now", return_value=start + timedelta(hours=2)):
-        store_ingestion(source, inst, "H1", start, start + timedelta(hours=2),
-                        [candle(start), candle(start + timedelta(hours=1))],
-                        {"batch":"preservation", "requests":[]})
+        store_ingestion(
+            source,
+            inst,
+            "H1",
+            start,
+            start + timedelta(hours=2),
+            [candle(start), candle(start + timedelta(hours=1))],
+            {"batch": "preservation", "requests": []},
+        )
     compute_market_state(inst, ensure_descriptor_definition(), start + timedelta(hours=2), ["H1"])
 
 result = {}
@@ -30,5 +38,8 @@ with connection.cursor() as cursor:
             continue
         cursor.execute(f'SELECT to_jsonb(t)::text FROM "{table}" t')
         rows = sorted(row[0] for row in cursor.fetchall())
-        result[table] = {"rows": len(rows), "sha256": hashlib.sha256("\n".join(rows).encode()).hexdigest()}
+        result[table] = {
+            "rows": len(rows),
+            "sha256": hashlib.sha256("\n".join(rows).encode()).hexdigest(),
+        }
 print(json.dumps(result, sort_keys=True, indent=2))

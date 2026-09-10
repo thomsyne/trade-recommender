@@ -1,5 +1,26 @@
 # Phase 4 — review lessons and remaining review boundaries
 
+## Final recording boundary (0.11.0)
+
+- Source observation time is not database first-known time. Preserve unknown
+  legacy recording times as NULL; require DB-owned time for new evidence and
+  test caller backdating through both ORM and raw SQL.
+- A successful INSERT is not proof of post-commit integrity. Hold one transaction
+  open, observe the competing connection waiting on the shared lock, release it,
+  then verify committed evidence. Test both orders and stale raw-SQL selection.
+  State isolation-level and multi-series lock-order contracts explicitly.
+- First-use immutability checks can race with first consumption. Registration-time
+  semantic immutability removes that race; test concurrent orders and ensure
+  editorial fields still update. Do not describe a sequential probe as a race.
+- Availability must include actual pivot, ATR and lifecycle dependencies without
+  inheriting unrelated prefix/suffix delay. Use asymmetric before/equality/after
+  cases. A same-bar reclaim must not wait for an unused next candle.
+- Reproduce Unicode failures on UTF-8 before assigning them to application code.
+  Compare exact identities/causes, not counts or a different broad command.
+- Keep concise results, checksums and reproducible scripts. Historical raw logs
+  belong to their Git checkpoint, not duplicated into every correction. Record
+  verification limitations and cleanup; engineering completion is not acceptance.
+
 ## Eight-finding follow-up
 
 The subsequent [independent review](https://ampcode.com/threads/T-01a08985-818d-7698-aa9c-f843744479db)
@@ -24,7 +45,7 @@ the new behavior. The older lessons below describe the preceding correction.
 - Independent compression and expansion flags do not establish a transition.
   Pin ordering, window, normalization and equality; preserve the completed fact's
   source identities and times under future suffixes.
-- Keep exact-base/final failure identities and raw logs. Retain reproduction
+- Keep exact-base/final failure identity/cause evidence. Retain reproduction
   evidence before fixes; distinguish engineering results from independent closure.
 
 ## Earlier correction lessons (historical)

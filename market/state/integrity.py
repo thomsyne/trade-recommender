@@ -196,6 +196,51 @@ def _verify_payload(snapshot, definition, flag):
             except (KeyError, ValueError, TypeError):
                 flag(snapshot.pk, "malformed_orb_chronology")
 
+    for block in granularities.values() if isinstance(granularities, dict) else ():
+        if not isinstance(block, dict):
+            continue
+        structure = block.get("structure")
+        consolidation = structure.get("consolidation") if isinstance(structure, dict) else None
+        consolidation = consolidation if isinstance(consolidation, dict) else {}
+        if consolidation.get("state") == "available" and "available_at" in consolidation:
+            try:
+                known = datetime.fromisoformat(consolidation["available_at"])
+                breakout = datetime.fromisoformat(
+                    consolidation.get("breakout_available_at", consolidation["available_at"])
+                )
+                if not known <= breakout <= snapshot.information_cutoff:
+                    flag(snapshot.pk, "consolidation_availability_chronology")
+                for physical, available in (
+                    ("formed_at", "available_at"),
+                    ("breakout_at", "breakout_available_at"),
+                    ("failure_at", "failed_at"),
+                    ("retest_formed_at", "retest_at"),
+                ):
+                    if available in consolidation:
+                        at = datetime.fromisoformat(consolidation[available])
+                        if not datetime.fromisoformat(
+                            consolidation[physical]
+                        ) <= at <= snapshot.information_cutoff or (
+                            available in ("failed_at", "retest_at") and at < breakout
+                        ):
+                            flag(snapshot.pk, "consolidation_availability_chronology")
+            except (KeyError, ValueError, TypeError):
+                flag(snapshot.pk, "malformed_consolidation_chronology")
+        for name in ("sweep_above", "sweep_below", "acceptance_above", "acceptance_below"):
+            liquidity = block.get("liquidity")
+            event = liquidity.get(name) if isinstance(liquidity, dict) else None
+            if not isinstance(event, dict):
+                continue
+            try:
+                at = datetime.fromisoformat(event["available_at"])
+                physical = datetime.fromisoformat(
+                    event.get("acceptance_close", event.get("first_breach"))
+                )
+                if not physical <= at <= snapshot.information_cutoff:
+                    flag(snapshot.pk, "liquidity_availability_chronology")
+            except (KeyError, ValueError, TypeError):
+                flag(snapshot.pk, "malformed_liquidity_chronology")
+
 
 def _verify_manifest(snapshot, flag):
     if (
@@ -259,7 +304,10 @@ def _verify_manifest(snapshot, flag):
                 continue
             if observation.content_sha256 != content_sha256:
                 flag(snapshot.pk, "revised_content_substituted")
-            if observation.observed_at > snapshot.information_cutoff:
+            if (
+                max(observation.observed_at, observation.recorded_at or observation.observed_at)
+                > snapshot.information_cutoff
+            ):
                 flag(snapshot.pk, "input_available_after_cutoff")
             if not observation.complete:
                 flag(snapshot.pk, "incomplete_candle")

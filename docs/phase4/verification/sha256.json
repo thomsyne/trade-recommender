@@ -1,0 +1,15 @@
+{
+  "scope": "All retained verification files except this checksum manifest",
+  "files": {
+    "README.md": {"sha256": "4a236e6c717f21ffdc8a6844ee01ba893fab6e5913ba3e18906629aec3a5cd92", "bytes": 3986, "lines": 66},
+    "eight/README.md": {"sha256": "12cb94368dd639bf74e73f8cc20537fa41dab7839b9d86141fb191b2c8039d91", "bytes": 568, "lines": 9},
+    "eight/compare_broad.py.txt": {"sha256": "ea1283c4577ee9a5b499aaaffec78c06fef1e41c7034bd3d1c527c2d2831fee0", "bytes": 2613, "lines": 82},
+    "final_preservation.py.txt": {"sha256": "789b37c73f38636ef7c9443f62af9ef406c4e5be3e94f5ce184607bd886d19b8", "bytes": 1900, "lines": 53},
+    "preservation.py.txt": {"sha256": "67f37de01c5aa82fb38f894641ecef922eabaa1d8cdc2300b8840d6445897333", "bytes": 1534, "lines": 45},
+    "results.json": {"sha256": "f92b05da7248dd75e8ae810a7be7e42813bb263ae082db71c78c720236b204bb", "bytes": 9877, "lines": 157},
+    "verify.sh.txt": {"sha256": "8ee3cf700c413c85edcfacec0f92b3f772448f236730c57358ed97a56274fe44", "bytes": 3534, "lines": 84}
+  },
+  "total_bytes": 24012,
+  "total_lines": 496,
+  "secret_pattern_and_machine_path_scan": "PASS"
+}

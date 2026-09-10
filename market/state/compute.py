@@ -14,17 +14,19 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import MappingProxyType
 
+from django.db import transaction
+
 from market.quality import NEW_YORK
 from market.state import context, features, fvg, liquidity, orb, sessions, structure
 from market.state import manifest as input_policy
 from market.state.canonical import format_decimal
 from market.state.definitions import register_definition
 from market.state.manifest import FrozenObservation, _iso, eligible_observations, manifest_from_rows
-from market.state.snapshots import persist_snapshot
+from market.state.snapshots import persist_snapshot, synchronize_inputs
 from market.state.terminology import REGISTRY
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.10.0"
+DESCRIPTOR_VERSION = "0.11.0"
 
 FVG_GRANULARITIES = frozenset({"M15", "H1", "H4"})
 ORB_SESSION_WINDOW_HOURS = 12
@@ -64,7 +66,7 @@ DESCRIPTOR_DEFINITION = {
         "structure": "structure-context-v1",
         "monthly_context": "monthly-context-v1",
         "evidence_manifest": "vintage-evidence-v1",
-        "corrections": "consumed-evidence-chronology-v4",
+        "corrections": "system-recording-prerequisite-chronology-v5",
     },
     "features": [
         "eligible_candle_count",
@@ -663,12 +665,15 @@ def build_market_state(
     )
 
 
+@transaction.atomic
 def compute_market_state(instrument, definition, information_cutoff, granularities):
     """Compute and persist the descriptive snapshot for ``instrument`` at cutoff.
 
     Returns ``(snapshot, created)``. Idempotent: recomputing the same identity
     returns the existing snapshot.
     """
+    granularities = tuple(granularities)
+    synchronize_inputs(instrument, granularities, information_cutoff)
     payload, scope, manifest, manifest_sha256, evidence, evidence_sha, quality = build_market_state(
         instrument, definition, information_cutoff, granularities
     )

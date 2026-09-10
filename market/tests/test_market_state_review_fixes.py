@@ -16,7 +16,6 @@ from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
 
 from market.models import MarketStateSnapshot
-from market.services import store_ingestion
 from market.state import compute, terminology
 from market.state.canonical import identity_digest
 from market.state.compute import (
@@ -29,6 +28,7 @@ from market.state.fvg import find_fvgs
 from market.state.integrity import verify_snapshots
 from market.state.manifest import eligible_observations
 from market.tests.factories import candle
+from market.tests.legacy_state_evidence import store_ingestion
 from market.tests.test_live_observations import make_market
 
 MON = datetime(2026, 1, 5, 8, 0, tzinfo=UTC)

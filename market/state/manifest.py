@@ -18,6 +18,7 @@ only these candles, which is what makes a snapshot causal and reproducible:
 from datetime import UTC
 from typing import NamedTuple
 
+from django.db.models import Q
 from django.utils import timezone
 
 from market.models import CandleObservation
@@ -48,7 +49,15 @@ class FrozenObservation(NamedTuple):
 
     @classmethod
     def from_row(cls, row):
-        return cls(*(getattr(row, field) for field in cls._fields))
+        values = (
+            row._asdict()
+            if isinstance(row, cls)
+            else {field: getattr(row, field) for field in cls._fields}
+        )
+        recorded_at = getattr(row, "recorded_at", None)
+        if recorded_at is not None:
+            values["observed_at"] = max(values["observed_at"], recorded_at)
+        return cls(**values)
 
 
 def _iso(value):
@@ -63,14 +72,18 @@ def eligible_observations(instrument, granularity, information_cutoff, *, lookba
     """
     if not timezone.is_aware(information_cutoff):
         raise ValueError("information_cutoff must be timezone-aware")
-    eligible = CandleObservation.objects.filter(
-        instrument=instrument,
-        granularity=granularity,
-        timestamp__lt=information_cutoff,
-        complete=True,
-        interval_end__lte=information_cutoff,
-        observed_at__lte=information_cutoff,
-    ).exclude(content_sha256="")
+    eligible = (
+        CandleObservation.objects.filter(
+            instrument=instrument,
+            granularity=granularity,
+            timestamp__lt=information_cutoff,
+            complete=True,
+            interval_end__lte=information_cutoff,
+            observed_at__lte=information_cutoff,
+        )
+        .filter(Q(recorded_at__isnull=True) | Q(recorded_at__lte=information_cutoff))
+        .exclude(content_sha256="")
+    )
     if lookback is not None:
         # A finite elapsed-time search horizon is distinct from a row LIMIT.
         # Three nominal intervals per wanted bar accommodates FX weekends/DST;

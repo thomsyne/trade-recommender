@@ -399,7 +399,8 @@ class SqlReviewTests(TestCase):
 
     def test_earlier_latest_candle_rejected(self):
         from market.tests.factories import candle
-        from market.tests.test_live_observations import ingest, make_market
+        from market.tests.legacy_state_evidence import ingest
+        from market.tests.test_live_observations import make_market
 
         _, source = make_market()
         with patch("market.services.timezone.now", return_value=self.cutoff):
@@ -426,7 +427,7 @@ class SqlReviewTests(TestCase):
         # SQL elapsed-time horizons must match Python even under a caller's DST zone.
         from datetime import UTC, datetime
 
-        from market.services import store_ingestion
+        from market.tests.legacy_state_evidence import store_ingestion
 
         start = datetime(2023, 1, 5, 22, tzinfo=UTC)
         with patch("market.services.timezone.now", return_value=start + timedelta(days=1)):
