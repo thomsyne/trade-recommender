@@ -7,8 +7,9 @@ from decimal import Decimal
 from queue import Queue
 
 from django.db import DatabaseError, close_old_connections, connection, connections, transaction
-from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
+
+from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 
 
 class Phase2BMigrationSafetyTests(TransactionTestCase):

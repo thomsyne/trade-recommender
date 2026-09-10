@@ -8,7 +8,7 @@ from forecasts.paper import resolve_due_paper_trades
 from forecasts.recommendations import generate_all_recommendations, resolve_due_recommendations
 from forecasts.reviews import build_due_review_cohort
 from forecasts.services import resolve_due_forecasts
-from market.live_acquisition import LIVE_INTERVALS, canonical_live_start
+from market.live_acquisition import SUPPORTED_LIVE_INTERVALS, canonical_live_start
 from market.models import IngestionRun, Instrument, SourceRegistry
 from market.oanda import OandaClient
 from market.services import store_ingestion, store_oanda_terms
@@ -32,6 +32,11 @@ def execute_task(task_name, parameters):
         return ingest_oanda(parameters)
     if task_name == "market.capture_oanda_terms":
         return capture_oanda_terms()
+    if task_name == "market.compute_market_state":
+        from market.state.tasks import run_compute_market_state
+
+        with task_stage("market_state_compute"):
+            return run_compute_market_state(parameters)
     if task_name == "research.ingest_feed":
         policy = SourcePolicy.objects.get(slug=parameters["source"])
         with task_stage("research_fetch"):
@@ -78,10 +83,10 @@ def ingest_oanda(parameters):
     if not instrument.ingestion_enabled:
         raise ValueError(f"Live ingestion is disabled for {instrument.code}")
     granularity = parameters["granularity"]
-    if granularity not in LIVE_INTERVALS:
-        raise ValueError("Unsupported live granularity; use H1/H4/D/W")
+    if granularity not in SUPPORTED_LIVE_INTERVALS:
+        raise ValueError("Unsupported live granularity; use M15/H1/H4/D/W")
     end = _datetime(parameters.get("to")) if parameters.get("to") else datetime.now(UTC)
-    default_days = {"H1": 14, "H4": 14, "D": 90, "W": 730}[granularity]
+    default_days = {"M15": 3, "H1": 14, "H4": 14, "D": 90, "W": 730}[granularity]
     days = int(parameters.get("days", default_days))
     start = (
         _datetime(parameters.get("from")) if parameters.get("from") else end - timedelta(days=days)

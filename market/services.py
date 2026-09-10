@@ -464,18 +464,19 @@ LIVE_STEPS = {
     "D": timedelta(days=1),
     "H4": timedelta(hours=4),
     "H1": timedelta(hours=1),
+    "M15": timedelta(minutes=15),
 }
 
 
 def live_candle_completion(timestamp, granularity):
     """Completion instant of one live provider candle.
 
-    H1/H4 candles are absolute-duration intervals (the provider never merges
-    two hours into one during a DST transition), so completion is exact UTC
+    M15/H1/H4 candles are absolute-duration intervals (the provider never merges
+    two intervals into one during a DST transition), so completion is exact UTC
     arithmetic. Daily and weekly candles are aligned to the 17:00
     America/New_York close and therefore complete one local day/week later.
     """
-    if granularity in {"H1", "H4"}:
+    if granularity in {"M15", "H1", "H4"}:
         return timestamp + LIVE_STEPS[granularity]
     return registered_candle_completion(timestamp, granularity)
 

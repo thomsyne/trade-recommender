@@ -1,5 +1,4 @@
 from django.db import connection
-from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
 from market.historical_acquisition import INSTRUMENTS
@@ -13,6 +12,7 @@ from market.historical_discovery import (
 )
 from market.models import HistoricalDiscoveryAttempt, Instrument, SourceRegistry
 from market.oanda import OandaError
+from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 
 
 class FailedClient:

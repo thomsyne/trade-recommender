@@ -16,7 +16,6 @@ from unittest.mock import patch
 
 from django.core.management import call_command
 from django.db import connection
-from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
 from market.historical_discovery import (
@@ -47,6 +46,7 @@ from market.provider_observed_successor import (
     staged_discovery_membership,
     successor_readiness,
 )
+from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_gate8b_prime_successor_activation import (
     MIGRATION_0023,
     record_attempt,

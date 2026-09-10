@@ -7,7 +7,31 @@ historical states; no evidence rollback capability is added to production.
 from uuid import uuid4
 
 from django.db import connection
+from django.db.migrations.exceptions import IrreversibleError
 from django.db.migrations.executor import MigrationExecutor
+
+
+class PreservingMigrationExecutor(MigrationExecutor):
+    """Reject impossible test rollback plans before partially undoing the head.
+
+    Django checks reversibility one migration at a time. A historical test can
+    therefore undo M15 SQL, then fail at an unrelated irreversible migration.
+    Preflight preserves that failure (not a skip or SQL repair) without damaging
+    the database used by subsequent tests. Runnable historical graphs should use
+    HistoricalDatabaseMixin; this also protects older, blocked fixtures.
+    """
+
+    def migrate(self, targets, plan=None, *args, **kwargs):
+        if plan is None:
+            plan = self.migration_plan(targets)
+        for migration, backwards in plan:
+            if backwards:
+                for operation in reversed(migration.operations):
+                    if not operation.reversible:
+                        raise IrreversibleError(
+                            f"Operation {operation} in {migration} is not reversible"
+                        )
+        return super().migrate(targets, plan, *args, **kwargs)
 
 
 class HistoricalDatabaseMixin:

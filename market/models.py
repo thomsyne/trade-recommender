@@ -99,6 +99,15 @@ class Instrument(models.Model):
     class Meta:
         ordering = ("display_order",)
 
+    def clean(self):
+        super().clean()
+        try:
+            base, quote = self.Code(self.code).value.split("_")
+        except ValueError as error:
+            raise ValidationError("unsupported instrument code") from error
+        if (self.base_currency, self.quote_currency) != (base, quote):
+            raise ValidationError("instrument currencies contradict canonical code")
+
     def __str__(self):
         return self.get_code_display()
 
@@ -128,7 +137,13 @@ class SourceRegistry(models.Model):
         return self.name
 
 
-GRANULARITIES = (("W", "Weekly"), ("D", "Daily"), ("H4", "Four-hour"), ("H1", "Hourly"))
+GRANULARITIES = (
+    ("W", "Weekly"),
+    ("D", "Daily"),
+    ("H4", "Four-hour"),
+    ("H1", "Hourly"),
+    ("M15", "Fifteen-minute"),
+)
 HISTORICAL_GRANULARITIES = (("W", "Weekly"), ("D", "Daily"), ("H1", "Hourly"))
 
 
@@ -862,6 +877,7 @@ class CandleObservation(ImmutableModel):
     content_sha256 = models.CharField(max_length=64)
     differing_fields = models.JSONField(default=list)
     observed_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(null=True, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -899,7 +915,14 @@ class CandleObservation(ImmutableModel):
                 name="candle_observation_increasing_interval",
             ),
         ]
-        indexes = [models.Index(fields=("candle", "-revision"), name="candle_observation_rev_idx")]
+        indexes = [
+            models.Index(fields=("candle", "-revision"), name="candle_observation_rev_idx"),
+            # Supports the bounded DISTINCT ON (timestamp) eligible-observation scan.
+            models.Index(
+                fields=("instrument", "granularity", "-timestamp", "-revision"),
+                name="candle_obs_series_rev_idx",
+            ),
+        ]
 
 
 class IngestionManifest(ImmutableModel):
@@ -1178,3 +1201,110 @@ class AuditEvent(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValidationError("Audit events are append-only")
+
+
+#: Allowed aggregate data-quality states of a market-state snapshot. This is a
+#: coarse status over the whole snapshot; per-feature availability lives inside
+#: ``output_payload`` (see docs/phase4/design.md §6) and is never collapsed into
+#: this field. ``complete`` = every requested family available; ``partial`` =
+#: some family unavailable with a reason; ``degraded`` = an input-quality caveat.
+MARKET_STATE_QUALITY_STATES = (
+    ("complete", "Complete"),
+    ("partial", "Partial"),
+    ("degraded", "Degraded"),
+)
+
+
+class MarketStateDefinition(ImmutableModel):
+    """Immutable, versioned, content-addressed market-state definition.
+
+    Binds the semantic ``(key, version)`` to a canonical JSON ``definition``
+    body (algorithms, feature names, lookbacks, thresholds, calendar/session
+    policy, price basis, rounding and missing-data policy) and its SHA-256. A
+    definition is content-addressed: the same body always hashes to the same
+    ``definition_sha256`` (unique), and each ``(key, version)`` is unique. The
+    canonical hash is recomputed and verified on save so a row can never carry a
+    digest that disagrees with its content. See docs/phase4/design.md §5.1.
+    """
+
+    key = models.CharField(max_length=80)
+    version = models.CharField(max_length=40)
+    definition = models.JSONField()
+    definition_sha256 = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("key", "version")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("key", "version"), name="unique_market_state_definition_version"
+            ),
+            # Reject a malformed digest at the database boundary (also for raw
+            # INSERTs that bypass save()): the SHA-256 must be 64 lowercase hex.
+            models.CheckConstraint(
+                condition=models.Q(definition_sha256__regex=r"^[0-9a-f]{64}$"),
+                name="market_state_definition_sha256_hex",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        from market.state.canonical import identity_digest
+
+        expected = identity_digest(self.definition)
+        if self.definition_sha256 and self.definition_sha256 != expected:
+            raise ValidationError("market-state definition SHA-256 does not match canonical JSON")
+        self.definition_sha256 = expected
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.key}@{self.version}"
+
+
+class MarketStateSnapshot(ImmutableModel):
+    """Immutable, append-only, idempotent market-state snapshot.
+
+    For a fixed ``(definition, instrument, information_cutoff, input manifest)``
+    the ``output_payload`` is byte-equivalent, so the snapshot is identified by
+    ``idempotency_key`` (a hash over exactly those inputs). ``input_manifest``
+    is the ordered set of eligible candle identities and content hashes that
+    were causally available at the cutoff; ``evidence_manifest`` records
+    macro/event/spread vintage identities when used. Rows are append-only and
+    immutable at both the ORM (``ImmutableModel``) and the database boundary
+    (BEFORE UPDATE/DELETE/TRUNCATE triggers). See docs/phase4/design.md §5.2.
+    """
+
+    instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
+    definition = models.ForeignKey(MarketStateDefinition, on_delete=models.PROTECT)
+    information_cutoff = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    input_manifest = models.JSONField()
+    input_manifest_sha256 = models.CharField(max_length=64)
+    evidence_manifest = models.JSONField(default=dict)
+    output_payload = models.JSONField()
+    output_sha256 = models.CharField(max_length=64)
+    data_quality_status = models.CharField(max_length=16, choices=MARKET_STATE_QUALITY_STATES)
+    idempotency_key = models.CharField(max_length=64, unique=True)
+
+    class Meta:
+        ordering = ("instrument", "information_cutoff", "created_at")
+        indexes = [
+            models.Index(fields=("instrument", "definition", "-information_cutoff")),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    data_quality_status__in=[s for s, _ in MARKET_STATE_QUALITY_STATES]
+                ),
+                name="market_state_snapshot_quality_status_valid",
+            ),
+            # DB-boundary rejection of malformed hashes (also for raw INSERTs).
+            models.CheckConstraint(
+                condition=models.Q(output_sha256__regex=r"^[0-9a-f]{64}$")
+                & models.Q(input_manifest_sha256__regex=r"^[0-9a-f]{64}$")
+                & models.Q(idempotency_key__regex=r"^[0-9a-f]{64}$"),
+                name="market_state_snapshot_sha256_hex",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.instrument_id}:{self.definition_id}@{self.information_cutoff.isoformat()}"

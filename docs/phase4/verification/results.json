@@ -1,0 +1,157 @@
+{
+  "acceptance": "superseded pending independent review",
+  "descriptor": "0.11.0",
+  "migration": "0036_market_state_recording_boundary",
+  "starting_head": "817d5ef1cac2de495310eed46e1baddf8b28806e",
+  "branch": "phase4/deterministic-market-state",
+  "main_origin_main_merge_base_live_main": "a3fbe6ce7fc08895c5696a2a25744f46e5d6e284",
+  "remote_phase4_branch": false,
+  "other_worktrees_untouched": 4,
+  "environment": {
+    "postgres": "15.5",
+    "encoding": "UTF8",
+    "socket_only": true,
+    "port": 55490,
+    "sanitized_environment": true,
+    "bootstrap": "Normally migrate market0026; fake only data-dependent0027; normally migrate remaining graph",
+    "fresh_install_certified": false
+  },
+  "source_sha256": {
+    "market/migrations/0036_market_state_recording_boundary.py": "53ce224e8a2e9a1489f1faba9880c6a1759147f115c2d9f46075744f7af7ccec",
+    "market/tests/test_phase4_final_boundary.py": "5ef50b2eab618664c20302ebbfaee6eee3275c40c8f59c68d31a93a14374f0ac"
+  },
+  "tests": {
+    "common_arguments": "--keepdb --noinput -v 2",
+    "boundary": {
+      "labels": "market.tests.test_phase4_final_boundary",
+      "tests": 14,
+      "result": "OK",
+      "seconds": 4.768,
+      "log_sha256": "6ed615e3d91e4206dee2d71a5da1a0ea0ae4ed9f84c1cc720e5fb358a3060474"
+    },
+    "focused": {
+      "labels": "Exact 13-module list in verify.sh.txt",
+      "tests": 187,
+      "result": "OK",
+      "seconds": 8.513,
+      "log_sha256": "982dd1191853abd874d6a31189defb22868fb3652642eb5523ff4a416c9327cd"
+    },
+    "history_parity": {
+      "labels": "market.tests.test_zzzzzzzz_live_observation_migration market.tests.test_observation_lineage.SqlPythonParityTests",
+      "tests": 10,
+      "result": "OK",
+      "seconds": 29.956,
+      "setup_repair": false,
+      "log_sha256": "932c65ddf23c436d53d6b75b7149dcde66c9d05e7aca0fcee4a43b21ed94579f"
+    },
+    "affected": {
+      "labels": "market.tests.test_phase4_final_boundary market.tests.test_live_observations market.tests.test_observation_lineage market.tests.test_phase2_ingestion market.tests.test_schedule_integrity operations",
+      "tests": 153,
+      "failures": 1,
+      "errors": 0,
+      "failure": "market.tests.test_live_observations.LiveEvidenceDatabaseProtectionTests.test_connection_role_is_not_a_superuser: AssertionError: 'on' != 'off'",
+      "log_sha256": "1ac64de858dae89c2a3a5d75b8be0e2aef4623d7aefe3ee03ce1875b02d8a2eb"
+    },
+    "runtime_role": {
+      "labels": "market.tests.test_live_observations.LiveEvidenceDatabaseProtectionTests.test_connection_role_is_not_a_superuser",
+      "tests": 1,
+      "result": "OK",
+      "role": "Disposable NOSUPERUSER login, test-table privileges including teardown TRUNCATE; removed",
+      "log_sha256": "59c90de6a62504e1d1a80796bfc511df30a1f97d1726873524cc73eb38e30db1"
+    }
+  },
+  "original_reproduction": {
+    "tests": 9,
+    "failures": 8,
+    "errors": 1,
+    "log_sha256": "8ed9e94647ff361a5724bd25cadd07c69819b16478647a96515c911835fc545d",
+    "all_original_failing_identities_now_pass": true,
+    "identities": [
+      "test_new_orm_and_sql_evidence_cannot_backdate_recording",
+      "test_consolidation_range_breakout_failure_and_retest_dependencies",
+      "test_left_swing_confirmation_delays_acceptance_in_both_directions",
+      "test_sweep_includes_atr_inputs_but_not_unrelated_prefix",
+      "test_future_cutoff_rejected_by_orm_and_sql_and_db_now_allowed",
+      "test_ingestion_first_orm_reselects_under_lock",
+      "test_ingestion_first_raw_sql_rejects_stale_selection",
+      "test_research_first_consumption_and_semantic_update_both_orderings",
+      "test_snapshot_first_retains_late_arrival_only_for_later_cutoff"
+    ],
+    "qualification": "Sweep expected baseline corrected to same-bar reclaim; research update-first extended from sequential rejection to an open concurrent transaction. Original reproduction was not rerun."
+  },
+  "concurrency": {
+    "role_asserted_nonsuperuser_in_each_transaction": true,
+    "candle_orders": ["ingestion first, ORM reselects revision2", "ingestion first, stale raw SQL rejects", "snapshot first, late evidence retained only for later cutoff"],
+    "research_orders": ["rejected update transaction open during first consumption", "uncommitted consumption while semantic update rejects and editorial update succeeds"],
+    "future_cutoff": "ORM, durable task and non-superuser raw SQL reject; DB-now cutoff accepted",
+    "isolation": "READ COMMITTED; REPEATABLE READ rejected",
+    "timeouts_seconds": {"lock": 5, "statement": 8, "event_and_future": "2 through 8"},
+    "candle_wait_observed_in_pg_locks": true,
+    "postcommit_integrity_violations": 0,
+    "deadlocks_or_hangs": 0
+  },
+  "preservation": {
+    "fixture_code": "exact starting HEAD archive",
+    "sequence": ["0035", "0036", "0035", "0036"],
+    "tables": 110,
+    "rows": 549,
+    "legacy_observations": 2,
+    "backfilled_recorded_at": 0,
+    "all_stage_fingerprints": "a5813f74a8a94ea700b2b8ae8f37a441ab039a222ba873e2d51494f310971723",
+    "reference_json_sha256": "aaaf75f5b44d29a8e7bda7e5a72f1a5d1368f0367d48ac6452834776f0ed9440",
+    "migration_log_sha256": "0490979d8447f6ff4ef58406efaa734d3cfcc7977ea33207dac23299c946dad1",
+    "new_recording_facts_block_reversal": true
+  },
+  "differential": {
+    "method": "Exact failing headings, terminal exception SHA256 and occurrences; only memory addresses normalized; compare_broad.py.txt --compact",
+    "retained_logs_verified_against_starting_commit_gzip_bytes": true,
+    "base_rerun": false,
+    "base_equivalence": "Retained verified base logs match Git bytes; inherited failing paths/causes unchanged. Current source changes are covered by focused, affected, research and exact-command broad runs.",
+    "broad_command": "manage.py test market operations forecasts --keepdb --noinput -v 2",
+    "broad_start": {"tests": 1012, "failures": 2, "errors": 238, "log_sha256": "9d33b43509926bdbc8ec38578a2119621a39bed86ef99d49fcb80cd222d515c9"},
+    "broad_final": {"tests": 1026, "failures": 2, "errors": 238, "seconds": 402.217, "log_sha256": "5a545004e8bf600eb317bec09c5af1decafd00f49a2af3cfdee64e98a5905061"},
+    "broad_identity_cause_occurrences_sha256_both": "bff7b147a631249e2fc36f278dc9a5afc664fb387032e999dd1da8e1dfc3b6ee",
+    "broad_introduced": [],
+    "broad_removed": [],
+    "broad_causes": ["238 irreversible forecasts.0031_phase3_observable_evidence occurrences", "Gate5 installed body MD5 e7d028c9a27596a1b9fba65bd7015cb6 versus 5ef0117c6a32cca8a81322a7766d8f52", "bootstrap-superuser on versus off"],
+    "main_base": {"tests": 838, "failures": 2, "errors": 244, "introduced": 0, "removed": "six historical live-observation migration errors already removed by preceding checkpoint", "identity_cause_occurrences_sha256": "3bb82c0b7e6c66ee35bc0c56d34c16b82ee6e81dd242be5d5ede5452159bca9f", "log_sha256": "298eeda1418437cccabfc99e09e894fdc553681ef30e11c74abea36e0439a348"},
+    "research_command": "manage.py test research --keepdb --noinput -v 2",
+    "research_base": {"tests": 348, "errors": 22, "log_sha256": "1f0e5ab4fec25e257c7a718e0c1c2023668ccd33c93cc4aa1bd1788c7c121fa0"},
+    "research_final": {"tests": 348, "errors": 22, "log_sha256": "23861ef32080b30d911fd220c4b39ef9f753fb431a0512e7604ae858d4311b8d"},
+    "research_identity_cause_occurrences_sha256_both": "3b345163de79f2ddbf1ac2356d36b422b90f5e04dcaf3fd8ae6223fbf8797e45",
+    "research_introduced": [],
+    "research_removed": [],
+    "research_causes": ["20 irreversible forecasts0031 errors", "DetectorV2QueryBudgetTests.setUpClass: discovery plan conflicts with canonical contract", "V2S0GovernanceTests.test_return_blind_allowlist_and_s1_execution_authority_remains_closed: direct v2 S1 execution is disabled; use the governed management command"],
+    "broad_and_research_green": false
+  },
+  "unicode": {
+    "identity": "market.tests.test_schedule_integrity.ScheduleReportTests.test_malformed_json_containers_and_types_report_and_seed_fail_closed",
+    "prior_error": "django.db.utils.NotSupportedError: conversion between UTF8 and SQL_ASCII is not supported",
+    "utf8": "passes affected, market/operations and final broad runs; no SQL_ASCII conversion errors remain"
+  },
+  "checks": {
+    "make_check": "PASS: Ruff, format462 files, Django, makemigrations no drift, compileall",
+    "log_sha256": "d04b637a9997e9fe88a703c9905f5853444ce52b91be9f61542781dcfd952092",
+    "git_diff_check": "PASS",
+    "retained_scripts": "Python AST parse, explicit Ruff/format (E402 permitted for django.setup), bash -n; equivalent DB/test stages executed individually, wrapper not executed end-to-end"
+  },
+  "protection": {
+    "source_files_unchanged": 92,
+    "inventory_sha256": "3a0ec191fd3f20059e76b649956b758cfefc45462d01eb2e68d84f3fc43de150",
+    "historical_technical_output_sha256": "4c332c28e5dc34273ec8a52b7fe6fca428bcb27ea75930e3068dfb67d0fd0435",
+    "technical_output_note": "Retained historical output; protected technical source byte equality rechecked, not a new performance measurement",
+    "disposable_schedule_count": 0,
+    "live_intervals": ["H1", "H4", "D", "W"],
+    "m15_or_descriptor_activation": false,
+    "forecast_consumer_matches": 0,
+    "push_pr_deploy_provider_production_aws_oanda_env_local_access": false
+  },
+  "cleanup": {
+    "ports_stopped": [55490, 55489],
+    "private_clusters_databases_archives_logs_sockets_and_scratch_removed": true,
+    "temporary_runtime_roles_removed_before_shutdown": true,
+    "task_owned_test_processes_or_postmasters_remaining": 0,
+    "unrelated_port5432_postmaster_untouched": true
+  },
+  "limitations": ["Acceptance pending independent review", "Broad/research inherited failures retained", "Unqualified fresh install, PostgreSQL17, production capacity, RSS/WAL and exceptional-holiday calendars unverified", "SQL is not a duplicate formula engine", "Superuser trigger bypass remains outside runtime protection"]
+}

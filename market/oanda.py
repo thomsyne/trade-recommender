@@ -115,6 +115,7 @@ class OandaClient:
             "H1": timedelta(hours=1),
             "H4": timedelta(hours=4),
             "D": timedelta(days=1),
+            "M15": timedelta(minutes=15),
         }[granularity]
         window = step * 4999
         cursor = start.astimezone(UTC)

@@ -16,6 +16,7 @@ from django.test import TransactionTestCase
 
 from market.models import Candle, CandleObservation, IngestionRun
 from market.services import _candle_payload, _json_hash, live_candle_completion
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.timeline import POLL_DELAY
 
 BEFORE = [("market", "0027_gate8i_final_dataset_acceptance")]
@@ -53,8 +54,9 @@ def instrument_at_0028(**values):
 
 
 def restore_head():
-    executor = MigrationExecutor(connection)
-    executor.migrate(executor.loader.graph.leaf_nodes())
+    # Only this class's isolated historical graph. The mixin restores the
+    # untouched normal database, including its installed M15 functions.
+    MigrationExecutor(connection).migrate(AFTER)
 
 
 def trigger_names():
@@ -74,15 +76,16 @@ def column_names(table):
         return {row[0] for row in cursor.fetchall()}
 
 
-class LiveObservationMigrationTests(TransactionTestCase):
+class LiveObservationMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0028_"
+
     def setUp(self):
         super().setUp()
         MigrationExecutor(connection).migrate(AFTER)
 
     def tearDown(self):
-        # Restore the head state, not the 0028 state this class migrates back
-        # to: leaving the shared database behind head would silently run every
-        # later test without the 0029 lineage protections.
+        # Reset this isolated historical schema only. The mixin reconnects the
+        # untouched head database after the class and removes its temporary DB.
         restore_head()
         super().tearDown()
 
@@ -226,9 +229,13 @@ class LiveObservationMigrationTests(TransactionTestCase):
             self.assertEqual(cursor.fetchone()[0], 3)
 
     def record_live_observation(self):
-        """One provider observation through the real ingestion path at the 0028 schema."""
+        """One attested observation using the actual historical schema.
+
+        Current ingestion targets 0036 and must not be run against a 0028 table
+        missing its recording column. Current ingestion has separate coverage.
+        """
         from market.models import SourceRegistry
-        from market.services import store_ingestion
+        from market.services import candle_content_sha256
         from market.tests.factories import candle
 
         instrument = instrument_at_0028(
@@ -242,16 +249,60 @@ class LiveObservationMigrationTests(TransactionTestCase):
             retention_policy="migration test",
         )
         start = datetime(2026, 1, 5, 8, tzinfo=UTC)
-        run = store_ingestion(
-            source,
-            instrument,
-            "H1",
-            start,
-            start + timedelta(hours=1),
-            [candle(start)],
-            {"batch": "ledger", "requests": []},
+        item = candle(start)
+        observed = start + timedelta(hours=2)
+        run = IngestionRun.objects.create(
+            source=source,
+            instrument=instrument,
+            granularity="H1",
+            requested_from=start,
+            requested_to=observed,
+            parameters={},
+            request_manifest_hash="historical-ledger",
+            status="running",
         )
-        self.assertEqual(run.status, "succeeded")
+        values = {
+            name: getattr(item, name)
+            for name in (
+                "complete",
+                "volume",
+                "bid_open",
+                "bid_high",
+                "bid_low",
+                "bid_close",
+                "ask_open",
+                "ask_high",
+                "ask_low",
+                "ask_close",
+            )
+        }
+        digest = candle_content_sha256(instrument.code, "H1", item)
+        frozen = Candle.objects.create(
+            instrument=instrument,
+            ingestion_run=run,
+            granularity="H1",
+            timestamp=start,
+            provenance="observed",
+            content_sha256=digest,
+            observed_at=observed,
+            **values,
+        )
+        historical = MigrationExecutor(connection).loader.project_state(AFTER).apps
+        historical.get_model("market", "CandleObservation").objects.create(
+            instrument_id=instrument.pk,
+            ingestion_run_id=run.pk,
+            source_id=source.pk,
+            candle_id=frozen.pk,
+            granularity="H1",
+            timestamp=start,
+            interval_end=start + timedelta(hours=1),
+            observed_at=observed,
+            content_sha256=digest,
+            kind="initial",
+            revision=1,
+            differing_fields=[],
+            **values,
+        )
 
     def assert_schema_untouched_at_0028(self):
         self.assertEqual(trigger_names(), set(PROTECTIONS))
@@ -306,7 +357,7 @@ class LiveObservationMigrationTests(TransactionTestCase):
             return {row[0] for row in cursor.fetchall()}
 
 
-class LineageRenumberMigrationTests(TransactionTestCase):
+class LineageRenumberMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
     """0029 must apply over a realistic 0028 ledger without pending-trigger events.
 
     The pre-fix migration failed with ``cannot ALTER TABLE ... because it has
@@ -316,14 +367,16 @@ class LineageRenumberMigrationTests(TransactionTestCase):
     and asserts the migration renumbers them dense per candle.
     """
 
+    historical_market_migration = "0028_"
+
     def setUp(self):
         super().setUp()
         MigrationExecutor(connection).migrate(AFTER)
 
     def tearDown(self):
         # 0029 is forward-only while observations exist: empty the ledger (and
-        # its protected parents) first, then restore the full head schema so
-        # the shared test database is left as the normal head state.
+        # its protected parents) created in this isolated historical database
+        # before resetting it to 0028. The normal database is never migrated back.
         with connection.cursor() as cursor:
             cursor.execute("ALTER TABLE market_candleobservation DISABLE TRIGGER USER")
             cursor.execute("ALTER TABLE market_candle DISABLE TRIGGER USER")
@@ -622,7 +675,10 @@ class LineageRenumberMigrationTests(TransactionTestCase):
         MigrationExecutor(connection).migrate(AFTER_0029)
 
         chains = {}
-        for observation in CandleObservation.objects.order_by("id"):
+        historical = MigrationExecutor(connection).loader.project_state(AFTER_0029).apps
+        for observation in historical.get_model("market", "CandleObservation").objects.order_by(
+            "id"
+        ):
             chains.setdefault(observation.candle_id, []).append(observation)
         candle_chain = chains.get(Candle.objects.get(timestamp=START_TS).pk)
         self.assertEqual(

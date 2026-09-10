@@ -1,0 +1,53 @@
+"""Compare every application row to a pre-0036 reference in a disposable DB.
+
+Seed/reference with preservation.py.txt from an exact 817d5ef1 git archive.
+Run this script after each 0035 -> 0036 -> 0035 -> 0036 stage, passing that
+reference JSON path. Only the new nullable column is excluded from row hashes;
+its NULL status is checked separately. No table or timestamp is modified.
+"""
+
+import hashlib
+import json
+import os
+import sys
+
+sys.path.insert(0, os.getcwd())
+import django
+
+django.setup()
+from django.db import connection
+
+assert connection.settings_dict["NAME"].startswith("test_"), "disposable test DB required"
+with open(sys.argv[1]) as stream:
+    expected = json.load(stream)
+actual = {}
+with connection.cursor() as cursor:
+    for table in sorted(connection.introspection.table_names()):
+        if table == "django_migrations":
+            continue
+        expression = (
+            "to_jsonb(t)-'recorded_at'" if table == "market_candleobservation" else "to_jsonb(t)"
+        )
+        cursor.execute(f'SELECT ({expression})::text FROM "{table}" t')
+        rows = sorted(row[0] for row in cursor.fetchall())
+        actual[table] = {
+            "rows": len(rows),
+            "sha256": hashlib.sha256("\n".join(rows).encode()).hexdigest(),
+        }
+    cursor.execute(
+        "SELECT count(*) FROM market_candleobservation t WHERE to_jsonb(t)->>'recorded_at' IS NOT NULL"
+    )
+    assert cursor.fetchone()[0] == 0, "legacy system recording time must remain unknown"
+assert actual == expected, "application row fingerprints changed"
+print(
+    json.dumps(
+        {
+            "tables": len(actual),
+            "rows": sum(t["rows"] for t in actual.values()),
+            "preserved": True,
+            "recording_backfill": False,
+            "fingerprint": hashlib.sha256(json.dumps(actual, sort_keys=True).encode()).hexdigest(),
+        },
+        sort_keys=True,
+    )
+)

@@ -1,10 +1,10 @@
 from django.db import connection
-from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
 from market.historical_acquisition import INSTRUMENTS
 from market.historical_discovery import build_initial_discovery_plan, create_discovery_plan
 from market.models import IngestionRun, Instrument, SourceRegistry
+from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 
 
 class ProviderObservedInventoryMigrationTests(TransactionTestCase):

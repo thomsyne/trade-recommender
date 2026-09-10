@@ -1,0 +1,82 @@
+"""Usage: python compare_broad.py.txt BASE_LOG FINAL_LOG [--compact]."""
+
+import collections
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+causes = {}
+
+
+def read(path):
+    raw = pathlib.Path(path).read_bytes()
+    text = raw.decode()
+    count = re.search(r"^Ran (\d+) tests in ([\d.]+)s$", text, re.M)
+    if not count:
+        raise ValueError("incomplete test log")
+    failures = collections.Counter()
+    for block in re.split(r"^={20,}\n", text, flags=re.M)[1:]:
+        if not block.startswith(("FAIL:", "ERROR:")):
+            continue
+        heading = block.splitlines()[0]
+        errors = re.findall(r"^[\w.]+(?:Error|Exception|Refusal):.*$", block, re.M)
+        if not errors:
+            raise ValueError("unrecognized failure: " + heading)
+        cause = re.sub(r"0x[0-9a-f]+", "0xADDRESS", errors[-1])
+        digest = hashlib.sha256(cause.encode()).hexdigest()
+        causes[digest] = cause
+        failures[heading, digest] += 1
+    return {
+        "tests": int(count[1]),
+        "seconds": float(count[2]),
+        "raw_log_sha256": hashlib.sha256(raw).hexdigest(),
+        "failures": [
+            {"identity": key[0], "cause_sha256": key[1], "occurrences": n}
+            for key, n in sorted(failures.items())
+        ],
+    }, failures
+
+
+base, before = read(sys.argv[1])
+final, after = read(sys.argv[2])
+
+
+def changes(counter):
+    return [
+        {"identity": k[0], "cause_sha256": k[1], "occurrences": n}
+        for k, n in sorted(counter.items())
+    ]
+
+
+if "--compact" in sys.argv[3:]:
+    for result in (base, final):
+        failures = result.pop("failures")
+        result["identity_cause_occurrences_sha256"] = hashlib.sha256(
+            json.dumps(failures, sort_keys=True).encode()
+        ).hexdigest()
+        result["unique_identity_causes"] = len(failures)
+        for kind in ("FAIL", "ERROR"):
+            result[kind.lower()] = sum(
+                row["occurrences"] for row in failures if row["identity"].startswith(kind + ":")
+            )
+        counts = collections.Counter()
+        for row in failures:
+            counts[row["cause_sha256"]] += row["occurrences"]
+        result["cause_occurrences"] = dict(sorted(counts.items()))
+
+print(
+    json.dumps(
+        {
+            "base": base,
+            "final": final,
+            "causes": causes,
+            "introduced": changes(after - before),
+            "removed": changes(before - after),
+            "normalization": "Only hexadecimal memory addresses are normalized; terminal exception text is otherwise exact.",
+        },
+        indent=2,
+        sort_keys=True,
+    )
+)

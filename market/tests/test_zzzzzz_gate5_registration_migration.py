@@ -2,7 +2,6 @@ from importlib import import_module
 
 from django.contrib.auth import get_user_model
 from django.db import connection
-from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
 from market.models import (
@@ -10,6 +9,7 @@ from market.models import (
     HistoricalDiscoveryPlan,
     HistoricalDiscoveryRegistration,
 )
+from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_replacement_canary_activation import (
     MIGRATION_0015,
     attempt_one_hash,
