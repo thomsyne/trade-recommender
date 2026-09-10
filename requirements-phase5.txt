@@ -1,0 +1,10 @@
+# Optional offline risk challenger; never imported by a production consumer.
+arch==7.2.0
+numpy==1.26.4
+scipy==1.13.1
+pandas==2.2.3
+packaging==24.2
+python-dateutil==2.9.0.post0
+six==1.17.0
+pytz==2025.2
+tzdata==2025.2
