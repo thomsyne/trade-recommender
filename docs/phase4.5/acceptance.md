@@ -1,7 +1,8 @@
 # Phase 4.5 engineering acceptance matrix
 
-Status: available engineering evidence complete; independent review required,
-not self-accepted. Restore-dependent and deployment gates remain explicit below.
+Status: **Final PM ACCEPT for opening a PR only — not rollout**, 2026-09-10.
+Independent review and final requirements traceability are complete for the
+reviewed engineering head. Restore-dependent and deployment gates remain below.
 Base, local main and fetched origin/main: `62cf0a095407b1ec29d9c4999ccc56de38fee9d8`.
 Initial worktree clean; fast-forward was a no-op. Working branch:
 `phase4.5/architecture-stabilization`. No unrelated changes may be overwritten.
@@ -46,4 +47,54 @@ must be mapped to evidence or an explicit unresolved limitation in the handoff.
 | 3a, 3b | [Operations](operations.md): both-version measured query/RSS/WAL/heap/index/TOAST/race/backlog limits, clean restarts and full available-test matrix | Synthetic envelope is not deployment sizing; crash recovery, long outages, retained WAL and production queue recovery require rehearsal |
 | 3c | Offline source-backed US Christmas closure and fail-closed half-open interval policy; five tests | No Canadian/provider-wide open-session attestation; absent coverage blocks readiness |
 | 4a | [Phase5 readiness](phase5-readiness.md): immutable outputs/versions, clocks, missingness, provenance, allowed derivations and prohibited reinterpretations | Documentation only; no Phase5 strategy, schedule, consumer or activation |
-| All | Final checks pass; four local checkpoint commits plus one bounded review-correction commit; task resources removed; live main ref unchanged | Independent review remains required; no push/PR/deployment performed |
+| All | Final checks pass; initial acceptance record, four local checkpoint commits and one bounded review-correction commit; task resources removed; live main ref unchanged | Independent review reconciled below; PM acceptance adds only a local documentation commit; no push/PR/deployment performed |
+
+## Final PM traceability decision
+
+Reviewed engineering head: `4ad4c081ee2b35882afd383bb4ee6156dc32a754`.
+Direct checks confirmed the clean named branch, six unpushed commits, no upstream
+or remote Phase4.5 branch, and local main/origin/main/live remote main at the base
+above. This decision covers the complete base-to-head diff, all Phase4.5 documents,
+the engineer handoff and both independent reviews; it is not a new code audit.
+
+| Checkpoint | PM verdict | Acceptance basis and retained limit |
+|---|---|---|
+| 1 — test/migration harness | ACCEPT for PR | Singleton 0027 replacement; fresh empty PG15.14/17.6 installation; per-scenario historical isolation; exact installed catalog, reversal, recorder and contention evidence; genuine populated-negative restore preserves original refusal. Only six unchanged, source/identity-pinned fixture methods are restore-required. Default suite remains non-green. Genuine accepted-success and already-applied-0027 restore/no-op proofs remain mandatory before rollout. |
+| 2 — architecture boundary | ACCEPT for PR | Canonical completion/first-known/availability calculations preserve distinct clocks and historical contracts. Python/DB ownership is explicit; published SQL guards, descriptor identity and protected Phase1–4 behavior remain unchanged. |
+| 3 — operations | ACCEPT for PR | Exact PG15.14 compatibility and PG17.6 local certification, reproducible measurements and thresholds, bounded backlog/reconnect and clean-restart evidence, and source-backed exceptional-calendar fail-closed policy are documented. This is not production-capacity, crash/queue-recovery, deployed-alerting or provider-wide calendar certification. |
+| 4 — Phase5 readiness | ACCEPT, documentation only | The consumption matrix pins immutable outputs, versions, causality, missingness and provenance, with explicit allowed derivations and forbidden reinterpretations. No Phase5 strategy, schedule, consumer, eligibility change or activation is introduced. |
+
+The [initial independent review](https://ampcode.com/threads/T-01a08bc9-27f3-755f-912f-95aa4def329a)
+rejected forced-RLS visibility (P1), materialized-view locking (P2) and an overbroad
+runner waiver (P3). The [bounded correction review](https://ampcode.com/threads/T-01a08c1d-c163-7277-9169-3382150d6c1a)
+verified all three closed at the reviewed head: uncertain visibility/unsupported
+relations delegate unchanged, and the exact waiver fails closed on pin drift or
+missing identities while retaining an unlisted regression. Its 53/53 checks passed
+on each exact version. No concrete unmet matrix requirement or remaining P0–P3
+finding remains within this PR acceptance scope.
+
+Engineering records 1,464 available tests passing on each version out of 1,470
+discovered. The independent correction review did not rerun that full partition;
+deleted broad-run logs lacked retained hashes. Default fixture runs discover six,
+execute zero and report a setup error, not passes or skips. The six restore-required
+methods and two unavailable genuine rollout proofs are **honest pre-rollout gates
+compatible with this PR acceptance**, not completed proofs or a waiver of rollout
+requirements. The available backup ends at 0023 without accepted registration;
+its genuine negative result cannot substitute for either successful restore path.
+
+The owner's external-access authorization and [action ledger](external-actions.md)
+support the recorded AWS metadata/backup reads and read-only deployed SQL, followed
+by disposable local restores. No activation, provider API call, deployed application
+or database mutation occurred according to that evidence; SSM audit records and
+ambient scheduled ingestion are explicitly distinguished. The private archive and
+restore digest were not independently reacquired for this PM decision. Public
+provider documentation is not provider acquisition. This review made no AWS,
+production, provider, `.env.local` or existing-database access.
+
+Cheap direct verification passed: clean/ref checks, full-diff inspection,
+`git diff --check`, exact six waiver/source hashes, unchanged fixture source and
+published migrations, and unchanged protected runtime directories. No database
+suite was rerun for this documentation decision. This acceptance permits opening
+a PR as a subsequent action; it performs or authorizes no push, merge, deployment,
+rollout, Phase5 implementation or activation. All documented operational and
+restore gates still apply before those separately authorized steps.
