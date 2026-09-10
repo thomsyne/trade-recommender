@@ -10,6 +10,10 @@ An empty application database at 0026 receives the exact Gate8I registration
 validator, with no acquisition, registration, candle or audit evidence inserted.
 All inspected non-framework tables are locked until transaction commit. Any
 populated table routes to the unchanged original operation without fallback.
+After locking, any enabled row-level security also delegates: caller-visible
+emptiness cannot establish database emptiness. No RLS setting or policy is changed.
+Unsupported relation kinds (including views, materialized views and foreign
+tables), or missing historical market tables, delegate before attempting locks.
 Catalog drift fails atomically. Framework exceptions are limited to Django's
 migration recorder, content types and permissions; an auth user is not exempt.
 
@@ -25,8 +29,13 @@ SHA-256 is `39e01cbf2748adbcb81d9b5f1079fd5004fdd5260e55af72dec8537f2b1b93bc`.
 
 `test_gate8i_empty_bootstrap` checks empty installation, exact catalog delta,
 no-op, reverse/reapply, metadata/audit/user/unknown-table populated refusal,
-function and trigger drift, and a concurrent writer. Its recorder fixture is
-explicitly representative: it records original-0027 on an isolated 0026 graph
+function and trigger drift, and a concurrent writer. Review regressions cover
+empty/populated materialized views and a non-superuser database owner with
+ENABLE + FORCE RLS, no policy, and one hidden SourceRegistry row. Both original
+and replacement refuse with the exact accepted-successor prerequisite error;
+recorder, functions, triggers, rows, sequences, relation kinds, RLS flags and
+policies remain unchanged. The administrator still sees the hidden row.
+Its recorder fixture is explicitly representative: it records original-0027 on an isolated 0026 graph
 solely to prove that Django adds the replacement recorder row without executing
 an operation. It does not represent a production restore or accepted evidence.
 
@@ -47,13 +56,13 @@ S1 refusal expectation, an old Gate5 catalog assertion on the current graph,
 and a role assertion against the cluster administrator (260 errors, 2 failures).
 These identities are diagnoses, not waived current-state regressions.
 
-Checkpoint verification: fresh-head/no-op, bootstrap negative/recorder/concurrency
-and genuine-restore refusal proofs pass on both exact versions. The final targeted
-repair selections pass (PG15: 35 tests; PG17: 23 tests), including research-history
-isolation and real child-process execution. The final PG17 combined available
-suite passes all 1,456 tests in 1,243.058 s, with only the six declared restore-required
-tests excluded before suite construction. Subsequent compatibility certification
-also passed all 1,456 available tests on PG15 in 1,235.804 s. See
+Checkpoint verification includes genuine-restore refusal on both exact versions.
+After the bounded review corrections, fresh-head/no-op and all 51 focused
+bootstrap/reversal/recorder/contention/runner/historical tests pass on both versions.
+Each final available-evidence suite executes all 1,464 selected tests: PG15.14 in
+1,508.326 s and PG17.6 in 1,508.445 s, zero failures/errors/skips. Only the six
+exact pinned restore-required tests are excluded from 1,470 discoverable tests.
+The real child-process tests remain executed, not waived. See
 [verification](verification.md) for final results and intermediate failure identities.
 
 ## Explicit unavoidable exclusions and deployment gate
@@ -83,6 +92,9 @@ also depend on a fabricated sealed registration rejected by current governance.
 They remain unchanged, pending an honest restore-backed fixture. The explicit
 `market.tests.phase45_runner.AvailableEvidenceRunner` prints every excluded ID;
 it is not the default runner and does not label these tests skipped or passed.
+The waiver is an exact six-ID set pinned with its fixture-source SHA-256, not a
+class prefix. Identity/source drift fails closed; an injected unlisted regression
+is retained and its failing body executes. See [verification](verification.md).
 No synthetic data in this work is accepted provider acquisition evidence.
 
 ## Reproduction

@@ -3,7 +3,56 @@
 This record distinguishes original-base failure, intermediate diagnostics and
 final available-evidence verification. None is a production activation approval.
 
-## Final combined results
+## Bounded independent-review corrections
+
+The replacement now delegates to unchanged original 0027 when RLS makes
+emptiness unprovable, checking flags while table locks are held. Unsupported
+relation kinds delegate before locking. The evidence runner excludes exactly
+six pinned IDs, never a class prefix, and rejects identity/source drift.
+
+| Exact PostgreSQL version | Executed | Result | Test time |
+|---|---:|---|---:|
+| 15.14 | 1,464 | OK, zero failures/errors/skips | 1,508.326 s |
+| 17.6 | 1,464 | OK, zero failures/errors/skips | 1,508.445 s |
+
+Each explicit available-evidence run excludes exactly the same six tests below.
+Default broad discovery independently finds **1,470** tests and retains all six.
+There are eight new tests: three database regressions and five runner checks.
+
+Focused selection: `market.tests.test_gate8i_empty_bootstrap`,
+`market.tests.test_phase45_runner`, `market.tests.test_gate8i_final_dataset_acceptance`,
+`market.tests.test_m15_live_granularity`, `research.tests.test_migrations`.
+All **51 tests** pass on PG15.14 (**58.937 s**) and PG17.6 (**58.380 s**).
+This includes twelve bootstrap scenarios, five runner checks, historical
+shared-head isolation, guarded reversal, recorder preservation and contention.
+The exact new database probes exercise a non-superuser database owner with
+ENABLE + FORCE RLS/no policy (visible SourceRegistry count 0, real count 1),
+and both empty and populated materialized views. Each requires unchanged
+original acceptance refusal, one delegation and atomic catalog/recorder/data
+preservation, including RLS flags/policies and materialized-view contents.
+
+Fresh full-head migration and no-op passed again on both exact versions, comparing
+all 110 non-recorder tables (including framework tables), application sequences,
+and exact recorder/catalog fingerprints. `make check`, `git diff --check`,
+Terraform formatting and offline IAM/bootstrap/remote-deploy/backup/infra-policy/
+Compose checks pass again (including all 13 backup fault-injection tests).
+Both default-runner fixture-module runs discover six tests, execute zero, and visibly report one
+`setUpClass` error: `ProgrammingError: discovery plan conflicts with canonical contract`.
+The initial focused diagnostic had two errors in the new runner tests from an
+omitted Django discovery argument; those calls were corrected before final runs.
+Published migrations are unchanged. No production database, provider or deployed
+resource was accessed during this correction pass. Earlier external/benchmark
+evidence below is retained, not claimed as newly executed.
+
+Correction cleanup: both private source-built servers stopped cleanly after all
+commands completed; no test/history databases or temporary owner roles remained.
+The private source/build/data/log directories and temporary `tblib` installation
+were removed. Pre-existing services/worktrees were left untouched. Live remote
+main remains `62cf0a095407b1ec29d9c4999ccc56de38fee9d8`, matching local main and
+origin/main; no remote Phase4.5 branch exists. The correction is a local-only
+commit following the original four checkpoints.
+
+## Pre-review combined results
 
 | Exact PostgreSQL version | Executed | Result | Test time |
 |---|---:|---|---:|
@@ -73,7 +122,8 @@ run in the parent when parallel mode is requested; they are not excluded or mock
 The unchanged class
 `research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests`
 contains six tests whose fixture fabricates accepted sealed identities rejected by
-the genuine guards. The available-evidence runner prints each excluded full ID:
+the genuine guards. The available-evidence runner prints each excluded full ID.
+The six exact full IDs are the class path above plus each following suffix:
 
 * `test_contract_identity_as_dataset_name_is_refused`
 * `test_dataset_name_as_contract_identity_is_refused`
@@ -81,6 +131,15 @@ the genuine guards. The available-evidence runner prints each excluded full ID:
 * `test_every_registration_identity_mismatch_remains_fail_closed`
 * `test_exact_accepted_dataset3_identity_uses_one_registration_query`
 * `test_preload_query_budget_is_three_independent_of_row_count`
+
+The reviewed fixture-source SHA-256 is
+`43dbd64834689ed592152769332246989d0b78c192af27546bea986f00ca99eb`.
+The UTF-8, newline-joined, sorted full-ID set (no trailing newline) SHA-256 is
+`bf0b6468bc644c40e5a5ef5fe077960c0ed01fe46fd7be840dc92cceafb01ffd`.
+Both pins and the existence of all six identities are checked before filtering.
+Adding/changing fixture source requires review; an injected in-memory unlisted
+`DetectorV2QueryBudgetTests.test_new_unrelated_regression` is retained and
+executes its deliberately failing body in the runner regression test.
 
 The default runner is unchanged and still exposes that fixture's setup failure.
 A partitioned pass is not an unqualified default-suite pass. Genuine accepted
@@ -108,7 +167,7 @@ The application descriptor remains `market-state-descriptor@0.12.0`, digest
 Scheduled live scope remains D/H1/H4/W; M15 stays dormant. Published migrations,
 forecasts, operations, technical formulas and decision eligibility are unchanged.
 
-## Local handoff and cleanup
+## Original checkpoint handoff and cleanup
 
 The four local commits on `phase4.5/architecture-stabilization` separately cover
 bootstrap/isolation, architecture/availability, operations/calendar and Phase5
