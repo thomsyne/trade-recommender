@@ -601,6 +601,32 @@ The independent tester (no P0) surfaced contract gaps, corrected here:
   integrity conditions verifiable from persisted state, with the remainder
   structurally precluded by immutability/uniqueness or by determinism.
 
+## 16.6 Corrections from the second independent review (slice 10)
+
+A deeper independent review found sixteen findings (no P0), all corrected in
+slice 10 (`d01b138`); see [review-lessons.md](review-lessons.md) for the table.
+Notable contract changes this made true:
+
+- **Snapshot identity** binds the requested scope, every consumed candle
+  (including the auxiliary M15/D/W the ORB and prior context read) and the
+  macro/event evidence hashes — not only the requested granularities.
+- **The definition governs computation**: compute rejects a definition whose
+  body does not match the descriptor contract; a versioned **terminology
+  registry** (`market/state/terminology.py`) is now present and both compute and
+  the integrity report fail closed on unregistered terms and banned vocabulary.
+- **Registered-interval honesty**: swings and FVGs require registered-consecutive
+  candles; a **monthly context** (trend) exists and a month is complete only when
+  every registered daily session is present.
+- **Contemporaneous evaluation**: FVG/ORB event facts are stamped at completion
+  and qualified against the ATR at their creation, so later bars cannot re-write a
+  past fact.
+- Previously-deferred items are now **implemented**, not deferred: FVG
+  spread-normalization (candle-3 spread), FVG deterministic internal-swing-break
+  invalidation, ORB retest, and overnight-session extremes. Definition → 0.8.0.
+- **Bounded at the query**: the eligible-candle scan uses `DISTINCT ON … LIMIT`
+  plus a supporting index; malformed definition/snapshot inserts are rejected by
+  database CHECK constraints (§3 of the review).
+
 ## 16. Commit plan
 
 1. M15 contract + calendar support (+ SQL parity migration).

@@ -1,5 +1,15 @@
 # Phase 4 — Acceptance
 
+> **SUPERSEDED (reopened).** After the acceptance below, a deeper independent
+> review found sixteen substantive findings (no P0) that the earlier tester/PM
+> passes missed — snapshot identity not binding all consumed inputs, the
+> definition not governing computation, a missing terminology registry, an
+> unbounded SQL scan, registered-interval and contemporaneous-ATR gaps, and
+> more. All sixteen were corrected in **slice 10** (commit `d01b138`) with
+> discriminating tests, and re-verification is in progress. This acceptance does
+> **not** stand until that re-review completes. See
+> [review-lessons.md](review-lessons.md).
+
 Recorded **after** independent-tester and PM acceptance. Branch
 `phase4/deterministic-market-state`, HEAD `ec1bdaf` (this file adds one more
 commit). Base / `origin/main`: `a3fbe6ce7fc08895c5696a2a25744f46e5d6e284`

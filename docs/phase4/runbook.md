@@ -23,7 +23,7 @@ records, and none calls a provider.
 | `market/state/integrity.py` | Read-only semantic-integrity verification |
 | `market/state/tasks.py` | Durable per-instrument calculation task (unscheduled) |
 
-The current descriptor definition is `market-state-descriptor@0.7.0`
+The current descriptor definition is `market-state-descriptor@0.8.0`
 (`compute.DESCRIPTOR_DEFINITION`); the version is bumped whenever the feature set,
 a threshold or a lookback changes, so every snapshot binds the exact algorithm
 versions. Bounded per-granularity lookbacks (`compute.LOOKBACKS`) are pinned in

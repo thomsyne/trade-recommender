@@ -28,6 +28,31 @@ intact. One non-blocking nuance was raised — the eligible-observation **DB que
 still scanned O(history) rows before slicing — and was then fixed in `3abcecc`
 (bounded cursor), so the scan itself is now bounded.
 
+## Round 3 — deeper independent review (slice 10, `d01b138`)
+
+A more rigorous independent review found **sixteen** findings the first two passes
+missed (no P0). All corrected with discriminating tests
+(`test_market_state_review_fixes`). Summary:
+
+| # | Sev | Finding | Fix |
+|---|---|---|---|
+| 1 | P1 | Snapshot identity bound only requested candles; empty M15/H4 collided; an added consumed M15 candle silently changed an H1 snapshot. | Identity now binds scope + all consumed candles (incl. auxiliary M15/D/W) + macro/event evidence hashes. |
+| 2 | P1 | Definitions did not govern computation; no terminology registry. | compute rejects a non-matching definition; new `terminology.py` registry; compute/integrity fail closed on unregistered terms and banned vocabulary. |
+| 3 | P1 | Malformed inserts allowed; integrity certified contradictory snapshots; malformed manifest crashed it. | Migration 0033 CHECK constraints (hash format, JSON shape); integrity adds instrument/granularity/terminology/availability checks and bounded malformed handling. |
+| 4 | P1 | Lookback bounded Python only; SQL scanned all history. | `DISTINCT ON (timestamp) … LIMIT` + supporting index. |
+| 5 | P1 | Observed positions substituted for registered intervals; a single day was a "completed month"; no monthly trend. | Registered-consecutiveness for swings/FVG; monthly context with full-session completeness. |
+| 6 | P1 | Historical FVG/ORB facts backdated and requalified by later ATR. | Bars carry completion + spread; created_at/breakout_at at completion; contemporaneous ATR. |
+| 7 | P1 | FVG spread-norm/internal-break/ORB retest/overnight extremes missing; expiry could un-expire. | All implemented; expiry window-bounded. |
+| 8 | P2 | Event vintage window applied before dedup; future retrievals admitted; empty = attested. | Latest vintage before window; retrieval enforced; coverage-unavailable distinct. |
+| 9 | P2 | Acceptance declared before the reclaim window matured. | Requires the full window. |
+| 10 | P2 | Zone tests counted pre-formation; wrong exit threshold; no lifecycle. | From formation, `>=` margin, expiry + invalidation. |
+| 11 | P2 | Failed breakout counted as a retest. | Retest requires holding beyond the boundary. |
+| 12 | P2 | Equal highs/lows mislabelled / undetected. | `equal_high`/`equal_low` labels; local-extrema detection. |
+| 13 | P2 | Read-only preview wrote a definition. | In-memory unsaved definition. |
+| 14 | P2 | Task retry non-idempotent; registration raced. | Cutoff required; atomically idempotent registration. |
+| 15 | P2 | Two new parity failures after a migration-reversal test. | Parity setUp re-installs the M15 SQL mirrors. |
+| 16 | P3 | `expected_candle_timestamps` rejected valid M15 starts. | M15 alignment added. |
+
 ## Lessons
 
 - A "bounded window" claim must be enforced at the **fetch and the query**, not
