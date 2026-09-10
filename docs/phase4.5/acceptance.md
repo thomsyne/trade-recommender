@@ -1,6 +1,7 @@
 # Phase 4.5 engineering acceptance matrix
 
-Status: implementation in progress; independent review required, not self-accepted.
+Status: available engineering evidence complete; independent review required,
+not self-accepted. Restore-dependent and deployment gates remain explicit below.
 Base, local main and fetched origin/main: `62cf0a095407b1ec29d9c4999ccc56de38fee9d8`.
 Initial worktree clean; fast-forward was a no-op. Working branch:
 `phase4.5/architecture-stabilization`. No unrelated changes may be overwritten.
@@ -29,3 +30,15 @@ blanket AWS/production-access restriction below only for the recorded actions.
 Resources must be uniquely named, disposable and task-owned. Retained evidence must
 be compact and reproducible, without raw logs, machine paths or secrets. Each gate
 must be mapped to evidence or an explicit unresolved limitation in the handoff.
+
+## Final gate disposition
+
+| Gates | Evidence / outcome | Remaining boundary |
+|---|---|---|
+| 1a, 1b | [Verification](verification.md): 1,456 available tests green on each exact version; real per-scenario historical databases and exact shared-head fingerprint checks | Six unchanged accepted-fixture tests explicitly excluded; default suite remains blocked by their setup |
+| 2a, 2b | [Architecture ADR](architecture.md), asymmetric clock/DST checks, immutable identity races and unchanged descriptor digest | No SQL guard removed, no SQL formula duplicated |
+| 2c | [Checkpoint 1](checkpoint-1.md) and [genuine restore](external-actions.md): fresh, negative, catalog-drift, recorder, contention, no-op and reverse/reapply proofs | Genuine accepted-success and already-applied-0027 restore/no-op proof still mandatory before rollout; deployed backup ends at 0023 |
+| 3a, 3b | [Operations](operations.md): both-version measured query/RSS/WAL/heap/index/TOAST/race/backlog limits, clean restarts and full available-test matrix | Synthetic envelope is not deployment sizing; crash recovery, long outages, retained WAL and production queue recovery require rehearsal |
+| 3c | Offline source-backed US Christmas closure and fail-closed half-open interval policy; five tests | No Canadian/provider-wide open-session attestation; absent coverage blocks readiness |
+| 4a | [Phase5 readiness](phase5-readiness.md): immutable outputs/versions, clocks, missingness, provenance, allowed derivations and prohibited reinterpretations | Documentation only; no Phase5 strategy, schedule, consumer or activation |
+| All | Final checks pass; four local checkpoint commits; task resources removed; live main ref unchanged | Independent review remains required; no push/PR/deployment performed |

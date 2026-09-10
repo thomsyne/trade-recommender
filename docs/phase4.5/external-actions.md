@@ -62,6 +62,9 @@ incremental request/transfer charges; actual billed cost was not measured. Exist
 instance and backup-retention costs continue unchanged. The source backup/version
 was not deleted or altered and remains subject to existing retention policy.
 
-Raw backup and restored databases stay only in the permission-restricted task
-scratch directory until final cleanup; no raw dump, logs, secrets or row payloads
-belong in Git. Final cleanup and remote-ref state are recorded in the handoff.
+Both task-owned PostgreSQL servers were stopped after successful verification.
+The private scratch directory, raw backup, restored/test databases, source builds,
+temporary restart probe and raw logs were removed. No raw dump, logs, secrets or
+row payloads were committed. The temporary `tblib` test installation was removed;
+unrelated worktrees and existing resources were left intact. Final remote-ref and
+local handoff state are recorded in [verification](verification.md).

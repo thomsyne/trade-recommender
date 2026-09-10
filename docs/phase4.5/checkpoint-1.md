@@ -52,8 +52,9 @@ and genuine-restore refusal proofs pass on both exact versions. The final target
 repair selections pass (PG15: 35 tests; PG17: 23 tests), including research-history
 isolation and real child-process execution. The final PG17 combined available
 suite passes all 1,456 tests in 1,243.058 s, with only the six declared restore-required
-tests excluded before suite construction. The final PG15 combined run continues
-as the compatibility certification gate; its result belongs in the final handoff.
+tests excluded before suite construction. Subsequent compatibility certification
+also passed all 1,456 available tests on PG15 in 1,235.804 s. See
+[verification](verification.md) for final results and intermediate failure identities.
 
 ## Explicit unavoidable exclusions and deployment gate
 
