@@ -23,7 +23,7 @@ records, and none calls a provider.
 | `market/state/integrity.py` | Read-only semantic-integrity verification |
 | `market/state/tasks.py` | Durable per-instrument calculation task (unscheduled) |
 
-The current descriptor definition is `market-state-descriptor@0.8.0`
+The current descriptor definition is `market-state-descriptor@0.9.0`
 (`compute.DESCRIPTOR_DEFINITION`); the version is bumped whenever the feature set,
 a threshold or a lookback changes, so every snapshot binds the exact algorithm
 versions. Bounded per-granularity lookbacks (`compute.LOOKBACKS`) are pinned in
@@ -40,6 +40,8 @@ All use the disposable test-DB or a read-only connection; none is scheduled.
 # Verify semantic integrity of persisted snapshots (nonzero exit on violation):
 .venv/bin/python manage.py market_state_integrity
 .venv/bin/python manage.py market_state_integrity --instrument EUR_USD
+# Continue a bounded report when has_more is true (use its next_after_id):
+.venv/bin/python manage.py market_state_integrity --after-id 100
 
 # Offline M15 acquisition + snapshot storage estimate (no DB/provider):
 .venv/bin/python manage.py estimate_m15_cost --instruments 12
@@ -104,8 +106,12 @@ result is `unavailable(incomplete_period)`.
 `market_state_integrity` recomputes the definition, output and input-manifest
 hashes and the idempotency key, checks payload/definition agreement, and per
 manifest candle checks interval-ended-by-cutoff, that the cited observation still
-exists, and that its content hash is unchanged (silent-revision detection), plus
-duplicate idempotency keys. Diagnostics are bounded ids and reason codes. This is
+exists, and that its content hash is unchanged (silent-revision detection).
+It independently reconstructs price and research classifications from exact
+cited records; it does not trust the stored classification as an oracle.
+Diagnostics are bounded ids and reason codes. Each page checks at most 100
+snapshots and returns `has_more` and `next_after_id`; a clean page does not certify
+the unchecked tail. Continue with `--after-id` until `has_more` is false. This is
 the **semantic-integrity** axis only — availability/freshness/coverage are
 separate. Exit code is nonzero when `violation_count > 0`.
 
@@ -130,10 +136,16 @@ Postgres credentials. Only one test process may use a keepdb at a time.
 
 ## Rollback / recovery
 
-- **Migrations**: forward-only. `0031` and `0032` are reversible
-  (`migrate market 0031` restores the pre-M15 SQL mirrors and drops the
-  market-state triggers/tables). They create no synthetic snapshots and rewrite
-  no existing evidence.
+- **Recovery default**: leave immutable evidence in place and deploy a separately
+  approved forward correction. Never migrate a populated production database
+  backward merely to disable the feature.
+- **0034 reversal** removes only its prospective semantic triggers/functions;
+  `migrate market 0033` retains every definition/snapshot and the M15 SQL mirrors.
+- **0031 reversal** occurs only when targeting `market 0030`, not `0031`.
+  Reversing through 0032 drops the market-state tables and destroys their evidence.
+  That is a disposable-database test operation, not an authorized production
+  recovery procedure. Existing irreversible downstream migrations may also block
+  a historical target. Do not fake those reversals.
 - **Snapshots/definitions** are immutable (ORM + DB triggers) and append-only;
   recovery is by computing a new snapshot at a later cutoff, never by editing.
 - **Task recovery**: the durable task is idempotent — re-running the same
@@ -154,3 +166,25 @@ Run `estimate_m15_cost` for the current offline estimates (records/day, storage/
 week and month). These are estimates from stated assumptions, not measurements,
 and authorize nothing. Local synthetic performance numbers are in
 [handoff.md](handoff.md); they are not production capacity claims.
+
+## Correction verification and limitations
+
+See [verification](verification/README.md) for measured SQL plans and storage.
+The 200/3,501-observation probes include build, persisted replay/verification,
+payload/manifest bytes, old-cutoff plans and PostgreSQL relation sizes. A separate
+probe includes 201 event vintages and 200 macro observations. Process RSS includes
+ingestion; isolated working set and WAL are unmeasured. None establishes capacity
+for a production cadence or authorizes scheduling.
+
+Historical migration fixtures that can run use separate temporary databases.
+Older fixtures blocked by irreversible forecasts 0031 use a preflight executor
+that raises the same error **before** undoing any M15 function. Their failures
+remain visible. Parity tests contain no SQL installation or repair. A broad
+failure count must be compared by identity and exception cause, not waved away as
+"baseline"; the current differential is retained with the verification artifacts.
+
+Acceptance remains explicitly superseded pending independent review. SQL enforces
+the supported definition, canonical identities, candle eligibility/revisions,
+basic prerequisites and research existence/availability. Full formula replay is
+an application/integrity check, not a duplicate SQL implementation. The existing
+superuser trigger-bypass caveat remains; no new production privilege is required.

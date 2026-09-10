@@ -1,139 +1,130 @@
-# Phase 4 — Engineer Handoff
+# Phase 4 — correction handoff, not acceptance
 
-Handoff for independent testing. Treat every claim below as a claim to verify,
-not a fact.
+**Not ready for acceptance.** This replaces the stale accepted/clean handoff.
+The correction preserves the interrupted implementation and adds adversarial
+checks, migration isolation and retained evidence. All thirteen findings remain
+subject to independent review; the residuals below are not waived.
 
-## Branch / base / status
+Starting implementation:
+[`064f98a`](https://github.com/thomsyne/trade-recommender/commit/064f98ac565b6d071eac0030ff477f9919333cde).
+Exact comparison base, local `main`, cached `origin/main`, and live remote main:
+[`a3fbe6c`](https://github.com/thomsyne/trade-recommender/commit/a3fbe6ce7fc08895c5696a2a25744f46e5d6e284).
+Branch: `phase4/deterministic-market-state`. The correction is local only; use
+[`160681b`](https://github.com/thomsyne/trade-recommender/commit/160681bf280c5e82fabfe9ac4ac3520cf17be774)
+for the code checkpoint and the verification file inventory for changed paths.
+Remote inspection found other unrelated branches, but no remote Phase 4 branch.
+No refs were fetched or changed, and nothing was pushed, deployed, activated,
+scheduled, or run against production, AWS, OANDA, or `.env.local`.
 
-- Branch: `phase4/deterministic-market-state`
-- HEAD: `3abcecc` (design record + slices 1–8, engineer docs, slice-9 review
-  corrections, and the bounded-scan follow-up). Independent tester has re-reviewed
-  and returned **ACCEPT for PM review** (see docs/phase4/review-lessons.md).
-- Base / merge-base with `main`: `a3fbe6ce7fc08895c5696a2a25744f46e5d6e284`
-- `origin/main`: `a3fbe6ce7fc08895c5696a2a25744f46e5d6e284` (unchanged; verified by fetch)
-- Branch is **not pushed** (`git ls-remote --heads origin phase4/…` is empty)
-- Working tree: **clean**
-- Nothing pushed, deployed, activated, scheduled, or run against production; no
-  provider/AWS/OANDA/Anthropic call was made. Migration 0027 used only the
-  documented fake-bootstrap accommodation in the disposable test DB.
+## Thirteen finding dispositions
 
-## Commits (base..HEAD)
+“Tested” below describes engineering evidence, not independent closure.
 
-```
-1afc8e0 docs(phase4): mandatory preliminary design record
-f6a0b7d feat(market): add M15 live granularity contract and calendar (slice 1)
-b7cf2aa feat(market): immutable market-state definition/snapshot persistence (slice 2)
-d3e7b00 feat(market): higher-timeframe descriptive context (slice 3)
-9a88fbe feat(market): support/resistance and structure context (slice 4)
-23f19d5 feat(market): liquidity and price-action proxies (slice 5)
-66b50ee feat(market): ORB and FVG features (slice 6)
-d62f67b feat(market): macro/event/spread point-in-time context (slice 7)
-ede9407 feat(market): durable task, integrity report and dry-run CLIs (slice 8)
-```
+| # | Finding | Correction and discriminating evidence | Residual |
+|---|---|---|---|
+| 1 | Exact frozen identity | One materialized candle set feeds manifest/features; research freezes before computation. Exact observation/predecessor/retrieval/policy/source/series hashes bind research. Existing identity race tests and trigger-vintage/no-query regression pass. | **Incomplete minimal-consumption contract:** auxiliary M15/D/W and research selection remain bounded conservative supersets, not a proven consumed-only set. Private eager research model instances are not deep immutable scalar records. |
+| 2 | Definition/terminology | Only descriptor 0.9.0 key/version/body/digest is supported. Runtime parameters, lookbacks, session policy and terminology are bound. Unknown identity, bad digest, changed constants and arbitrary classification tests reject. Migration digest agreement is tested. | New versions require a forward migration; this is deliberately not an extensible registry accepting arbitrary bodies. |
+| 3 | Semantic forgeries/integrity | 0034 rejects hash-valid scope/instrument/prerequisite/revision/availability forgeries. Non-superuser mutation and exact TRUNCATE refusal pass. Integrity safely handles malformed historical values, replays price/research, and independently compares eligible evidence sets; omission regression passes. Pages are bounded to 100 with continuation cursor. | SQL alone does not reconstruct every formula or reject every omitted-input forgery; application/integrity rejects those. Historical unsupported definitions report `unsupported_definition`, not retrospective certification. |
+| 4 | Monthly reachability | 400 D lookback retains fourteen complete months in the production-path regression. Missing registered months cannot become complete or bridge trend continuity. | Registered FX calendar does not model exceptional holidays. |
+| 5 | Formation/availability/context | Bars retain observation/completion/revision/content lineage. Formation and availability are distinct; ATR-input availability propagates. Displacement/sweep use historical ATR, ORB uses breakout spread. Frozen macro/event vintage and reschedule tests distinguish historical from final-cutoff context. | Full adversarial coverage of every late revision × trigger × lifecycle combination is not established by these tests. |
+| 6 | FVG normalization | Inclusive raw/ATR/pip/spread minima are pinned; equality and rejection in both directions, absent ATR, first-following gaps and late ATR availability are tested. | No production calibration or trading interpretation is claimed. |
+| 7 | Registered succession | Weekend H1/D succession differs from true missing intervals. ATR, swings, FVG, acceptance, zones and candidate paths use registered continuity. | Independent audit of every contiguous-feature window remains required. |
+| 8 | Zone chronology/expiry | Confirmation-time ATR margins, directional kinds, member identities, post-availability tests, terminal invalidation and age >200 expiry. Tests distinguish pre-confirmation activity, later volatility and reachable expiry. | New members produce a new clustered identity; no persistent cross-snapshot zone ledger is introduced. |
+| 9 | Breakout failure/retest | Opposite-boundary failure works in both directions and is terminal. A later touch cannot become a retest of an already failed breakout. | Earlier valid retests can remain historical facts before a later failure. |
+| 10 | Complete sessions | Overnight and prior London/NY eight-hour extremes require full registered M15 coverage. ORB carries session/local/UTC boundaries and breakout context. | Eight-hour descriptive session windows are explicitly chosen policy, not exchange hours. |
+| 11 | SQL bounds/performance | Indexed cutoff horizon plus DISTINCT/LIMIT; research cap 2,048 fail-closed. 200/3,501 observations, old-cutoff and dense research EXPLAIN evidence retained. | LIMIT does not promise constant scan work for arbitrary revision density. Isolated RSS/WAL and production capacity remain unmeasured. |
+| 12 | Historical isolation/parity | Parity setup SQL repair removed. Runnable historical fixtures own disposable DBs; preflight raises unchanged irreversible-operation errors before partial rollback. Exact historical→parity sequence passes both DST checks. | Older historical fixtures still fail at unchanged irreversible forecasts0031; this does not make those fixtures runnable. Exact broad differential is retained. |
+| 13 | Honest documentation | Acceptance explicitly superseded. Design §17 governs corrections; runbook gives correct reversal targets and evidence warnings; this handoff and lessons replace stale claims. | No independent re-acceptance has occurred. |
 
-36 files changed, +4683 / -22. New package `market/state/` (14 modules), 9 test
-modules, 2 migrations (`0031`, `0032`), 3 management commands.
+## Original §4.1–§4.5 traceability
 
-## Requirement → code → test traceability
-
-| Requirement | Code | Test |
+| Requirement | Implementation | Verification modules |
 |---|---|---|
-| M15 granularity, alignment, completion, weekend/DST | `market/quality.py`, `live_acquisition.py`, `services.py` | `test_m15_live_granularity`, `test_observation_lineage` (parity matrix incl. M15) |
-| M15 non-activation (job inventory unchanged) | `quality.SCHEDULED_LIVE_GRANULARITIES`, `live_acquisition.LIVE_INTERVALS` pinned | `test_m15_live_granularity::M15ConstantsTests`, `test_schedule_integrity` |
-| M15 SQL/Python parity | migration `0031` CREATE OR REPLACE | `test_observation_lineage::test_interval_alignment_matches_python_across_dst`, `…completion…` |
-| Immutable versioned definition | `models.MarketStateDefinition`, `state/definitions.py` | `test_market_state_persistence::DefinitionRegistryTests` |
-| Immutable idempotent snapshot | `models.MarketStateSnapshot`, `state/snapshots.py` | `…::SnapshotPersistenceTests` |
-| Canonical serialization (no float/NaN) | `state/canonical.py` | `…::CanonicalSerializationTests` |
-| Causal manifest (ended/available/latest-revision) | `state/manifest.py` | `…::ManifestCausalityTests` |
-| Dual-layer immutability (ORM + DB triggers) | migration `0032` | `…::SnapshotPersistenceTests::test_raw_sql_update_delete_truncate_are_blocked` |
-| Swings + confirmation delay | `features.confirmed_swings` | `test_market_state_features::SwingTests`, `CausalConfirmationDelayTests` |
-| Trend / ATR / volatility percentile / BOS / CHoCH | `features.py` | `…::TrendTests/AtrTests/VolatilityPercentileTests/BreakOfStructureTests/ChangeOfCharacterTests` |
-| S/R zones (deterministic id, age, test count) | `structure.py` | `test_market_state_structure::ZoneTests` |
-| Equal levels / displacement / consolidation / prior extremes | `structure.py`, `compute.py` | `…::EqualLevelTests/DisplacementTests/ConsolidationTests/PriorExtremeTests` |
-| Sweep vs acceptance proxies | `liquidity.py` | `test_market_state_liquidity` |
-| FVG 3-candle proxy | `fvg.py` | `test_market_state_orb_fvg::FvgGeometryTests` |
-| ORB (first M15, missing = unavailable) | `sessions.py`, `orb.py` | `…::SessionConversionTests/OpeningRangeTests/OrbEndToEndTests` |
-| Macro/event/spread point-in-time | `context.py` | `test_market_state_context` |
-| Durable task, integrity, dry-run CLIs | `state/tasks.py`, `integrity.py`, 3 commands | `test_market_state_ops` |
+| §4.1 completed M/W/D/H4 context, swings/trend/ATR/volatility/structure | `state/features.py`, `compute.py`, `manifest.py` | `test_market_state_features`, `test_market_state_review_fixes`, `test_phase4_corrections` |
+| §4.2 zones/equal levels/displacement/consolidation/breakout lifecycle | `state/structure.py` | `test_market_state_structure`, correction tests |
+| §4.3 sweep/reclaim versus acceptance, normalized observable proxies | `state/liquidity.py` | `test_market_state_liquidity`, correction tests |
+| §4.4 M15 ORB, DST, FVG geometry/normalization/fill/expiry/internal break/context | `state/sessions.py`, `orb.py`, `fvg.py`, `context.py` | `test_market_state_orb_fvg`, `test_market_state_context`, correction and semantic-boundary tests |
+| §4.5 versioned terminology/formula/timeframe/formation/availability/expiry/invalidation | `state/terminology.py`, `definitions.py`, migration0034 | persistence, review-fix and semantic-boundary tests |
+| Persistence, idempotency, raw SQL, safe integrity, unscheduled tasks/CLIs | `state/snapshots.py`, `integrity.py`, `tasks.py`, management commands | persistence/ops/semantic-boundary tests and six-writer probe |
+| M15 contract without activation; SQL/Python parity | existing migration0031 and M15/observation code | M15 tests; exact historical-migration→parity run; schedule-integrity tests in broad run |
 
-## Formulas and assumptions
+Protected technicals, forecasts, settings, canonical production seed and live
+schedule source files match both starting implementation and exact base.
+`verification/protected.json` includes the asymmetric 28-candle technical output
+fingerprint, not just file diffs. No strategy, risk, sizing, cost, prompt,
+decision-enabled-instrument or schedule change is part of this correction.
 
-All formulas, thresholds and versions are in [design.md](design.md) §7–§10.
-Key assumptions worth adversarial attention:
+## Verification and preservation
 
-- Features operate on **midpoint** bars (`(bid+ask)/2` per OHLC component).
-- Confirmation delay is inherited from manifest eligibility, not re-implemented:
-  a candle is eligible only when complete, its interval has ended
-  (`live_candle_completion(start) <= cutoff`) and `observed_at <= cutoff`; the
-  latest revision known by the cutoff is used. The DB enforces
-  `observed_at >= interval_end`, so an eligible complete candle always satisfies
-  `interval_end <= cutoff`.
-- Zone identity = `sha256` of the versioned rounded `[low, high]` only.
-- Macro regime is currently point-in-time policy-rate level + direction; other
-  indicators deferred. Event severity is always `unavailable` (no trustworthy
-  field). FVG spread-normalization is `unavailable` in this release (price facts
-  retained) — a documented follow-up.
+See [verification/README.md](verification/README.md), `checks.txt` and the JSON
+artifacts for exact results, commands, failure identities and measurements.
 
-## Migration preservation
+- Focused Phase 4/M15: **163 tests pass**, including fourteen semantic-boundary
+  tests. Assertions check actual semantics; TRUNCATE specifically requires the
+  existing `must not be truncated` refusal, not an unrelated “immutable” message.
+- Exact live-observation historical migration→SQL/Python parity: **10 pass**;
+  no setup SQL installation. The separate impossible-plan test checks migration
+  state and installed M15 definitions remain byte-identical.
+- Broad comparison executes all `market operations forecasts`, not a selected
+  passing subset. Both sides use separate fresh schemas, UTF-8/template0 and the
+  same 0027 accommodation. `differential.json` retains every failing identity,
+  normalized terminal exception cause and repeated teardown occurrence.
+  Base: **838 tests, 2 failures/244 errors, 241 unique failing identities**.
+  Correction: **1,002 tests, 2 failures/238 errors, 235 unique failing identities**.
+  **No new failures or changed causes; six live-observation historical failures
+  removed.** The remaining 233 irreversible-error identities hit unchanged
+  forecasts0031. The two shared assertions are Gate5 installed-function MD5
+  `e7d028c9a27596a1b9fba65bd7015cb6` versus expected
+  `5ef0117c6a32cca8a81322a7766d8f52`, and the disposable connection role's
+  `on` versus `off` superuser expectation. Normal-role semantic probes pass
+  separately; neither inherited assertion is suppressed or weakened.
+- `make check`: Ruff, formatting, Django system checks, no pending migrations
+  and compileall pass. CI's offline IAM/bootstrap/remote/backup/infra/Compose/
+  Terraform-format/production-settings checks were exercised. Hosted CI and
+  deployment stages were not run; the unrelated full-repository Django suite
+  remains outside this focused broad comparison. Local PostgreSQL was 15.5,
+  not the CI service image's 17.6; cross-version execution is unverified.
+- An unaccommodated fresh graph fails at the unchanged data-dependent market0027.
+  Only that migration was faked in disposable bootstraps; the rest of the graph
+  installs normally, including M15 and 0034. This is **not** an unqualified fresh
+  install pass.
+- Starting-code populated upgrade: **110 tables, 549 rows**, including two
+  observations and one existing snapshot, byte-identical after 0034. Its reversal
+  to0033 and reapplication also preserved those rows. No synthetic snapshots were
+  migration-created. Existing unsupported evidence is reported safely.
+- Six non-superuser concurrent writers: **one snapshot, one created result,
+  identical output**. Temporary probe role was removed.
 
-- Forward-only. `0031` (AlterField choices + CREATE OR REPLACE of two SQL
-  mirrors) and `0032` (two new tables + immutability/no-truncate triggers) create
-  no synthetic snapshots and rewrite no existing rows. Both are reversible
-  (0031 restores exact pre-M15 SQL; 0032 drops its triggers/tables/functions).
-- `0032`'s no-truncate trigger reuses migration 0028's test-flush escape hatch
-  (`current_database() LIKE 'test\_%'` + auth_permission AccessExclusiveLock) so
-  Django's flush works while ordinary TRUNCATE still fails.
-- Fresh install verified via the disposable-DB bootstrap (0026 → 0027 --fake →
-  migrate applies 0031/0032 cleanly). `makemigrations --check` reports no changes.
-- **Not exhaustively verified this session**: a byte-equivalent populated upgrade
-  from exact Phase-3 main, and raw-SQL constraint-bypass beyond the snapshot
-  triggers. Flagged for the tester.
+## Measured cost, not production capacity
 
-## Test results (disposable test DB, market0027 accommodation, --keepdb)
+| H1 observations | Build queries / seconds | Compute + persist + verify queries / seconds | Manifest entries / bytes | Payload bytes |
+|---|---|---|---|---|
+| 200 | 6 / 0.0643 | 19 / 0.2166 | 200 / 33,001 | 9,265 |
+| 3,501 | 6 / 0.0819 | 20 / 0.3142 | 300 / 49,501 | 11,745 |
 
-- Focused market-state suite (9 modules): **113 tests, 0 failures/errors**
-  (`test_m15_live_granularity`, `test_market_state_{persistence,features,
-  structure,liquidity,orb_fvg,context,ops}`) after the slice-9 corrections.
-- Cross-module regression incl. `test_observation_lineage`,
-  `test_live_observations`, `test_schedule_integrity`, `operations.tests`:
-  **all green** (largest single run 193 tests, 0 failures).
-- `make check` equivalent (`ruff check .`, `ruff format --check .`,
-  `manage.py check`, `makemigrations --check --dry-run`, `compileall`): **clean**.
+Plans include SQL, LIMIT, actual rows, buffers and old cutoff. At 3,501 the
+current H1 selection uses the existing series/revision index, reads300 rows,
+filters0; the old-cutoff query returns0. The 200-row planner can choose a small
+sequential scan. Dense research adds 201 event vintages and 200 macro observations:
+7 build queries, 0.2000s, 193,259 payload bytes and 231,163 evidence bytes. The
+rescheduled-out event is absent and macro direction is checked as tightening.
 
-## Baseline comparison
+PostgreSQL heap/index/TOAST and compressed column sizes are recorded. Process peak
+RSS was about69/94 MB, **including ingestion**, not isolated feature working set.
+WAL is unmeasured because the disposable cluster served concurrent test databases.
+Production load, scheduler cadence, multi-instrument throughput and retention
+capacity are unmeasured. No rollout follows from these probes.
 
-- The touched non-state modules (`observation_lineage`, `live_observations`,
-  `schedule_integrity`) pass green on a fresh disposable DB. Early apparent
-  "baseline errors" were traced to **concurrent test runs polluting one keepdb**,
-  not real failures; on a clean single-process DB they pass.
-- The **broad** `market` suite is known-not-green: it retains the pre-existing
-  Gate8 migration-reversal failing identities (documented limitation). This
-  branch does not touch those migrations. **An exhaustive full-`market`-suite
-  identity diff (branch vs exact base) was not run this session** — flagged as a
-  residual for the tester to confirm no new failing identity is introduced.
+## Remaining work and cleanup boundary
 
-## Performance (local synthetic — not production capacity)
+The strict consumed-only/deep-immutable evidence requirement in finding1 is not
+fully closed. SQL is not a full independent formula engine; broader adversarial
+temporal/revision review remains necessary. Do not label the correction ready,
+self-accept, or activate it based on the passing focused suite.
 
-Measured locally on the disposable DB, single instrument. `compute_market_state`
-uses bounded windows and a stable query count independent of history length;
-`estimate_m15_cost` gives offline acquisition/storage estimates. See
-`estimate_m15_cost` output for capacity estimates; all such numbers are estimates
-from stated assumptions, not measurements. (A precise compute-latency figure was
-being measured at handoff time and can be regenerated with the probe in the
-scratchpad; the store path, not compute, dominates that probe.)
-
-## Retained artifacts / cleanup
-
-- Disposable databases: `p4_disp_mktstate` / `test_p4_disp_mktstate` (local
-  Postgres). Drop with the scratchpad helper `p4_testdb.sh drop`. No production
-  DB, backup, or restored data was used.
-- Scratchpad (session-local): test logs and the `p4_testdb.sh` helper.
-- No provider fixtures were fetched; all tests use synthetic candles and
-  hand-built research fixtures.
-
-## Explicit statement
-
-Nothing was pushed, deployed, activated, scheduled, or run against production;
-no live provider/AWS/OANDA/Anthropic call was made; `origin/main` is unchanged at
-`a3fbe6c` and the branch is unpushed. `technicals.py`, prompts, forecasts,
-lifecycle, sizing/cost, and the decision-enabled instrument set are untouched.
+Owned disposable resources are the private PostgreSQL cluster under
+`/tmp/p4-correction-7yufFa`, its databases, its `base`/`starting` worktrees, and
+`/tmp/p4-resume-x0R8N8`. Their removal and final Git/remote/worktree verification
+are recorded in `verification/checks.txt`. Unrelated local databases, worktrees,
+branches and services must remain untouched. Retained artifacts contain synthetic
+data only; temporary scripts and superseded logs are not operational dependencies.

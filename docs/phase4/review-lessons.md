@@ -1,68 +1,56 @@
-# Phase 4 — Review Lessons
+# Phase 4 — review lessons and remaining review boundaries
 
-Defects and gaps discovered during independent review, and how they were
-resolved. Two independent-tester passes were run against the branch; the first
-raised findings, the second re-verified the corrections.
+Earlier acceptance claims are superseded. The latest independent review found
+thirteen open findings after earlier reviews had reported acceptance. This
+correction is an engineering response, **not an independent re-acceptance**.
+See [acceptance](acceptance.md) and [handoff](handoff.md).
 
-## Round 1 findings → resolutions (committed as slice 9, `578e976`)
+1. **Hash agreement is not semantic agreement.** The original guards accepted
+   internally consistent false facts. Migration 0034 now validates a single
+   explicit definition contract, canonical identities, scope, candle revisions,
+   prerequisites and research availability. Integrity also replays classifications.
+   Even replay can certify an omitted-input forgery: the correction therefore
+   compares the claimed evidence with a separate bounded ledger selection. Full
+   formula and selection enforcement still belongs to the application/integrity
+   boundary, not solely to the SQL trigger.
+2. **Freeze before computing.** A separately queried manifest is not evidence of
+   what a computation consumed. Candle scalar tuples and eagerly loaded research
+   vintages now precede feature computation. Exact observation, predecessor,
+   retrieval, policy, source and series content is bound. Private research models
+   are not deep immutable scalar objects; independently review this distinction
+   and the conservative auxiliary/evidence supersets before closing finding 1.
+3. **Formation, completion and availability are different timestamps.** A pivot
+   needs confirming bars; ATR can itself arrive late. FVG, displacement, ORB and
+   sweep availability must include normalization evidence. Later volatility must
+   not requalify an old candidate. Adversaries must vary spread, ATR and retrieval
+   timing independently, rather than using identical timestamps everywhere.
+4. **Reachability needs a production-sized fixture.** A monthly trend that passes
+   on hand-built monthly bars can still be unreachable through daily ingestion.
+   The regression now exercises fourteen complete months through the actual
+   400-D observation selection. Zone expiry is tested beyond 200 intervals.
+5. **A weekend is not a missing registered interval.** Test Friday→Sunday and
+   Thursday→Sunday daily succession alongside a missing weekday interval. Apply
+   the same registered calendar to ATR, swings and lifecycle maturity.
+6. **Threshold boundaries and terminal transitions deserve asymmetric tests.**
+   FVG equality is tested at normalized minima in both directions. Breakout
+   failures across the opposite boundary are terminal; later touches cannot
+   retroactively make an invalid breakout a retest. Zone tests exclude formation
+   and confirmation activity and use frozen confirmation-time margins.
+7. **Parity setup must not install the implementation it is verifying.** The old
+   setup concealed migration contamination. Runnable historical fixtures now own
+   disposable databases; impossible older rollback plans fail before undoing
+   M15. Their inherited failures remain errors, not skips. The exact historical
+   sequence and broad failure identity comparison are separate required checks.
+8. **LIMIT is not a scan bound.** Retain EXPLAIN ANALYZE evidence for old cutoffs
+   and revision-rich research, not just output lengths. Time-window bounds and
+   2,048-row fail-closed caps limit selection but do not guarantee constant work
+   for every revision density. Process RSS including ingestion is not an isolated
+   working-set measurement; shared-cluster WAL is not snapshot WAL.
+9. **Documentation is part of the contract.** Pin versions without importing
+   moving runtime code into migrations. Test the migration digest against the
+   Python definition. Never describe destructive table reversal as a safe
+   operational rollback. Never carry stale acceptance or test counts forward.
 
-| # | Severity | Finding | Resolution |
-|---|---|---|---|
-| 1 | P1 | `compute` fetched eligible candles and built the input manifest with **no lookback** — the manifest and O(history) feature lists were unbounded, contradicting the stated bounded-window contract (design §14, handoff). | Added `compute.LOOKBACKS` (per-granularity), pinned in `DESCRIPTOR_DEFINITION["lookbacks"]`, threaded into `build_input_manifest` and every `eligible_observations` call. Definition → 0.7.0. |
-| 2 | P2 | `structure._zone_id` hashed only `[version, low, high]`, contradicting design §7.2 (`[version, instrument, timeframe, min, max]`); same band collided across instruments/timeframes. | `_zone_id(low, high, instrument, timeframe)`; liquidity level id uses the same helper. |
-| 3 | P2 | `consolidation_state` documented a `failed_bars` retest/failed-breakout window it never implemented (dead parameter, only `breakout` emitted). | Reworked over a `failed_bars`-length tail window; emits `breakout`/`retest`/`failed`. |
-| 4 | P3 | FVG had no expiry and no internal-swing-break invalidation (design §7.4). | Added `expired` (unfilled after `FVG_EXPIRY_BARS`); internal-swing-break made an explicit documented deferral (no overclaim). |
-| 5 | P3 | Liquidity sweep/acceptance scanned bars **predating** the reference level's formation. | Restricted to `bars[pivot.index:]` (at/after formation). |
-| 6 | P3 | Integrity report implemented a subset of design §11 while the docstring/handoff implied the full list. | Added `malformed_payload_schema` + `unsupported_granularity`; docstring rescoped honestly (remainder structurally precluded by immutability/uniqueness/determinism). |
-
-No P0 was found in either round: the tester could not produce future-data
-leakage, an immutability bypass, or a causality defect.
-
-## Round 2 (re-review) → all six RESOLVED, **ACCEPT for PM review**
-
-Independently verified each fix (bounded fetch/manifest empirically; zone-id
-collision-freedom; consolidation failed/retest; FVG expiry; liquidity slice;
-integrity checks), plus regression: 113 focused tests green, protected diff
-(`market/technicals.py`, `forecasts/`) empty, determinism/causality/immutability
-intact. One non-blocking nuance was raised — the eligible-observation **DB query**
-still scanned O(history) rows before slicing — and was then fixed in `3abcecc`
-(bounded cursor), so the scan itself is now bounded.
-
-## Round 3 — deeper independent review (slice 10, `d01b138`)
-
-A more rigorous independent review found **sixteen** findings the first two passes
-missed (no P0). All corrected with discriminating tests
-(`test_market_state_review_fixes`). Summary:
-
-| # | Sev | Finding | Fix |
-|---|---|---|---|
-| 1 | P1 | Snapshot identity bound only requested candles; empty M15/H4 collided; an added consumed M15 candle silently changed an H1 snapshot. | Identity now binds scope + all consumed candles (incl. auxiliary M15/D/W) + macro/event evidence hashes. |
-| 2 | P1 | Definitions did not govern computation; no terminology registry. | compute rejects a non-matching definition; new `terminology.py` registry; compute/integrity fail closed on unregistered terms and banned vocabulary. |
-| 3 | P1 | Malformed inserts allowed; integrity certified contradictory snapshots; malformed manifest crashed it. | Migration 0033 CHECK constraints (hash format, JSON shape); integrity adds instrument/granularity/terminology/availability checks and bounded malformed handling. |
-| 4 | P1 | Lookback bounded Python only; SQL scanned all history. | `DISTINCT ON (timestamp) … LIMIT` + supporting index. |
-| 5 | P1 | Observed positions substituted for registered intervals; a single day was a "completed month"; no monthly trend. | Registered-consecutiveness for swings/FVG; monthly context with full-session completeness. |
-| 6 | P1 | Historical FVG/ORB facts backdated and requalified by later ATR. | Bars carry completion + spread; created_at/breakout_at at completion; contemporaneous ATR. |
-| 7 | P1 | FVG spread-norm/internal-break/ORB retest/overnight extremes missing; expiry could un-expire. | All implemented; expiry window-bounded. |
-| 8 | P2 | Event vintage window applied before dedup; future retrievals admitted; empty = attested. | Latest vintage before window; retrieval enforced; coverage-unavailable distinct. |
-| 9 | P2 | Acceptance declared before the reclaim window matured. | Requires the full window. |
-| 10 | P2 | Zone tests counted pre-formation; wrong exit threshold; no lifecycle. | From formation, `>=` margin, expiry + invalidation. |
-| 11 | P2 | Failed breakout counted as a retest. | Retest requires holding beyond the boundary. |
-| 12 | P2 | Equal highs/lows mislabelled / undetected. | `equal_high`/`equal_low` labels; local-extrema detection. |
-| 13 | P2 | Read-only preview wrote a definition. | In-memory unsaved definition. |
-| 14 | P2 | Task retry non-idempotent; registration raced. | Cutoff required; atomically idempotent registration. |
-| 15 | P2 | Two new parity failures after a migration-reversal test. | Parity setUp re-installs the M15 SQL mirrors. |
-| 16 | P3 | `expected_candle_timestamps` rejected valid M15 starts. | M15 alignment added. |
-
-## Lessons
-
-- A "bounded window" claim must be enforced at the **fetch and the query**, not
-  just the output slice — declaring `lookbacks: {}` silently made the whole
-  contract unbounded.
-- Feature identities that must be globally unique (zone ids) have to bind their
-  full scope (instrument, timeframe), or they collide across contexts.
-- Documenting a parameter/behavior (retest/failed) that the code does not
-  implement is a design/impl contradiction a PM will reject — implement it or
-  mark it an explicit deferral.
-- Honest scoping beats overclaiming: an integrity report that names exactly what
-  it checks (and what is precluded structurally) is stronger than one that
-  implies coverage it lacks.
+All thirteen finding dispositions and original §4.1–§4.5 traceability are in the
+handoff. Passing this correction's focused tests does not replace independent
+adversarial review or resolve its explicitly listed limitations.

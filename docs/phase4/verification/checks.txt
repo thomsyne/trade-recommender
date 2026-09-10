@@ -1,0 +1,368 @@
+Phase4 correction verification: synthetic disposable PostgreSQL only.
+
+=== focused-complete.log ===
+Using existing test database for alias 'default'...
+...................................................................................................................................................................
+----------------------------------------------------------------------
+Ran 163 tests in 2.937s
+
+OK
+Preserving test database for alias 'default'...
+Found 163 test(s).
+System check identified no issues (0 silenced).
+
+=== parity-complete.log ===
+Using existing test database for alias 'default' ('test_p4_resume_21b0')...
+test_0029_applies_over_legacy_and_cross_source_chains_and_renumbers_dense (market.tests.test_zzzzzzzz_live_observation_migration.LineageRenumberMigrationTests.test_0029_applies_over_legacy_and_cross_source_chains_and_renumbers_dense) ... ok
+test_0029_migration_depends_on_0028 (market.tests.test_zzzzzzzz_live_observation_migration.LineageRenumberMigrationTests.test_0029_migration_depends_on_0028) ... ok
+test_legacy_rows_receive_honest_markers_and_nothing_is_fabricated (market.tests.test_zzzzzzzz_live_observation_migration.LiveObservationMigrationTests.test_legacy_rows_receive_honest_markers_and_nothing_is_fabricated) ... ok
+test_migration_is_reversible_and_dependency_pinned (market.tests.test_zzzzzzzz_live_observation_migration.LiveObservationMigrationTests.test_migration_is_reversible_and_dependency_pinned) ... ok
+test_reverse_is_refused_while_appended_snapshots_share_an_as_of (market.tests.test_zzzzzzzz_live_observation_migration.LiveObservationMigrationTests.test_reverse_is_refused_while_appended_snapshots_share_an_as_of) ... ok
+test_reverse_is_refused_while_the_observation_ledger_has_rows (market.tests.test_zzzzzzzz_live_observation_migration.LiveObservationMigrationTests.test_reverse_is_refused_while_the_observation_ledger_has_rows) ... ok
+test_completion_matches_python_across_dst (market.tests.test_observation_lineage.SqlPythonParityTests.test_completion_matches_python_across_dst) ... ok
+test_content_hash_matches_python_at_bounds_and_precision_edges (market.tests.test_observation_lineage.SqlPythonParityTests.test_content_hash_matches_python_at_bounds_and_precision_edges) ... ok
+test_helpers_ignore_a_hijacked_search_path (market.tests.test_observation_lineage.SqlPythonParityTests.test_helpers_ignore_a_hijacked_search_path)
+A shadowing schema on search_path must not change any helper's answer. ... ok
+test_interval_alignment_matches_python_across_dst (market.tests.test_observation_lineage.SqlPythonParityTests.test_interval_alignment_matches_python_across_dst) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 17.527s
+
+OK
+Preserving test database for alias 'default' ('test_p4_resume_21b0')...
+Found 10 test(s).
+Operations to perform:
+  Synchronize unmigrated apps: messages, staticfiles
+  Apply all migrations: admin, auth, contenttypes, dashboard, forecasts, market, operations, research, sessions
+Synchronizing apps without migrations:
+  Creating tables...
+    Running deferred SQL...
+Running migrations:
+  No migrations to apply.
+System check identified no issues (0 silenced).
+
+=== check-complete.log ===
+.venv/bin/ruff check .
+All checks passed!
+.venv/bin/ruff format --check .
+456 files already formatted
+.venv/bin/python manage.py check
+System check identified no issues (0 silenced).
+.venv/bin/python manage.py makemigrations --check --dry-run
+No changes detected
+.venv/bin/python -m compileall -q config dashboard forecasts market operations research
+
+=== ci-complete.log ===
+deploy IAM policy audit passed (5900 compact characters)
+host bootstrap simulations passed
+remote canonical bootstrap invocation test passed
+.backup: failure postgres/6760304c-8ed9-40b1-a8ad-a45f7e77def9.sql.gz
+backup: failure postgres/c638dc0d-3db0-4fd0-978e-4c9408c0e483.sql.gz
+.backup: failure postgres/beafff33-62cf-465d-97fb-cffc41355e41.sql.gz
+backup: failure postgres/a938dd40-b10e-4b84-9b6e-1a2592d46775.sql.gz
+.
+......backup: legacy marker publication failed; modern commitment stands
+backup: success postgres/c6d14874-8f88-4d57-9d21-ab3a84889634.sql.gz
+backup: success postgres/edf22323-79aa-4842-a425-582b6c8fbd4c.sql.gz
+....
+----------------------------------------------------------------------
+Ran 13 tests in 11.875s
+
+OK
+infra security-group policy assertions passed
+production Compose healthcheck test passed
+System check identified no issues (0 silenced).
+
+=== complete-fresh.log ===
+Operations to perform:
+  Target specific migration: 0026_gate8g_successor_acquisition_activation, from market
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying auth.0001_initial... OK
+  Applying market.0001_initial... OK
+  Applying market.0002_audit_event_append_only... OK
+  Applying market.0003_candle_candle_bid_ohlc_valid_and_more... OK
+  Applying research.0001_initial... OK
+  Applying research.0002_immutable_evidence... OK
+  Applying research.0003_providerevaluation... OK
+  Applying research.0004_macroobservation_provider_status_and_more... OK
+  Applying research.0005_immutable_economic_events... OK
+  Applying research.0006_alter_macroseries_parser... OK
+  Applying research.0007_economicevent_series_economicevent_source_url_and_more... OK
+  Applying research.0008_pair_evidence_intermarket... OK
+  Applying operations.0001_initial... OK
+  Applying operations.0002_joboccurrence_error_code_joboccurrence_error_summary_and_more... OK
+  Applying operations.0003_alter_providerbudgetreservation_actual_usd_and_more... OK
+  Applying operations.0004_providerbudgetreservation_budget_at... OK
+  Applying operations.0005_ownernotification... OK
+  Applying market.0004_alter_candle_granularity_and_more... OK
+  Applying market.0005_oandainstrumenttermssnapshot... OK
+  Applying market.0006_phase_2a_foundation... OK
+  Applying market.0007_phase_2a_append_only_triggers... OK
+  Applying research.0009_phase_2a_foundation... OK
+  Applying research.0010_phase_2a_append_only_triggers... OK
+  Applying market.0008_reject_governed_candle_promotion... OK
+  Applying research.0011_phase_2a_review_corrections... OK
+  Applying research.0012_enforce_phase_2a_lineage... OK
+  Applying research.0013_finalize_phase_2a_lineage... OK
+  Applying research.0014_enforce_entry_boundary... OK
+  Applying market.0009_historical_dataset_governance... OK
+  Applying market.0010_dataset_registration_enforcement... OK
+  Applying market.0011_portable_acquisition_identities... OK
+  Applying market.0012_operation_aware_historical_dataset... OK
+  Applying market.0013_provider_observed_inventory... OK
+  Applying market.0014_historical_discovery_supersession... OK
+  Applying market.0015_provider_observed_canary_activation... OK
+  Applying market.0016_provider_observed_h1_alignment_retry... OK
+  Applying market.0017_provider_observed_full_discovery_activation... OK
+  Applying market.0018_provider_observed_discovery_registration_activation... OK
+  Applying market.0019_provider_observed_data_contract... OK
+  Applying market.0020_provider_observed_acquisition_canary_activation... OK
+  Applying market.0021_provider_observed_full_acquisition_activation... OK
+  Applying market.0022_provider_observed_registration_validator_correction... OK
+  Applying market.0023_gate8b_prime_successor_discovery_activation... OK
+  Applying market.0024_gate8d3_prime_successor_registration_authority... OK
+  Applying market.0025_gate8e_successor_contract_materialization... OK
+  Applying market.0026_gate8g_successor_acquisition_activation... OK
+Operations to perform:
+  Target specific migration: 0027_gate8i_final_dataset_acceptance, from market
+Running migrations:
+  Applying market.0027_gate8i_final_dataset_acceptance... FAKED
+Operations to perform:
+  Apply all migrations: admin, auth, contenttypes, dashboard, forecasts, market, operations, research, sessions
+Running migrations:
+  Applying admin.0001_initial... OK
+  Applying admin.0002_logentry_remove_auto_add... OK
+  Applying admin.0003_logentry_add_action_flag_choices... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_group_name_max_length... OK
+  Applying auth.0011_update_proxy_permissions... OK
+  Applying auth.0012_alter_user_first_name_max_length... OK
+  Applying dashboard.0001_owner_mfa_and_login_throttle... OK
+  Applying market.0028_live_candle_observation_identity... OK
+  Applying market.0029_candle_observation_lineage... OK
+  Applying market.0030_ingestion_eligibility... OK
+  Applying forecasts.0001_initial... OK
+  Applying forecasts.0002_immutable_forecast_records... OK
+  Applying forecasts.0003_forecast_forecast_cutoff_not_after_issuance_and_more... OK
+  Applying forecasts.0004_recommendation... OK
+  Applying forecasts.0005_recommendation_cost_usd... OK
+  Applying forecasts.0006_recommendationresolution_recommendation_neutral_band_and_more... OK
+  Applying forecasts.0007_papertradeentry_papertraderesult_and_more... OK
+  Applying forecasts.0008_papertradecostassessment... OK
+  Applying forecasts.0009_positionsizeadvice... OK
+  Applying forecasts.0010_paperlifecycleevent_portfolioguard_and_more... OK
+  Applying forecasts.0011_portfoliocohort_portfolioselection_and_more... OK
+  Applying forecasts.0012_portfoliopolicyactivation... OK
+  Applying forecasts.0013_ensure_portfolio_immutability... OK
+  Applying forecasts.0014_deterministic_reviews... OK
+  Applying forecasts.0015_bounded_interpretations... OK
+  Applying forecasts.0016_reproducible_experiment_health... OK
+  Applying forecasts.0017_recommendation_model_identity... OK
+  Applying forecasts.0018_portfoliocohort_decision_deadline_and_more... OK
+  Applying forecasts.0019_phase3_integrity... OK
+  Applying forecasts.0020_phase3_identity_hash... OK
+  Applying forecasts.0021_phase3_evidence_boundaries... OK
+  Applying forecasts.0022_phase3_decision_boundaries... OK
+  Applying forecasts.0023_phase3_lifecycle_sources... OK
+  Applying forecasts.0024_phase3_admission_capacity... OK
+  Applying forecasts.0025_phase3_execution_evidence... OK
+  Applying forecasts.0026_phase3_price_and_availability... OK
+  Applying forecasts.0027_phase3_trusted_issuance... OK
+  Applying forecasts.0028_phase3_semantic_coverage... OK
+  Applying forecasts.0029_phase3_method_dependence... OK
+  Applying forecasts.0030_phase3_terminal_semantics... OK
+  Applying forecasts.0031_phase3_observable_evidence... OK
+  Applying market.0031_m15_live_granularity... OK
+  Applying market.0032_market_state_records... OK
+  Applying market.0033_market_state_integrity_constraints... OK
+  Applying market.0034_market_state_semantic_guards... OK
+  Applying operations.0006_task_failure_and_reservation_identity... OK
+  Applying research.0015_pre_s1_inventory_entry_boundary... OK
+  Applying sessions.0001_initial... OK
+
+=== upgrade-last.log ===
+Operations to perform:
+  Target specific migration: 0033_market_state_integrity_constraints, from market
+Running migrations:
+  Rendering model states... DONE
+  Unapplying market.0034_market_state_semantic_guards... OK
+Operations to perform:
+  Apply all migrations: admin, auth, contenttypes, dashboard, forecasts, market, operations, research, sessions
+Running migrations:
+  Applying market.0034_market_state_semantic_guards... OK
+
+=== legacy-integrity.log ===
+{
+  "axis": "semantic_integrity",
+  "checked": 1,
+  "has_more": false,
+  "next_after_id": null,
+  "violation_count": 1,
+  "violations": [
+    {
+      "code": "unsupported_definition",
+      "snapshot_id": 1
+    }
+  ]
+}
+
+=== final-database-state.log ===
+                                                       version
+---------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 15.5 on aarch64-apple-darwin21.6.0, compiled by Apple clang version 14.0.0 (clang-1400.0.29.102), 64-bit
+(1 row)
+
+ market_candleobservation_live_completion
+------------------------------------------
+ 2026-03-04 19:15:00-05
+(1 row)
+
+            proname             |               md5                |                  proconfig
+--------------------------------+----------------------------------+---------------------------------------------
+ market_state_canonical         | 605994dec1cf858175b59faadcb1ca9e | {"search_path=pg_catalog, public, pg_temp"}
+ market_state_definition_insert | 60846fe1fe43defa7c8890eff680773d | {"search_path=pg_catalog, public, pg_temp"}
+ market_state_digest            | 093b1b85c94aa84ecc7df952760f0214 | {"search_path=pg_catalog, public, pg_temp"}
+ market_state_reject_truncate   | 76d6892ec8326b545fcf030c8cd6339d |
+ market_state_snapshot_insert   | caa134e1ac64df660c28057195f0c77d | {"search_path=pg_catalog, public, pg_temp"}
+ market_state_terms_valid       | 2cdf547c09e3d5d7c5d7b5c854232800 | {"search_path=pg_catalog, public, pg_temp"}
+(6 rows)
+
+         datname
+--------------------------
+ p4
+ p4_perf_7yuffa
+ p4_perf_complete_21b0
+ p4_perf_last_21b0
+ p4_perf_resume_21b0
+ p4_upgrade
+ p4_upgrade_final_7yuffa
+ p4_upgrade_resume_21b0
+ postgres
+ template0
+ template1
+ test_p4
+ test_p4_base_7yuffa
+ test_p4_base_resume_21b0
+ test_p4_boundary_7yuffa
+ test_p4_complete_21b0
+ test_p4_final_21b0
+ test_p4_last_21b0
+ test_p4_resume_21b0
+ test_p4_verify_7yuffa
+(20 rows)
+
+ rolname
+---------
+(0 rows)
+
+
+=== Unaccommodated fresh install (inherited0027) ===
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender/.venv/lib/python3.11/site-packages/django/db/migrations/executor.py", line 255, in apply_migration
+    state = migration.apply(state, schema_editor)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender/.venv/lib/python3.11/site-packages/django/db/migrations/migration.py", line 132, in apply
+    operation.database_forwards(
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender/.venv/lib/python3.11/site-packages/django/db/migrations/operations/special.py", line 196, in database_forwards
+    self.code(from_state.apps, schema_editor)
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender/market/migrations/0027_gate8i_final_dataset_acceptance.py", line 205, in forward
+    _require_accepted_successor_state(cursor)
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender/market/migrations/0027_gate8i_final_dataset_acceptance.py", line 177, in _require_accepted_successor_state
+    raise RuntimeError("Gate 8I requires the accepted complete successor acquisition")
+RuntimeError: Gate 8I requires the accepted complete successor acquisition
+
+=== Exact broad differential ===
+{
+  "base": {
+    "tests": 838,
+    "seconds": 1070.772,
+    "result": "FAILED (failures=2, errors=244)",
+    "log_sha256": "d2de4e4288419c0b03b4d061211cdc3dc0c5d60b98e58737b2df958023f50dbd"
+  },
+  "final": {
+    "tests": 1002,
+    "seconds": 401.694,
+    "result": "FAILED (failures=2, errors=238)",
+    "log_sha256": "67629f2d916825e61e4f791850fc3c9b8558d34f2523fafde9dc46ac73b85b02"
+  }
+}
+New failures: []
+Changed causes: {}
+Removed failures: [
+  "test_0029_applies_over_legacy_and_cross_source_chains_and_renumbers_dense (market.tests.test_zzzzzzzz_live_observation_migration.LineageRenumberMigrationTests.test_0029_applies_over_legacy_and_cross_source_chains_and_renumbers_dense)",
+  "test_0029_migration_depends_on_0028 (market.tests.test_zzzzzzzz_live_observation_migration.LineageRenumberMigrationTests.test_0029_migration_depends_on_0028)",
+  "test_legacy_rows_receive_honest_markers_and_nothing_is_fabricated (market.tests.test_zzzzzzzz_live_observation_migration.LiveObservationMigrationTests.test_legacy_rows_receive_honest_markers_and_nothing_is_fabricated)",
+  "test_migration_is_reversible_and_dependency_pinned (market.tests.test_zzzzzzzz_live_observation_migration.LiveObservationMigrationTests.test_migration_is_reversible_and_dependency_pinned)",
+  "test_reverse_is_refused_while_appended_snapshots_share_an_as_of (market.tests.test_zzzzzzzz_live_observation_migration.LiveObservationMigrationTests.test_reverse_is_refused_while_appended_snapshots_share_an_as_of)",
+  "test_reverse_is_refused_while_the_observation_ledger_has_rows (market.tests.test_zzzzzzzz_live_observation_migration.LiveObservationMigrationTests.test_reverse_is_refused_while_the_observation_ledger_has_rows)"
+]
+
+=== Earlier regression evidence (not the final verification) ===
+starting-regressions.log sha256=bc79d85dd6e8eeeca7d9fd404a496393a08f62326ccde1e0ccfc3d0d4836af7d
+FAIL: test_acceptance_cannot_span_missing_reclaim_interval (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_acceptance_cannot_span_missing_reclaim_interval)
+FAIL: test_arbitrary_classification_is_not_registered_terminology (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_arbitrary_classification_is_not_registered_terminology)
+FAIL: test_atr_cannot_span_missing_internal_interval (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_atr_cannot_span_missing_internal_interval)
+FAIL: test_bad_definition_digest_is_rejected (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_bad_definition_digest_is_rejected)
+FAIL: test_consolidation_opposite_boundary_failure (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_consolidation_opposite_boundary_failure)
+FAIL: test_failed_breakout_cannot_later_retest_without_a_new_breakout (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_failed_breakout_cannot_later_retest_without_a_new_breakout)
+FAIL: test_failure_across_opposite_boundary_is_terminal_in_both_directions (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_failure_across_opposite_boundary_is_terminal_in_both_directions) (closes=(11, 8, 11))
+FAIL: test_failure_across_opposite_boundary_is_terminal_in_both_directions (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_failure_across_opposite_boundary_is_terminal_in_both_directions) (closes=(8, 11, 8))
+FAIL: test_newly_confirmed_zone_has_no_tests_or_invalidation (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_newly_confirmed_zone_has_no_tests_or_invalidation)
+FAIL: test_unknown_definition_identity_is_rejected (market.tests.test_phase4_corrections.CorrectionBoundaryTests.test_unknown_definition_identity_is_rejected)
+Ran 9 tests in 0.005s
+FAILED (failures=10)
+calendar-pre-fix.log sha256=d2c273e379b1ae9c9e4e1e8b2030ca0a6c4423ad1a11c5fd68d6a1bc2488e6fd
+ERROR: test_fvg_lifecycle_cannot_skip_first_following_interval (market.tests.test_phase4_corrections.RegisteredCalendarCorrectionTests.test_fvg_lifecycle_cannot_skip_first_following_interval)
+Ran 13 tests in 0.009s
+FAILED (errors=1)
+displacement-pre-fix.log sha256=a3c55be846b466b66b12f3556343a525690c40a2144f2b6a0c2361e288806ee1
+FAIL: test_displacement_candidate_keeps_creation_atr_after_regime_change (market.tests.test_phase4_corrections.RegisteredCalendarCorrectionTests.test_displacement_candidate_keeps_creation_atr_after_regime_change)
+Ran 1 test in 0.002s
+FAILED (failures=1)
+semantic-pre-fix.log sha256=2eb21e86b9d7073504b40d172b0db9655ac803a2140d1cdce000d7590f7b41aa
+ERROR: test_non_superuser_cannot_forge_semantics_or_mutate_valid_snapshot (market.tests.test_phase4_semantic_boundary.SemanticBoundaryTests.test_non_superuser_cannot_forge_semantics_or_mutate_valid_snapshot) (sql="UPDATE market_marketstatesnapshot SET output_sha256=repeat('0',64)")
+ERROR: test_non_superuser_cannot_forge_semantics_or_mutate_valid_snapshot (market.tests.test_phase4_semantic_boundary.SemanticBoundaryTests.test_non_superuser_cannot_forge_semantics_or_mutate_valid_snapshot) (sql='DELETE FROM market_marketstatesnapshot')
+ERROR: test_non_superuser_cannot_forge_semantics_or_mutate_valid_snapshot (market.tests.test_phase4_semantic_boundary.SemanticBoundaryTests.test_non_superuser_cannot_forge_semantics_or_mutate_valid_snapshot) (sql='TRUNCATE market_marketstatesnapshot')
+FAIL: test_unknown_terminology_is_rejected_even_with_correct_payload_hash (market.tests.test_phase4_semantic_boundary.SemanticBoundaryTests.test_unknown_terminology_is_rejected_even_with_correct_payload_hash)
+Ran 5 tests in 0.152s
+FAILED (failures=1, errors=3)
+
+=== Cleanup and final local boundary ===
+Code correction commit: 160681bf280c5e82fabfe9ac4ac3520cf17be774
+Branch: phase4/deterministic-market-state
+Local main / cached origin/main / merge-base / live remote main:
+a3fbe6ce7fc08895c5696a2a25744f46e5d6e284
+git ls-remote --heads origin main phase4/deterministic-market-state:
+only main returned; no remote Phase4 branch. Other unrelated remote branches exist.
+No push, PR, deployment, activation, provider/AWS/OANDA, production database,
+.env.local access or remote-ref mutation occurred.
+
+Before cleanup, no other client backend remained in the private cluster.
+Owned base and starting worktrees were clean and removed with git worktree remove.
+Postmaster30921 was verified to serve /tmp/p4-correction-7yufFa/pg, Unix socket
+only, port56493. PostgreSQL15 pg_ctl fast/wait shutdown completed successfully.
+The complete owned /tmp/p4-correction-7yufFa and /tmp/p4-resume-x0R8N8 trees
+were removed and absence asserted. ps confirmed postmaster30921 no longer exists.
+Unrelated audit, independent-review, nas100-lab and phase1-baseline worktrees
+remain untouched. No unrelated database/service/resource was stopped or removed.
+
+Protected diffs against BOTH starting code and exact base are empty for
+market/technicals.py, forecasts/, config/settings.py, market/live_schedules.py
+and market/management/commands/seed_production.py. protected.json records exact
+source SHA256 and matching asymmetric28-candle technical output fingerprints.
+After code commit and cleanup: Ruff check passed;456 files already formatted;
+git diff --check passed. Only the correction documentation/evidence remained
+to commit. No code changed after the final163-focused/1002-broad verification.
+
+Local tests used PostgreSQL15.5, not CI's PostgreSQL17.6 image. CI's offline
+checks passed locally; no hosted CI workflow or deployment was triggered.
+Consumed-only auxiliary/evidence minimization and deep scalar research freezing
+remain incomplete; this checkpoint is not ready for acceptance.

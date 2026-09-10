@@ -1,5 +1,10 @@
 # Phase 4 — Deterministic Market-State Engine: Design Record
 
+**Acceptance is superseded and pending independent review.** This document
+contains requirements and historical design notes, not a certification of their
+implementation. The correction contract in §17 and the current handoff supersede
+the earlier completion claims in §16.5–16.6.
+
 Status: **living design record** (mandatory preliminary artifact, authored before
 implementation). Branch `phase4/deterministic-market-state`, based on
 `origin/main` at `a3fbe6ce7fc08895c5696a2a25744f46e5d6e284`.
@@ -161,10 +166,10 @@ information_cutoff)` where `information_cutoff` is an explicit aware-UTC instant
 5. its provenance permits the claimed calculation (`observed` live, governed
    dataset, or fixture in tests — never `legacy_unknown` for point-in-time claims).
 
-For live candles, the **first accepted frozen** `CandleObservation` (revision 1) is
-authoritative for a snapshot; later provider revisions (`late_arrival`, `revision`,
-`conflict`) create a *new* snapshot at a later cutoff and never rewrite an earlier
-one. Governed historical data distinguishes genuine point-in-time evidence from
+For live candles, the **highest eligible revision** of `CandleObservation` is
+selected at the cutoff and frozen before computation. Later provider revisions
+create a different input identity and never rewrite an earlier snapshot.
+Governed historical data distinguishes genuine point-in-time evidence from
 research-only data whose original availability is unknown; unknown availability is
 never invented.
 
@@ -210,7 +215,8 @@ canonical `output_payload`, `output_sha256`, `data_quality_status`, and an
 
 - **Idempotency key** =
   `identity_digest([definition_sha256, instrument, information_cutoff_iso,
-  input_manifest_sha256])`. A duplicate concurrent calculation resolves to **one**
+  sorted_requested_scope, input_manifest_sha256, evidence_manifest_sha256])`.
+  A duplicate concurrent calculation resolves to **one**
   canonical snapshot (unique constraint + get-or-create under advisory lock).
 - **Canonical serialization**: `json.dumps(payload, sort_keys=True,
   separators=(",",":"), ensure_ascii=False)` with all numerics pre-formatted as
@@ -338,7 +344,7 @@ Common conventions for §7–8:
   only after price has left the zone by `>= c*ATR_14` and returned; consecutive
   candles resting inside the zone count as **one** test. Overlapping zones merge by
   single-linkage before id assignment (deterministic). Expiry: `unavailable` after
-  `age > A` intervals (`A=500`) or after structural invalidation. Invalidation: a
+  `age > A` intervals (`A=200` in descriptor 0.9.0) or after structural invalidation. Invalidation: a
   completed close beyond the zone by `>= c*ATR_14` on the zone timeframe.
 - **Consolidation boundaries / breakout / retest / failed-breakout**
   (`consolidation-v1`): consolidation = a bounded window whose high-low range
@@ -641,3 +647,60 @@ Notable contract changes this made true:
 
 Each commit is behaviorally coherent and non-empty. Nothing is pushed, deployed,
 activated, or run against production; no provider or AWS/OANDA call is made.
+
+## 17. Correction contract, descriptor 0.9.0
+
+This section supersedes conflicting historical implementation claims above.
+All original §4.1–§4.5 requirements remain in scope. No feature becomes a trade
+rule, and no acceptance or activation follows from these engineering corrections.
+
+- Candle rows are materialized once into immutable scalar tuples. The same
+  tuples feed the manifest and every price feature. Requested scope plus the
+  auxiliary M15/D/W sets are bound; daily lookback is 400, making the tested
+  14-complete-month trend reachable. Monthly bars retain completion and latest
+  observation availability; missing months break trend continuity.
+- Research vintages are eagerly materialized before price computation, including
+  out-of-window reschedules for candidate event keys. Their observation,
+  predecessor, retrieval, policy, source and series identities bind exact stored
+  content. Historical ORB/FVG/sweep context selects from this bundle at feature
+  availability, not by querying at the final snapshot cutoff. Event coverage is
+  unattested; severity remains unavailable; date-only events are not intraday
+  risk windows. Policy rates require percent units and no transformation.
+- Definition key, version, body digest, runtime scalar parameters, lookbacks,
+  sessions and terminology must match the sole supported contract. Migration
+  0034 pins that exact version explicitly and tests Python/SQL agreement. Future
+  versions require a new forward migration; historical migrations never import
+  a moving runtime definition.
+- FVG thresholds are inclusive minima: raw gap 0.000001, gap/ATR 0.1, gap/pip 1,
+  gap/spread 1; geometric equality remains no gap. Middle-candle displacement
+  requires one contemporaneous ATR in the gap direction. Missing ATR/spread
+  cannot establish qualification. The first following interval and internal
+  lifecycle succession are checked; fills do not undo prior expiry.
+- Zone edges use confirmation-time ATR, separate high/low pivots, and bind member
+  timestamp/content identities. Tests start after confirmation availability,
+  stop at directional invalidation/expiry, and require a separate approach
+  after leaving by the frozen margin. Age greater than 200 is reachable within
+  the retained windows. Missing registered history is unavailable. Re-clustering
+  with new members creates a different zone identity.
+- ORB range normalization belongs to the opening candle; breakout spread and
+  availability belong to the breakout candle. Failure is terminal for that
+  breakout. A retest before a later failure may remain a historical fact with
+  its earlier timestamp; a failure cannot subsequently become a retest.
+- Prior London and New York session extremes use eight-hour windows beginning
+  at each registered 08:00 local open. This is an explicit descriptive window,
+  not an exchange-hours or session-bias claim. Overnight and prior-session
+  extremes require every registered M15 opening in the window.
+- SQL candle reads have indexed timestamp bounds and LIMIT after highest
+  eligible revision selection. Research loads fail closed beyond 2,048 rows per
+  collection. Integrity checks at most 100 snapshots and returns a continuation
+  cursor; exact candle lookup batches contain at most 100 predicates.
+- SQL rejects malformed/hash-inconsistent identity, unsupported definitions,
+  false scope/instrument/cutoff, missing/obsolete candle revisions, basic feature
+  prerequisite contradictions, and absent/future research lineage. Python
+  integrity independently replays price and research output from cited records.
+  SQL does not reimplement every feature formula. Historical unsupported
+  definitions are reported, never rewritten or silently upgraded.
+
+Limitations requiring independent review remain explicit in [handoff.md](handoff.md).
+Production memory, WAL, throughput and retention capacity are not established by
+the local measurements in [verification](verification/README.md).
