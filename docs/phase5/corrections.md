@@ -166,3 +166,55 @@ All corrections are local to `phase5/explicit-strategy-library`; final commit an
 clean-worktree status are reported in the thread handoff. No push, PR, deployment,
 activation, production/provider access or self-acceptance occurred. Independent
 final verification remains required for all six correction dispositions.
+
+## Final-review bounded P2: available simulation evidence admission
+
+Starting from clean `e4ed1ae`, migration **0041** adds admission-only structural
+guards. Available `phase5/execution-v1` records require exact cost, calendar and
+terms JSON objects. Missing/null/non-object/extra keys and wrong field types are
+rejected. Terms require the Python contract's canonical currency identifiers,
+aware canonical UTC timestamps with ordered coverage/conversion/knowledge,
+lowercase SHA256 identity, supported units, nonempty provenance, positive finite
+conversion and structurally valid dated rollover amounts. Cost amounts are
+nonnegative, latency is an integer, calendar interval pairs are ordered. Input
+decimal strings preserve exact precision rather than adopting six-place output
+rounding. No formula, strategy source, definition pin or pre-0041 migration changes.
+
+Explicit unavailable results retain their existing null-evidence shape; their
+closed output schema still rejects available net fields. This migration does not
+certify replay semantics, rewrite historical evidence or conceal old violations.
+Its reverse removes only the new guard/functions; populated rows are preserved.
+
+The genuine replayable ORB integration fixture now invokes hash-consistent raw
+INSERT probes as a verified non-superuser. It reproduces 0040's acceptance of null
+evidence and the corresponding `simulation_integrity` violation, including after
+forward migration. It tests missing/null/array/scalar/extra/invalid-field evidence,
+invalid terms identifiers/numbers/timestamps/units/rollovers, valid available and
+valid null-evidence unavailable results, and refusal of unavailable net fields.
+Valid replay and populated row bytes survive forward/reverse/reapply. Probe
+transactions roll back only disposable test records; no immutable guard is disabled.
+
+Exact PostgreSQL **15.14: 56 passed in 25.145s; 17.6: 56 passed in 24.792s**.
+The count is unchanged because these probes extend the existing integration test.
+`make check` passed (529 formatted Python files, no migration drift). An initial
+probe run failed in the test-side canonicalizer on a float before reaching SQL;
+the JSON-number wrong-type case now uses an integer and reaches raw admission.
+There were no failures in either final focused run. The complete available-evidence
+suite was not rerun for this bounded migration-only change; its earlier results
+above remain historical, not a claim about a new full run.
+
+| Final P2 evidence | SHA256 |
+|---|---|
+| PG15 focused | `7eacd24eeb2e4a1881d58ebebd3f203c75bf3ac1f01b428773a0b0067ff2a5ce` |
+| PG17 focused | `91aaab9b686e7e34cecec3bc59832977a4f21ed412276b5780ffd984f095372f` |
+| make check | `dea040532669e4bfeedf7d7cbfb2ab75ec4d495fb370d573cd86085c788b0a53` |
+
+The 598-file protected fingerprint above is unchanged. All 19 strategy IDs and
+source pins, consumers, schedules, eligibility, prior migration bytes and restore
+exclusions remain unchanged. Exact-version servers used private Unix sockets and
+disposable databases beneath `/tmp/phase5-p2-owned`; both servers stopped and all
+owned resources/logs/builds were removed. The workspace virtual environment was
+preserved. Remote main remains `131a2fc1cd6d2d849cb13a94ce5b937cf0fe8a44`, with no
+remote Phase5 branch. Final local commit/clean status are in the thread handoff.
+No provider/production access, deployment, activation, push or PR occurred.
+Acceptance remains pending independent verification; this is not self-acceptance.

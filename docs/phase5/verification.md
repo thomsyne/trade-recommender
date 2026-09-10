@@ -3,6 +3,8 @@
 This is the historical initial handoff at `4424f5a`. The consolidated correction
 cycle's contracts, verification and remaining gates supersede it where stated in
 [corrections](corrections.md); acceptance remains pending independent verification.
+The subsequent bounded P2 migration0041 evidence-admission checks and exact-version
+focused results are recorded in the final section of that correction handoff.
 
 Verification date: 2026-09-10. No market outcomes were used to tune definitions,
 scalars, simulator rules, cost screens, populations, eras or thresholds. Tests use

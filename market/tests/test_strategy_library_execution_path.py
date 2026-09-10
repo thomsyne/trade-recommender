@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal as D
 
-from django.db import connection
+from django.db import connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
@@ -122,6 +122,20 @@ class ExecutionPathTests(HistoricalDatabaseMixin, TransactionTestCase):
             cost_unit="quote_per_base",
             conversion_unit="account_per_quote",
         )
+        # Build a replayable result without occupying the immutable attempt key.
+        with transaction.atomic():
+            prototype, _ = calculate_simulation(
+                evaluation.pk,
+                outcome.pk,
+                cost=evidence,
+                calendar=calendar,
+                profile="fixture",
+                terms=terms,
+            )
+            transaction.set_rollback(True)
+        from market.tests.test_strategy_library_evidence_admission import probe_evidence
+
+        probe_evidence(self, prototype)
         record, created = calculate_simulation(
             evaluation.pk,
             outcome.pk,
