@@ -4,6 +4,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, close_old_connections, connection, connections, transaction
@@ -638,6 +639,7 @@ class LiveEvidenceDatabaseProtectionTests(TransactionTestCase):
     """The application role cannot bypass the protections through raw SQL."""
 
     def setUp(self):
+        super().setUp()
         self.instrument, self.source = make_market()
         ingest(
             self.source,
@@ -648,6 +650,27 @@ class LiveEvidenceDatabaseProtectionTests(TransactionTestCase):
         self.row = Candle.objects.order_by("timestamp").first()
         self.observation = self.row.authoritative_observation()
         self.snapshot = TechnicalSnapshot.objects.get()
+        # Exercise raw writes as an application role even when the disposable
+        # cluster's migration owner is a superuser. Cleanup precedes DB flush.
+        self.role = "test_live_" + uuid4().hex
+        with connection.cursor() as cursor:
+            cursor.execute(f'CREATE ROLE "{self.role}" NOSUPERUSER NOLOGIN')
+            cursor.execute(f'GRANT USAGE ON SCHEMA public TO "{self.role}"')
+            cursor.execute(
+                f"GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES "
+                f'IN SCHEMA public TO "{self.role}"'
+            )
+            cursor.execute(
+                f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "{self.role}"'
+            )
+            cursor.execute(f'SET ROLE "{self.role}"')
+        self.addCleanup(self.restore_role)
+
+    def restore_role(self):
+        with connection.cursor() as cursor:
+            cursor.execute("RESET ROLE")
+            cursor.execute(f'DROP OWNED BY "{self.role}"')
+            cursor.execute(f'DROP ROLE "{self.role}"')
 
     def test_connection_role_is_not_a_superuser(self):
         with connection.cursor() as cursor:
@@ -862,32 +885,21 @@ class LiveEvidenceDatabaseProtectionTests(TransactionTestCase):
         self._assert_observation_insert_rejected({"source_id": other_source.pk})
 
     def _run(self, *, status, requested_from, requested_to, source=None, manifest):
-        run = IngestionRun.objects.create(
-            source=source or self.source,
-            instrument=self.instrument,
-            granularity="H1",
-            requested_from=requested_from,
-            requested_to=requested_to,
-            parameters={},
-            request_manifest_hash=manifest,
-            status=status,
-        )
-        # started_at is auto_now_add and the run trigger forbids touching a
-        # terminal row, so pin it via a trigger-free update to sit before the
-        # observation rows these probes copy; the chronology check must not be
-        # the reason a probe is rejected.
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "ALTER TABLE market_ingestionrun DISABLE TRIGGER market_ingestion_run_enforce"
+        from market.tests.timeline import application_clock
+
+        # Record the simulated request at its actual fixture time rather than
+        # disabling a trigger and backdating an immutable run afterwards.
+        with application_clock(self.observation.observed_at - timedelta(minutes=5)):
+            return IngestionRun.objects.create(
+                source=source or self.source,
+                instrument=self.instrument,
+                granularity="H1",
+                requested_from=requested_from,
+                requested_to=requested_to,
+                parameters={},
+                request_manifest_hash=manifest,
+                status=status,
             )
-            cursor.execute(
-                "UPDATE market_ingestionrun SET started_at = %s WHERE id = %s",
-                [self.observation.observed_at - timedelta(minutes=5), run.pk],
-            )
-            cursor.execute(
-                "ALTER TABLE market_ingestionrun ENABLE TRIGGER market_ingestion_run_enforce"
-            )
-        return run
 
     def test_observation_timestamp_outside_run_request_window_is_rejected(self):
         # A forged attribution would point the observation at a run whose

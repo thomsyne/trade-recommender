@@ -16,6 +16,7 @@ No threshold here selects a trade; these are observable descriptive facts only.
 from decimal import Decimal
 from typing import NamedTuple
 
+from market.availability import observation_available_at
 from market.state.canonical import format_decimal
 
 # --- versions (bump when an algorithm changes; snapshots bind these) ----------
@@ -63,7 +64,9 @@ class Bar(NamedTuple):
 
     @property
     def available_at(self):
-        return max(self.end or self.timestamp, self.observed_at or self.timestamp)
+        return observation_available_at(
+            self.end or self.timestamp, self.observed_at or self.timestamp
+        )
 
 
 def bars_are_consecutive(earlier, later):

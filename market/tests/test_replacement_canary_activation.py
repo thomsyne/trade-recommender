@@ -46,6 +46,7 @@ from market.models import (
 )
 from market.oanda import OandaError
 from market.services import DatasetQualityError
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 
 CANARY_START = datetime(2009, 12, 31, 15, tzinfo=UTC)
@@ -420,9 +421,10 @@ def insert_raw_canary_attempt(cursor, source_pk, chunk, number, idempotency_key=
     )
 
 
-class RetryFixtureTestCase(TransactionTestCase):
+class RetryFixtureTestCase(HistoricalDatabaseMixin, TransactionTestCase):
     """Builds the attempt-1 ledger under 0015, then applies 0016."""
 
+    historical_market_migration = "0015_"
     retention_policy = "canary retry fixture"
 
     def setUp(self):
@@ -644,7 +646,9 @@ class ReplacementCanaryRetryTests(RetryFixtureTestCase):
             )
 
 
-class ReplacementCanaryLedgerGateTests(TransactionTestCase):
+class ReplacementCanaryLedgerGateTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0015_"
+
     def setUp(self):
         super().setUp()
         migrate_to(MIGRATION_0015)

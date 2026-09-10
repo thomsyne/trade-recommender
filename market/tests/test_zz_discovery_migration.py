@@ -4,10 +4,12 @@ from django.test import TransactionTestCase
 from market.historical_acquisition import INSTRUMENTS
 from market.historical_discovery import build_initial_discovery_plan, create_discovery_plan
 from market.models import IngestionRun, Instrument, SourceRegistry
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 
 
-class ProviderObservedInventoryMigrationTests(TransactionTestCase):
+class ProviderObservedInventoryMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0013_"
     discovery = [("market", "0013_provider_observed_inventory")]
     previous = [("market", "0012_operation_aware_historical_dataset")]
 

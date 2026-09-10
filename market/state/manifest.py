@@ -21,6 +21,7 @@ from typing import NamedTuple
 from django.db.models import Q
 from django.utils import timezone
 
+from market.availability import first_known_at
 from market.models import CandleObservation
 from market.quality import REGISTERED_STEPS
 from market.state.canonical import identity_digest
@@ -55,8 +56,7 @@ class FrozenObservation(NamedTuple):
             else {field: getattr(row, field) for field in cls._fields}
         )
         recorded_at = getattr(row, "recorded_at", None)
-        if recorded_at is not None:
-            values["observed_at"] = max(values["observed_at"], recorded_at)
+        values["observed_at"] = first_known_at(values["observed_at"], recorded_at)
         return cls(**values)
 
 

@@ -527,12 +527,14 @@ class V2S0GovernanceTests(SimpleTestCase):
             ).exists()
         )
         from research.failed_break_v2_s1_governance import (
+            V2S1GovernanceRefusal,
             load_v2_s1_execution_authorization,
             load_v2_s1_policy,
         )
 
         self.assertFalse(load_v2_s1_policy()["authorization"]["persistent_v2_s1_execution"])
-        self.assertIsNone(load_v2_s1_execution_authorization())
+        with self.assertRaisesMessage(V2S1GovernanceRefusal, "direct v2 S1 execution is disabled"):
+            load_v2_s1_execution_authorization()
         self.assertFalse(load_v2_policy()["detector"]["persistent_runner_exposed"])
         self.assertFalse(self.preregistration["methodology"]["post_entry_or_outcome_access"])
         self.assertFalse(self.preregistration["authorization"]["v2_s1_execution"])

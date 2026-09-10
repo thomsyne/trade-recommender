@@ -30,32 +30,12 @@ timeline exists to satisfy them honestly, never to work around them: if a
 scenario cannot be expressed here, the scenario is not one the production
 system could have produced.
 
-Known test-infrastructure limitation (pre-existing, needs separate remediation)
--------------------------------------------------------------------------------
-Migration ``market.0027_gate8i_final_dataset_acceptance`` is gated on a real
-acquisition state -- 132 succeeded attempts totalling 365,055 stored rows for a
-pinned plan hash -- and raises rather than applying when that state is absent.
-No fresh database can satisfy it, so ``manage.py test`` cannot build a test
-database from an empty one, and the only way to obtain a usable schema is to
-record 0027 as applied without running it::
-
-    createdb -O trade_recommender test_<db>
-    POSTGRES_DB=test_<db> manage.py migrate market 0026
-    POSTGRES_DB=test_<db> manage.py migrate market 0027 --fake
-    POSTGRES_DB=test_<db> manage.py migrate
-
-The consequence is visible and must not be mistaken for a regression: because
-0027 was never executed, the Gate 8I registration validator body is absent, and
-0027's own reverse guard refuses. Every test that migrates backwards past it
-fails with "installed registration validator is not the Gate 8I body", and the
-partially unapplied schema it leaves behind cascades into later tests in the
-same run. On this repository that is 238 errors plus roughly 50 cascade
-victims, identically on any commit, and it is why CI gates the full Django
-suite behind ``FULL_TEST_SUITE_ENABLED``.
-
-Remediating it is a separate piece of work -- a committed fixture of the
-accepted successor acquisition state, or a test-only path that lets the gate
-migrations bootstrap -- and is out of scope for the fixtures below.
+Fresh tests use the replacement ``0027_gate8i_empty_bootstrap`` through normal
+Django migration execution. It installs the exact registration validator only
+when the application tables are empty; it never fabricates accepted acquisition
+evidence. Populated histories still use the published acceptance checks.
+Historical tests use disposable databases via ``HistoricalDatabaseMixin``;
+never fake 0027, repair SQL, or roll the shared current-state database backward.
 """
 
 from contextlib import contextmanager

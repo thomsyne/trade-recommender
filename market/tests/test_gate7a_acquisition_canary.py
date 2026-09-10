@@ -442,7 +442,10 @@ class Gate7AActivationTests(Gate7AFixtureTestCase):
         )
         with self.assertRaisesMessage(CommandError, "an acquisition is already running"):
             self.run_command(execute=True)
-        IngestionRun.objects.filter(pk=blocker.pk).delete()
+        # Cascade only through relationships present in this historical graph.
+        self.historical_apps.get_model("market", "IngestionRun").objects.filter(
+            pk=blocker.pk
+        ).delete()
 
         client, output = self.run_command(execute=True)
         self.assertEqual(client.calls, 1)
@@ -541,7 +544,9 @@ class Gate7AActivationTests(Gate7AFixtureTestCase):
             self.assertRaisesMessage(DatabaseError, "governed dataset candles are append-only"),
             transaction.atomic(),
         ):
-            Candle.objects.filter(dataset_version=self.dataset).delete()
+            self.historical_apps.get_model("market", "Candle").objects.filter(
+                dataset_version_id=self.dataset.pk
+            ).delete()
         for statement in (
             "TRUNCATE market_candle CASCADE",
             "TRUNCATE market_ingestionmanifest, market_historicalingestionattempt CASCADE",
@@ -648,8 +653,10 @@ class Gate7AActivationTests(Gate7AFixtureTestCase):
         self.assertEqual(failure.payload["error_code"], "INVALID_PRICE_STRUCTURE")
         self.assertEqual(failure.payload["diagnostics"]["categories"], ["non_positive"])
         rendered = json.dumps(failure.payload)
-        for marker in (*FORBIDDEN_OUTPUT_MARKERS, "0.89", "1.10"):
+        for marker in FORBIDDEN_OUTPUT_MARKERS:
             self.assertNotIn(marker, rendered)
+        # Match JSON values, not coincidental digits in a timestamp's seconds.
+        self.assertNotRegex(rendered, r'(?::|\[|,)\s*"?(?:0\.89|1\.10)')
         with self.assertRaisesMessage(
             CommandError, "acquisition canary attempt already exists; retry is prohibited"
         ):

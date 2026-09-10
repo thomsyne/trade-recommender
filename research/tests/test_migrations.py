@@ -5,8 +5,11 @@ from django.db import DatabaseError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
+from market.tests.historical_database import HistoricalDatabaseMixin
 
-class Phase2ADataMigrationTests(TransactionTestCase):
+
+class Phase2ADataMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0010_"
     migrate_from = [("research", "0010_phase_2a_append_only_triggers")]
     prepared = [("research", "0011_phase_2a_review_corrections")]
     migrate_to = [("research", "0014_enforce_entry_boundary")]

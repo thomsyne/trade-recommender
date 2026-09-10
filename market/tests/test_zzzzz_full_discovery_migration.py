@@ -5,6 +5,7 @@ from django.test import TransactionTestCase
 
 from market.historical_discovery import run_discovery_chunk
 from market.models import HistoricalTimestampInventory
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_gate4_full_discovery import WaveSuccessClient
 from market.tests.test_replacement_canary_activation import (
@@ -20,7 +21,8 @@ from market.tests.test_replacement_canary_activation import (
 CANARY_FUNCTION = "market_validate_replacement_canary_attempt"
 
 
-class FullDiscoveryActivationMigrationTests(TransactionTestCase):
+class FullDiscoveryActivationMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0017_"
     current = [("market", "0017_provider_observed_full_discovery_activation")]
     previous = [("market", "0016_provider_observed_h1_alignment_retry")]
 

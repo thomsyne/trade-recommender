@@ -4,6 +4,7 @@ from datetime import UTC, timedelta
 
 from django.utils import timezone
 
+from market.availability import live_candle_completion
 from market.quality import (
     LIVE_GRANULARITIES,
     REGISTERED_STEPS,
@@ -54,8 +55,6 @@ def canonical_live_start(value, granularity):
 
 def complete_live_intervals(start, end, granularity):
     """Bounded expected complete keys in [start,end], omitting registered closures."""
-    from market.services import live_candle_completion
-
     if (
         not timezone.is_aware(end)
         or start >= end

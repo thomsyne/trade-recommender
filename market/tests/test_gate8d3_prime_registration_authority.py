@@ -36,6 +36,7 @@ from market.provider_observed_outcome import (
 )
 from market.provider_observed_successor import build_successor_discovery_plan
 from market.services import DatasetQualityError
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_gate8b_prime_successor_activation import (
     record_attempt,
@@ -154,8 +155,10 @@ class Gate8d3PrimeMigrationShapeTests(SimpleTestCase):
         del source
 
 
-class Gate8d3PrimeCatalogTests(TransactionTestCase):
+class Gate8d3PrimeCatalogTests(HistoricalDatabaseMixin, TransactionTestCase):
     """Applying and reversing the migration against a real catalog."""
+
+    historical_market_migration = "0024_"
 
     def setUp(self):
         super().setUp()
@@ -223,8 +226,10 @@ class Gate8d3PrimeCatalogTests(TransactionTestCase):
         self.assertEqual(self.catalog(), first)
 
 
-class Gate8d3PrimeAdmissionTests(TransactionTestCase):
+class Gate8d3PrimeAdmissionTests(HistoricalDatabaseMixin, TransactionTestCase):
     """The successor branch refuses everything that is not the accepted outcome."""
+
+    historical_market_migration = "0024_"
 
     def setUp(self):
         super().setUp()
@@ -342,7 +347,9 @@ class Gate8d3PrimeAdmissionTests(TransactionTestCase):
         self.assertEqual(HistoricalDiscoveryPlan.objects.filter(sealed_at__isnull=False).count(), 0)
 
 
-class Gate8d3PrimeReadinessTests(TransactionTestCase):
+class Gate8d3PrimeReadinessTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0024_"
+
     def setUp(self):
         super().setUp()
         migrate_to(MIGRATION_0024)

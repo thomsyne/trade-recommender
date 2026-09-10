@@ -46,6 +46,7 @@ from market.provider_observed_successor import (
     staged_discovery_membership,
     successor_readiness,
 )
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_gate8b_prime_successor_activation import (
     MIGRATION_0023,
@@ -125,7 +126,9 @@ def attach_inventory(chunk, attempt, *, salt=0):
             cursor.execute("ALTER TABLE market_historicaltimestampobservation ENABLE TRIGGER USER")
 
 
-class Gate8d2ReadinessCorrectionTests(TransactionTestCase):
+class Gate8d2ReadinessCorrectionTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0023_"
+
     def setUp(self):
         super().setUp()
         migrate_to(MIGRATION_0023)

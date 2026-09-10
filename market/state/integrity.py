@@ -27,9 +27,9 @@ from datetime import datetime
 from django.db.models import Q
 from django.utils import timezone
 
+from market.availability import first_known_at, live_candle_completion
 from market.models import CandleObservation
 from market.quality import LIVE_GRANULARITIES
-from market.services import live_candle_completion
 from market.state.canonical import NonCanonicalValue, identity_digest
 from market.state.snapshots import snapshot_idempotency_key
 from market.state.terminology import terminology_violations
@@ -329,7 +329,7 @@ def _verify_manifest(snapshot, flag):
             if observation.content_sha256 != content_sha256:
                 flag(snapshot.pk, "revised_content_substituted")
             if (
-                max(observation.observed_at, observation.recorded_at or observation.observed_at)
+                first_known_at(observation.observed_at, observation.recorded_at)
                 > snapshot.information_cutoff
             ):
                 flag(snapshot.pk, "input_available_after_cutoff")

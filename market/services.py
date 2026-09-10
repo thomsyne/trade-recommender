@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from django.db import connection, transaction
 from django.utils import timezone
 
+from market.availability import live_candle_completion as live_candle_completion
 from market.models import (
     AuditEvent,
     Candle,
@@ -457,28 +458,6 @@ def store_ingestion(
         )
     calculate_and_store_snapshot(instrument, granularity)
     return run
-
-
-LIVE_STEPS = {
-    "W": timedelta(weeks=1),
-    "D": timedelta(days=1),
-    "H4": timedelta(hours=4),
-    "H1": timedelta(hours=1),
-    "M15": timedelta(minutes=15),
-}
-
-
-def live_candle_completion(timestamp, granularity):
-    """Completion instant of one live provider candle.
-
-    M15/H1/H4 candles are absolute-duration intervals (the provider never merges
-    two intervals into one during a DST transition), so completion is exact UTC
-    arithmetic. Daily and weekly candles are aligned to the 17:00
-    America/New_York close and therefore complete one local day/week later.
-    """
-    if granularity in {"M15", "H1", "H4"}:
-        return timestamp + LIVE_STEPS[granularity]
-    return registered_candle_completion(timestamp, granularity)
 
 
 def candle_content_sha256(instrument_code, granularity, candle):
