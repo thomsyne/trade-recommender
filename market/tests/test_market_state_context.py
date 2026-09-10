@@ -149,14 +149,10 @@ class EventStateTests(TestCase):
             key="dateonly",
         )
         result = event_state(instrument(), CUTOFF)
-        by_type = {
-            e["intraday_risk_window"]
-            if isinstance(e["intraday_risk_window"], str)
-            else e["intraday_risk_window"]["reason_code"]: e
-            for e in result["events"]
-        }
-        self.assertIn("defined", by_type)
-        self.assertIn("event_time_date_only", by_type)
+        windows = {e["time_precision"]: e["intraday_risk_window"] for e in result["events"]}
+        self.assertEqual(windows["exact"]["state"], "available")
+        self.assertEqual(windows["exact"]["status"], "upcoming")
+        self.assertEqual(windows["date"]["reason_code"], "event_time_date_only")
         # Severity is never invented.
         self.assertTrue(all(e["severity"]["state"] == "unavailable" for e in result["events"]))
 

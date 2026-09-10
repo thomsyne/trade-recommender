@@ -23,7 +23,7 @@ records, and none calls a provider.
 | `market/state/integrity.py` | Read-only semantic-integrity verification |
 | `market/state/tasks.py` | Durable per-instrument calculation task (unscheduled) |
 
-The current descriptor definition is `market-state-descriptor@0.11.0`
+The current descriptor definition is `market-state-descriptor@0.12.0`
 (`compute.DESCRIPTOR_DEFINITION`); the version is bumped whenever the feature set,
 a threshold or a lookback changes, so every snapshot binds the exact algorithm
 versions. Bounded per-granularity lookbacks (`compute.LOOKBACKS`) are pinned in
@@ -32,6 +32,46 @@ the definition body so no computation scans unbounded history.
 ## Dry-run / read-only commands
 
 All use the disposable test-DB or a read-only connection; none is scheduled.
+
+The new mandatory surfaces are:
+
+```bash
+python manage.py preview_market_state_batch \
+  EUR_USD@2026-01-05T10:00:00Z GBP_USD@2026-01-05T11:00:00Z \
+  --granularities H1 H4
+python manage.py validate_market_state_definition /tmp/definition-envelope.json
+python manage.py market_state_coverage --instrument EUR_USD GBP_USD \
+  --since 2026-01-05T08:00:00Z --cutoff 2026-01-05T12:00:00Z --granularities H1
+python manage.py market_state_integrity --after-id 0
+```
+
+Batch: at most eight distinct selections and five distinct granularities; explicit
+aware cutoffs, stable sorting and escaped JSON. Validation: at most 64 KiB, exact
+envelope `{key, version, definition, definition_sha256}`, no database access or
+registration; supported descriptor identity/body/hash must all match. Export an
+envelope from reviewed source, not by invoking the registration command.
+
+Coverage: explicit window at most seven elapsed days; default exit zero for a
+successfully produced report, even with missing inputs/snapshots. Add
+`--require-complete` to exit one on any selected row without complete registered
+inputs and a fresh current-version snapshot. Empty registered ranges do not pass
+strict coverage. Feature availability remains independent of input coverage;
+unknown macro/events do not count as neutral. This report does not attest semantic
+integrity. See design §20.1 for the exact freshness/range policy.
+
+Integrity retains the 100-snapshot page/cursor and also scans at most 500 rows
+each of relevant schedules and occurrences. Static codes flag any Phase4
+schedule, malformed task identity/parameters, unexpected M15 activation, source
+consumers and scan overflow; any violation exits one. Existing Phase2 H1/H4/D/W
+schedules are not changed. Source scanning cannot certify external/dynamic
+consumers. Run normal Phase2 schedule integrity separately for its full inventory.
+
+Migration 0037 is prospective and row-preserving. On a disposable database only,
+upgrade to 0037, reverse to 0036 and reapply 0037 to test a roundtrip. Reversal
+retains 0.12.0 rows as unsupported historical evidence; it does not make older
+code able to compute them. Do not reverse through 0036 with recorded observations:
+its original refusal remains in force. No production migration is authorized by
+these instructions. Acceptance remains superseded pending final PM verification.
 
 ```bash
 # Preview one snapshot payload WITHOUT persisting (read-only):

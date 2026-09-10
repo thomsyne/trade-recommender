@@ -18,7 +18,7 @@ from types import MappingProxyType
 
 from market.state.canonical import format_decimal, identity_digest
 
-EVENT_STATE_V = "event-state-v1"
+EVENT_STATE_V = "event-state-v2"
 MACRO_REGIME_V = "macro-regime-v1"
 SPREAD_V = "spread-v1"
 
@@ -211,7 +211,7 @@ def spread_context(observation, atr):
     return result
 
 
-def event_state(instrument, information_cutoff, *, frozen=None):
+def event_state(instrument, information_cutoff, *, frozen=None, policy=None):
     """Scheduled-event state for the pair's currencies, vintage-correct at cutoff.
 
     Every vintage *known by the cutoff* (``first_observed_at`` and its retrieval
@@ -224,7 +224,13 @@ def event_state(instrument, information_cutoff, *, frozen=None):
 
     from research.models import EconomicEvent
 
-    countries = _pair_countries(instrument)
+    if policy is None:
+        from market.state.compute import DESCRIPTOR_DEFINITION
+
+        policy = DESCRIPTOR_DEFINITION["event_risk_policy"]
+    countries = {policy["currency_country"].get(c) for c in pair_currencies(instrument)}
+    if None in countries:
+        countries = None
     if countries is None:
         return _unavailable(EVENT_STATE_V, "provenance_unavailable")
     if frozen is not None:
@@ -248,7 +254,9 @@ def event_state(instrument, information_cutoff, *, frozen=None):
                     <= information_cutoff + timedelta(days=EVENT_HORIZON_DAYS)
                 ),
                 key=lambda e: (e.event_at, e.provider_event_key),
-            )
+            ),
+            information_cutoff,
+            policy,
         )
     eligible = EconomicEvent.objects.filter(
         country__in=countries,
@@ -275,18 +283,19 @@ def event_state(instrument, information_cutoff, *, frozen=None):
     known = list(known[: MAX_RESEARCH_ROWS + 1])
     if len(known) > MAX_RESEARCH_ROWS:
         raise ValueError("research_history_limit_exceeded")
-    return _event_block(known)
+    return _event_block(known, information_cutoff, policy)
 
 
-def _event_block(known):
-    from research.models import EconomicEvent
+def _event_block(known, information_cutoff, policy):
 
     items = []
     for event in known:
         item = {
             "event_type": event.event_type,
             "country": event.country,
-            "currency": COUNTRY_CURRENCY.get(event.country, event.country),
+            "currency": next(
+                c for c, country in policy["currency_country"].items() if country == event.country
+            ),
             "time_precision": event.time_precision,
             "status": event.status,
             "first_observed_at": _iso(event.first_observed_at),
@@ -294,9 +303,28 @@ def _event_block(known):
             "lineage": research_lineage(event),
             "severity": {"state": "unavailable", "reason_code": "severity_unavailable"},
         }
-        if event.time_precision == EconomicEvent.TimePrecision.EXACT:
+        if event.time_precision == policy["precision"]:
             item["event_at"] = _iso(event.event_at)
-            item["intraday_risk_window"] = "defined"
+            if event.status in policy["eligible_statuses"]:
+                start = event.event_at.astimezone(UTC) - timedelta(seconds=policy["pre_seconds"])
+                end = event.event_at.astimezone(UTC) + timedelta(seconds=policy["post_seconds"])
+                item["intraday_risk_window"] = {
+                    "state": "available",
+                    "starts_at": _iso(start),
+                    "ends_at": _iso(end),
+                    "available_at": _iso(max(event.first_observed_at, event.retrieval.fetched_at)),
+                    "status": "upcoming"
+                    if information_cutoff < start
+                    else "active"
+                    if information_cutoff <= end
+                    else "expired",
+                    "inclusive": policy["inclusive"],
+                }
+            else:
+                item["intraday_risk_window"] = {
+                    "state": "unavailable",
+                    "reason_code": "event_status_ineligible",
+                }
         else:
             item["event_date"] = event.event_at.astimezone(UTC).date().isoformat()
             item["intraday_risk_window"] = {
@@ -311,8 +339,17 @@ def _event_block(known):
     return {
         "state": "available",
         "version": EVENT_STATE_V,
+        "evaluated_at": _iso(information_cutoff),
         "events": items,
         "coverage": "unattested",
+        "active_window_vintages": sorted(
+            item["vintage_id"]
+            for item in items
+            if item["intraday_risk_window"].get("status") == "active"
+        ),
+        "aggregate_risk": "present"
+        if any(item["intraday_risk_window"].get("status") == "active" for item in items)
+        else "unknown",
     }
 
 

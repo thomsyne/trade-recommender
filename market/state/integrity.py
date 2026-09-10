@@ -238,6 +238,30 @@ def _verify_payload(snapshot, definition, flag):
                 )
                 if not physical <= at <= snapshot.information_cutoff:
                     flag(snapshot.pk, "liquidity_availability_chronology")
+                breach = datetime.fromisoformat(event["breach_at"])
+                confirmation = datetime.fromisoformat(event["confirmation_at"])
+                breach_available = datetime.fromisoformat(event["breach_available_at"])
+                if not breach <= confirmation <= at or not breach <= breach_available <= at:
+                    flag(snapshot.pk, "liquidity_availability_chronology")
+                if event["confirmation_available_at"] != event["available_at"]:
+                    flag(snapshot.pk, "liquidity_availability_chronology")
+                for field in ("expired_at", "invalidated_at"):
+                    if event[field] is not None:
+                        terminal = datetime.fromisoformat(event[field])
+                        terminal_available = datetime.fromisoformat(event["terminal_available_at"])
+                        if (
+                            not confirmation
+                            < terminal
+                            <= terminal_available
+                            <= snapshot.information_cutoff
+                            or terminal_available < at
+                        ):
+                            flag(snapshot.pk, "liquidity_availability_chronology")
+                if event["status"] not in ("confirmed", "invalidated", "expired", "unavailable"):
+                    flag(snapshot.pk, "malformed_liquidity_lifecycle")
+                for field in ("dependencies", "level_dependencies", "atr_dependencies"):
+                    if not isinstance(event.get(field), list) or not 1 <= len(event[field]) <= 60:
+                        flag(snapshot.pk, "malformed_liquidity_dependencies")
             except (KeyError, ValueError, TypeError):
                 flag(snapshot.pk, "malformed_liquidity_chronology")
 

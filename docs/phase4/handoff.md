@@ -1,6 +1,30 @@
 # Phase 4 — correction handoff, not acceptance
 
-## Current: final recording boundary, descriptor 0.11.0
+## Current: mandatory PM scope omissions, descriptor 0.12.0
+
+**Acceptance remains superseded pending final requirements-only PM verification.**
+Starting checkpoint: `bc4469b37d7cc0511f55061085b78bb5f8ec4d60`, same unpushed
+Phase4 branch; local/live `main` and `origin/main` remain `a3fbe6ce`.
+
+| Omission | Engineering disposition |
+|---|---|
+| Operational surfaces | Read-only bounded batch preview, standalone exact definition-envelope validation, separate input/snapshot/feature coverage, task/schedule/M15/source-consumer integrity. Static errors and explicit coverage exit policy; traced SELECT-only and all-table count/content fingerprints on empty and populated data. |
+| Versioned event windows | Definition-bound inclusive UTC ±30-minute exact scheduled/released windows; vintage/cutoff/DST/overlap/status tests; no severity or attested-safe inference; existing suppressor evidence retained. |
+| Liquidity lifecycle/provenance | Exact swing/ATR/candle dependencies, physical and availability times, breach ATR normalization for acceptance, bounded terminal expiry/invalidation/gap states, raw guards and persisted suffix invariance. Pending remains unconfirmed. |
+
+Design §20 and the runbook state policy choices and limitations. Migration 0037
+only changes prospective guards and retains all rows. Previous migrations,
+recording-time locks, FVG/ORB, monthly/session code, protected technicals and
+forecast/schedule behavior are not redesigned. The historical rollback-refusal
+test now restores the graph after its intentional failure through the migration
+executor, without installing SQL from fixture setup.
+
+Verification and cleanup results are retained in `verification/omissions.md`.
+Do not treat historical or focused passing tests as PM acceptance. No push, PR,
+deployment, activation, provider, production, AWS, OANDA or `.env.local` access
+is authorized or performed by this completion.
+
+## Historical: final recording boundary, descriptor 0.11.0
 
 **Acceptance remains superseded pending fresh independent review.** Migration
 0036 and this continuation preserve the intentional prior worktree. The four

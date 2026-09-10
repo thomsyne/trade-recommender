@@ -253,10 +253,17 @@ class RecordingBoundaryTests(TransactionTestCase):
 
         self.ingest()
         before = CandleObservation.objects.get().recorded_at
-        with self.assertRaisesMessage(
-            DatabaseError, "cannot discard recorded evidence availability"
-        ):
-            MigrationExecutor(connection).migrate([("market", "0035_market_state_evidence_guards")])
+        executor = MigrationExecutor(connection)
+        leaves = executor.loader.graph.leaf_nodes()
+        try:
+            with self.assertRaisesMessage(
+                DatabaseError, "cannot discard recorded evidence availability"
+            ):
+                executor.migrate([("market", "0035_market_state_evidence_guards")])
+        finally:
+            # A later reversible contract migration can precede the expected
+            # 0036 refusal. Restore through migrations, never fixture SQL repair.
+            MigrationExecutor(connection).migrate(leaves)
         self.assertEqual(CandleObservation.objects.get().recorded_at, before)
 
     def test_unconsumed_policy_semantics_are_immutable_but_editorial_fields_are_not(self):

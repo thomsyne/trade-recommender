@@ -38,7 +38,8 @@ class SemanticBoundaryTests(TestCase):
         self.insert(self.payload)
         pk = MarketStateSnapshot.objects.latest("pk").pk
         out = StringIO()
-        with self.assertNumQueries(1):
+        # One snapshot page plus the two bounded task/schedule scans.
+        with self.assertNumQueries(3):
             call_command("market_state_integrity", after_id=pk, stdout=out)
         self.assertEqual(json.loads(out.getvalue())["checked"], 0)
 
@@ -47,7 +48,7 @@ class SemanticBoundaryTests(TestCase):
 
         from market.state.compute import DESCRIPTOR_DEFINITION
 
-        migration = import_module("market.migrations.0036_market_state_recording_boundary")
+        migration = import_module("market.migrations.0037_market_state_lifecycle")
         self.assertIn(identity_digest(DESCRIPTOR_DEFINITION), migration.NEW_FUNCTIONS)
 
     def setUp(self):

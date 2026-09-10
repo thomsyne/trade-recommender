@@ -26,7 +26,7 @@ from market.state.snapshots import persist_snapshot, synchronize_inputs
 from market.state.terminology import REGISTRY
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.11.0"
+DESCRIPTOR_VERSION = "0.12.0"
 
 FVG_GRANULARITIES = frozenset({"M15", "H1", "H4"})
 ORB_SESSION_WINDOW_HOURS = 12
@@ -127,6 +127,29 @@ DESCRIPTOR_DEFINITION = {
         "fvg_min_atr": str(fvg.FVG_MIN_ATR),
         "fvg_min_pips": str(fvg.FVG_MIN_PIPS),
         "fvg_min_spread": str(fvg.FVG_MIN_SPREAD),
+    },
+    "event_risk_policy": {
+        "pre_seconds": 1800,
+        "post_seconds": 1800,
+        "inclusive": True,
+        "precision": "exact",
+        "eligible_statuses": ["scheduled", "released"],
+        "currency_country": context.CURRENCY_COUNTRY,
+        "aggregation": "union-of-active-vintages-no-severity",
+        "availability": "max-first-observed-retrieval",
+        "expiry": "strictly-after-window-end",
+        "unknown": "no-active-window-is-not-attested-safe",
+        "attested_empty": "unsupported-source-contract",
+        "revision": "latest-known-vintage-including-suppressors",
+    },
+    "liquidity_lifecycle": {
+        "confirmation_intervals": liquidity.RECLAIM_WINDOW,
+        "expiry_intervals": 50,
+        "expiry_boundary": "strictly-greater",
+        "invalidation": "sweep-close-beyond-or-acceptance-reclaim",
+        "missingness": "gap-terminates-tracking",
+        "normalization": "breach-contemporaneous-ATR14",
+        "pending": "not-emitted-as-confirmed",
     },
     "terminology": REGISTRY,
     "session_policy": {
@@ -535,7 +558,12 @@ def build_market_state(
         {g: tuple(FrozenObservation.from_row(r) for r in rows) for g, rows in frozen_rows.items()}
     )
     manifest, manifest_sha256 = manifest_from_rows(frozen_rows)
-    event_block = context.event_state(instrument, information_cutoff, frozen=research)
+    event_block = context.event_state(
+        instrument,
+        information_cutoff,
+        frozen=research,
+        policy=definition.definition["event_risk_policy"],
+    )
     macro_block = context.macro_regime(instrument, information_cutoff, frozen=research)
     per_granularity = {
         granularity: _granularity_descriptor(instrument, granularity, frozen_rows[granularity])
@@ -583,7 +611,12 @@ def build_market_state(
                     at = datetime.fromisoformat(value[field])
                     context_cutoffs.add(at)
                     value[field + "_context"] = {
-                        "event_state": context.event_state(instrument, at, frozen=research),
+                        "event_state": context.event_state(
+                            instrument,
+                            at,
+                            frozen=research,
+                            policy=definition.definition["event_risk_policy"],
+                        ),
                         "macro_regime": context.macro_regime(instrument, at, frozen=research),
                     }
         elif isinstance(value, list):

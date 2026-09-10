@@ -14,7 +14,7 @@ No output here selects a trade.
 from datetime import datetime
 from decimal import Decimal
 
-from market.state.canonical import format_decimal
+from market.state.canonical import format_decimal, identity_digest
 from market.state.features import (
     ATR_PERIOD,
     SWING_LEFT,
@@ -24,10 +24,9 @@ from market.state.features import (
     confirmed_swings,
     contiguous,
 )
-from market.state.structure import _zone_id
 
-SWEEP_V = "sweep-v1"
-ACCEPTANCE_V = "acceptance-v1"
+SWEEP_V = "sweep-v2"
+ACCEPTANCE_V = "acceptance-v2"
 
 SWEEP_DEPTH_ATR = Decimal("0.1")  # s: minimum wick penetration
 RECLAIM_WINDOW = 3  # t: bars allowed for the reclaim / acceptance test
@@ -45,6 +44,69 @@ def _iso(value):
 
 def _unavailable(version, reason):
     return {"state": "unavailable", "version": version, "reason_code": reason}
+
+
+def _dependency(bar):
+    return {
+        "timestamp": _iso(bar.timestamp),
+        "revision": bar.revision,
+        "content_sha256": bar.content_sha256
+        or identity_digest([format_decimal(v) for v in (bar.open, bar.high, bar.low, bar.close)]),
+        "granularity": bar.granularity,
+    }
+
+
+def _lifecycle(event, bars, breach, confirmation, level, side, *, acceptance=False):
+    from market.state.compute import DESCRIPTOR_DEFINITION
+
+    policy = DESCRIPTOR_DEFINITION["liquidity_lifecycle"]
+    event.update(
+        {
+            "status": "confirmed",
+            "reason_code": "confirmation_complete",
+            "breach_at": _iso(bars[breach].end or bars[breach].timestamp),
+            "breach_available_at": _iso(bars[breach].available_at),
+            "confirmation_at": _iso(bars[confirmation].end or bars[confirmation].timestamp),
+            "confirmation_available_at": event["available_at"],
+            "dependencies": [_dependency(b) for b in bars[breach : confirmation + 1]],
+            "expiry_intervals": policy["expiry_intervals"],
+            "expired_at": None,
+            "invalidated_at": None,
+            "terminal_available_at": None,
+        }
+    )
+    for j in range(confirmation + 1, len(bars)):
+        bar = bars[j]
+        invalid = (
+            (bar.close < level if side == "above" else bar.close > level)
+            if acceptance
+            else (bar.close > level if side == "above" else bar.close < level)
+        )
+        if not contiguous(bars[j - 1 : j + 1]):
+            status, reason = "unavailable", "confirmation_history_gap"
+        elif j - confirmation > policy["expiry_intervals"]:
+            status, reason = "expired", "lifecycle_expired"
+        elif invalid:
+            status, reason = (
+                "invalidated",
+                "level_reclaimed" if acceptance else "close_beyond_level",
+            )
+        else:
+            continue
+        event["status"], event["reason_code"] = status, reason
+        event["terminal_available_at"] = _iso(
+            max(
+                datetime.fromisoformat(event["available_at"]),
+                *(b.available_at for b in bars[confirmation + 1 : j + 1]),
+            )
+        )
+        if status in ("expired", "invalidated"):
+            event["expired_at" if status == "expired" else "invalidated_at"] = _iso(
+                bar.end or bar.timestamp
+            )
+        event["dependencies"].extend(_dependency(b) for b in bars[confirmation + 1 : j + 1])
+        break
+    return event
 
 
 def detect_sweep(
@@ -96,11 +158,12 @@ def detect_sweep(
                     "reclaim_distance_atr": format_decimal(reclaim_distance / event_atr),
                     "reclaim_bars": j - i,
                 }
+                _lifecycle(latest, bars, i, j, level, side)
                 break
     return latest
 
 
-def detect_acceptance(bars, atr, level, side, *, level_id, window=RECLAIM_WINDOW):
+def detect_acceptance(bars, atr, level, side, *, level_id, window=RECLAIM_WINDOW, atr_history=None):
     """Latest completed close beyond ``level`` that is not reclaimed within ``window``.
 
     Acceptance is only declared once the full confirmation window has elapsed with
@@ -108,6 +171,9 @@ def detect_acceptance(bars, atr, level, side, *, level_id, window=RECLAIM_WINDOW
     bars is still pending, not accepted."""
     latest = None
     for i, bar in enumerate(bars):
+        event_atr = atr if atr_history is None else atr_history.get(bar.timestamp)
+        if not event_atr:
+            continue
         accepted = bar.close > level if side == "above" else bar.close < level
         if not accepted:
             continue
@@ -126,7 +192,9 @@ def detect_acceptance(bars, atr, level, side, *, level_id, window=RECLAIM_WINDOW
                 "side": side,
                 "acceptance_close": _iso(bar.end or bar.timestamp),
                 "available_at": _iso(max(b.available_at for b in bars[i : i + window + 1])),
+                "acceptance_distance_atr": format_decimal(abs(bar.close - level) / event_atr),
             }
+            _lifecycle(latest, bars, i, i + window, level, side, acceptance=True)
     return latest
 
 
@@ -151,19 +219,36 @@ def liquidity_context(bars, atr, instrument_code, timeframe):
             for b in bars[max(0, pivot.index - SWING_LEFT) : pivot.index + SWING_RIGHT + 1]
         )
         after = bars[pivot.index + SWING_RIGHT + 1 :]
-        level_id = _zone_id(pivot.price, pivot.price, instrument_code, timeframe)
+        level_id = identity_digest(
+            [
+                instrument_code,
+                timeframe,
+                "high",
+                [
+                    _dependency(b)
+                    for b in bars[max(0, pivot.index - SWING_LEFT) : pivot.index + SWING_RIGHT + 1]
+                ],
+            ]
+        )
         result["resistance_level"] = format_decimal(pivot.price)
         result["sweep_above"] = detect_sweep(
             after, atr, pivot.price, "above", level_id=level_id, atr_history=atr_history
         )
         result["acceptance_above"] = detect_acceptance(
-            after, atr, pivot.price, "above", level_id=level_id
+            after, atr, pivot.price, "above", level_id=level_id, atr_history=atr_history
         )
         for name in ("sweep_above", "acceptance_above"):
             if result[name]:
                 result[name]["available_at"] = _iso(
                     max(available_at, datetime.fromisoformat(result[name]["available_at"]))
                 )
+                result[name]["breach_available_at"] = _iso(
+                    max(available_at, datetime.fromisoformat(result[name]["breach_available_at"]))
+                )
+                result[name]["level_dependencies"] = [
+                    _dependency(b)
+                    for b in bars[max(0, pivot.index - SWING_LEFT) : pivot.index + SWING_RIGHT + 1]
+                ]
     if lows:
         pivot = lows[-1]
         available_at = max(
@@ -171,24 +256,41 @@ def liquidity_context(bars, atr, instrument_code, timeframe):
             for b in bars[max(0, pivot.index - SWING_LEFT) : pivot.index + SWING_RIGHT + 1]
         )
         after = bars[pivot.index + SWING_RIGHT + 1 :]
-        level_id = _zone_id(pivot.price, pivot.price, instrument_code, timeframe)
+        level_id = identity_digest(
+            [
+                instrument_code,
+                timeframe,
+                "low",
+                [
+                    _dependency(b)
+                    for b in bars[max(0, pivot.index - SWING_LEFT) : pivot.index + SWING_RIGHT + 1]
+                ],
+            ]
+        )
         result["support_level"] = format_decimal(pivot.price)
         result["sweep_below"] = detect_sweep(
             after, atr, pivot.price, "below", level_id=level_id, atr_history=atr_history
         )
         result["acceptance_below"] = detect_acceptance(
-            after, atr, pivot.price, "below", level_id=level_id
+            after, atr, pivot.price, "below", level_id=level_id, atr_history=atr_history
         )
         for name in ("sweep_below", "acceptance_below"):
             if result[name]:
                 result[name]["available_at"] = _iso(
                     max(available_at, datetime.fromisoformat(result[name]["available_at"]))
                 )
-    for name in ("sweep_above", "sweep_below"):
+                result[name]["breach_available_at"] = _iso(
+                    max(available_at, datetime.fromisoformat(result[name]["breach_available_at"]))
+                )
+                result[name]["level_dependencies"] = [
+                    _dependency(b)
+                    for b in bars[max(0, pivot.index - SWING_LEFT) : pivot.index + SWING_RIGHT + 1]
+                ]
+    for name in ("sweep_above", "sweep_below", "acceptance_above", "acceptance_below"):
         event = result.get(name)
         if event:
             index = next(
-                i for i, b in enumerate(bars) if _iso(b.timestamp) == event["first_breach"]
+                i for i, b in enumerate(bars) if _iso(b.end or b.timestamp) == event["breach_at"]
             )
             event["available_at"] = _iso(
                 max(
@@ -196,4 +298,18 @@ def liquidity_context(bars, atr, instrument_code, timeframe):
                     *(b.available_at for b in bars[max(0, index - ATR_PERIOD) : index + 1]),
                 )
             )
+            event["atr_dependencies"] = [
+                _dependency(b) for b in bars[max(0, index - ATR_PERIOD) : index + 1]
+            ]
+            event["breach_available_at"] = _iso(
+                max(
+                    datetime.fromisoformat(event["breach_available_at"]),
+                    *(b.available_at for b in bars[max(0, index - ATR_PERIOD) : index + 1]),
+                )
+            )
+            event["confirmation_available_at"] = event["available_at"]
+            if event["terminal_available_at"]:
+                event["terminal_available_at"] = max(
+                    event["terminal_available_at"], event["available_at"]
+                )
     return result

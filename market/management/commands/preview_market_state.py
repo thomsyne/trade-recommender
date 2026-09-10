@@ -6,19 +6,13 @@ nothing to the database and calls no provider.
 """
 
 import json
-from datetime import UTC, datetime
 
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from market.models import Instrument, MarketStateDefinition
-from market.state.canonical import identity_digest
-from market.state.compute import (
-    DESCRIPTOR_DEFINITION,
-    DESCRIPTOR_KEY,
-    DESCRIPTOR_VERSION,
-    build_market_state,
-)
+from market.models import Instrument
+from market.state.compute import DESCRIPTOR_KEY, DESCRIPTOR_VERSION
+from market.state.preview import cutoff_value, preview, scope_value
 from market.state.tasks import DEFAULT_GRANULARITIES
 
 
@@ -31,31 +25,22 @@ class Command(BaseCommand):
         parser.add_argument("--granularities", nargs="+", default=list(DEFAULT_GRANULARITIES))
 
     def handle(self, *args, **options):
-        instrument = Instrument.objects.get(code=options["instrument"])
-        if options["cutoff"]:
-            cutoff = datetime.fromisoformat(options["cutoff"])
-            if cutoff.tzinfo is None:
-                raise CommandError("cutoff must be timezone-aware")
-            cutoff = cutoff.astimezone(UTC)
-        else:
-            cutoff = timezone.now()
-        # Read-only preview: build an in-memory, UNSAVED definition instance so
-        # the command never writes a MarketStateDefinition row. build_market_state
-        # only reads .key, .version, .definition and .definition_sha256.
-        definition = MarketStateDefinition(
-            key=DESCRIPTOR_KEY,
-            version=DESCRIPTOR_VERSION,
-            definition=DESCRIPTOR_DEFINITION,
-            definition_sha256=identity_digest(DESCRIPTOR_DEFINITION),
-        )
-        payload, _scope, _manifest, manifest_sha256, _evidence, _evidence_sha, quality = (
-            build_market_state(instrument, definition, cutoff, options["granularities"])
-        )
+        scope = scope_value(options["granularities"])
+        cutoff = cutoff_value(options["cutoff"]) if options["cutoff"] else timezone.now()
+        if options["instrument"] not in Instrument.Code.values:
+            raise CommandError("invalid_instrument")
+        instrument = Instrument.objects.filter(code=options["instrument"]).first()
+        if instrument is None:
+            raise CommandError("instrument_not_registered")
+        try:
+            payload, _, _, manifest_sha256, _, _, quality = preview(instrument, cutoff, scope)
+        except ValueError:
+            raise CommandError("preview_unavailable") from None
         self.stdout.write(
             json.dumps(
                 {
                     "preview": True,
-                    "definition": [definition.key, definition.version],
+                    "definition": [DESCRIPTOR_KEY, DESCRIPTOR_VERSION],
                     "input_manifest_sha256": manifest_sha256,
                     "data_quality_status": quality,
                     "output_payload": payload,

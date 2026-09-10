@@ -1,5 +1,10 @@
 # Phase 4 — acceptance superseded
 
+Descriptor 0.12.0 and migration 0037 address the three mandatory PM scope
+omissions. **Acceptance remains superseded pending final requirements-only PM
+verification.** Engineering verification is recorded in
+[the omission handoff](handoff.md) and is not a self-acceptance decision.
+
 Descriptor 0.11.0 and migration 0036 add the final recording/concurrency and
 prerequisite-chronology corrections. The [current handoff](handoff.md) and
 [verification](verification/README.md) are engineering evidence only.

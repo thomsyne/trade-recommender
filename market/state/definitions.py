@@ -44,7 +44,7 @@ def validate_definition_body(body):
         raise DefinitionError(str(exc)) from exc
     from market.state.compute import DESCRIPTOR_DEFINITION
 
-    if body != DESCRIPTOR_DEFINITION:
+    if canonical_json(body) != canonical_json(DESCRIPTOR_DEFINITION):
         raise DefinitionError("unsupported_definition_contract")
 
 

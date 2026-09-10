@@ -2,7 +2,7 @@
 
 **Acceptance is superseded and pending independent review.** This document
 contains requirements and historical design notes, not a certification of their
-implementation. The correction contracts in §17–19 and the current handoff supersede
+implementation. The correction contracts in §17–20 and the current handoff supersede
 the earlier completion claims in §16.5–16.6.
 
 Status: **living design record** (mandatory preliminary artifact, authored before
@@ -813,3 +813,120 @@ knowledge times. An unrelated late suffix does not delay an earlier event.
 non-NULL recording facts exist, reversal refuses before removing the column or
 guards: rolling back code must not erase system evidence. Unsupported historical
 descriptor versions remain diagnostic records, not rewritten or re-certified.
+
+## 20. Mandatory scope completion — descriptor 0.12.0
+
+This supersedes the incomplete operational, event-window and liquidity contracts
+above. Acceptance remains superseded pending requirements-only PM verification.
+Migration 0037 changes prospective definition/snapshot guards only; it never
+rewrites a definition, snapshot, observation, schedule or historical migration.
+
+### 20.1 Read-only operational surfaces
+
+`preview_market_state_batch` selects at most eight distinct canonical
+instrument/aware-cutoff pairs, sorts them by instrument and UTC cutoff, and calls
+the same unsaved-definition preview builder as the single preview. Granularities
+must be distinct members of M15/H1/H4/D/W (maximum five). No definitions, snapshots,
+occurrences or schedules are registered. JSON escapes control characters and
+uses deterministic ordering. Invalid inputs produce static error codes. Cutoffs
+are bounded to years 2000–2100 and ISO strings to 40 characters.
+
+`validate_market_state_definition` reads at most 64 KiB of a JSON envelope with
+exact keys `key`, `version`, `definition`, `definition_sha256`. Duplicate JSON
+keys, noncanonical numbers, malformed contracts, unsupported identities and
+hash mismatches fail. Comparing canonical JSON also distinguishes booleans from
+integers. All schema/algorithm/threshold/terminology/session/missingness policy
+is checked against the supported immutable body. It performs no database reads
+or registration.
+
+`market_state_coverage` is a separate coverage axis, not an integrity check.
+For each selected canonical instrument and granularity it enumerates complete
+registered intervals wholly inside an explicit `(since, cutoff)` range of at
+most seven elapsed days (start inclusive), using the frozen New York calendar.
+The bounded quarter-hour grid also handles D/W and DST. It reports missing
+interval counts, complete registered-input coverage, latest-expected-interval
+freshness, current-version snapshot existence/freshness, and computed feature
+family availability with nested unavailable reasons. Family freshness and
+registered coverage describe that granularity's inputs in this requested range,
+not certification of every feature's longer prerequisites. Context family
+availability is separate; no calendar completeness is inferred from events.
+
+Default coverage exit is zero even when missing or stale. `--require-complete`
+exits one unless every selected row has at least one expected interval, all
+expected inputs and a current-definition snapshot at/after the last expected
+completion. Insufficient ATR history, no qualifying pattern, unsupported FVG
+timeframe or unknown macro/calendar evidence is reported, not silently converted
+to a neutral feature and not used to fail this explicitly input/snapshot policy.
+Malformed input or a bounded-computation refusal fails independently.
+
+Integrity adds bounded scans (500 task rows per model, static code/id details)
+for unsupported Phase4 task identities/parameters, any Phase4 schedule, and
+enabled/queued/running M15 acquisition. Overflow is a violation, never a clean
+partial scan. The feature-only boundary scans bounded forecast Python source
+without executing it for direct imports/ORM/raw-table references. This is not a
+claim to detect arbitrary dynamic reflection or external consumers. Canonical
+Phase2 H1/H4/D/W schedule inventory and task dispatch are unchanged.
+
+### 20.2 Exact-time event-risk windows
+
+`event_risk_policy` binds an inclusive 1,800-second pre-event and 1,800-second
+post-event interval, exact precision, `scheduled`/`released` statuses, and the
+existing USD→US/CAD→CA/GBP→GB/EUR→EU mapping. Arithmetic uses UTC instants at
+microsecond precision, not DST-sensitive wall-clock arithmetic. The previous
+`defined` string contained no natural numeric default; thirty minutes on each
+side is an explicit conservative display convention, not calibrated trading
+risk or evidence of a severity class. No severity is invented.
+
+Availability is max(first observed, retrieval fetched), bounded by the evaluation
+cutoff. The latest eligible vintage wins before display filtering. Cancelled,
+postponed or unrecognized statuses cannot activate a window; rescheduling out of
+the display range suppresses the old event. Date-only records remain unavailable
+for intraday windows. A window is upcoming before its start, active at either
+endpoint and inside, expired strictly after its end. The display horizon remains
+the existing one-day lookback/seven-day horizon. Expiry does not delete a vintage.
+
+Overlaps are the union of active windows, represented by sorted exact vintage
+fingerprints, without adding or ranking severities. At least one active window
+means `present`; no active windows means `unknown`, never safe/neutral. Individual
+events do not attest a complete or empty calendar; the current sources have no
+attested-empty contract, so empty remains unavailable. Payload `evaluated_at`
+distinguishes snapshot-time and feature-availability-time context. Definition hash
+and existing exact evidence manifests bind policies, vintages and reschedule
+suppressors, including historical feature contexts.
+
+### 20.3 Sweep/acceptance lifecycle and provenance
+
+`sweep-v2` retains a wick penetration ≥0.1 breach-contemporaneous ATR14, body not
+beyond the level, and strict reclaim within zero through three registered
+successors. `acceptance-v2` retains a strict completed close beyond the level
+and three subsequent registered intervals without a strict reclaim. Equality
+does not form acceptance or reclaim; a pending/gapped confirmation emits no
+confirmed event. Acceptance magnitude is absolute close-minus-level divided by
+breach ATR14, never latest ATR. Unknown/zero ATR cannot qualify either event.
+
+Each emitted event contains a level identity binding instrument/timeframe/side
+and exact five-candle swing dependencies; exact breach-through-confirmation,
+level and ATR dependency lists bind timestamps, revisions, content hashes and
+granularity. `breach_at`/`confirmation_at` are candle completion instants (not
+claimed intrabar tick times); their separate availability fields include actual
+level, ATR and confirmation prerequisites. Late prerequisites move knowledge
+time, not physical formation. ATR provenance includes the preceding close.
+
+After confirmation, the first opposing close invalidates: a close beyond the
+level invalidates a sweep; strict reclaim invalidates acceptance. Equality does
+neither. Tracking expires strictly after 50 registered successors from
+confirmation. Fifty is a bounded descriptive retention convention consistent
+with the existing FVG horizon, not a trading rule. A missing successor terminates
+tracking as unavailable before interpreting a later candle. Gap, expiry, then
+invalidation is the deterministic precedence on one evaluated successor.
+Terminal events carry reason, physical expiry/invalidation and terminal
+availability with dependencies, and cannot revive. Irrelevant later data does
+not change their earlier facts. As before, each side returns the latest qualifying
+event within the descriptor lookback, not an unbounded cross-snapshot event ledger.
+
+SQL guards reject malformed event windows and liquidity chronology/dependencies;
+Python integrity replays exact cited inputs and separately reselects eligible
+evidence. SQL is not a second price-feature formula engine. Tests cover both
+directions, equality, gaps, normalization, expiry/invalidation, late prerequisites,
+forged chronology and a persisted old-cutoff computation after a future suffix.
+No entry, exit, sizing, stop or hidden-liquidity inference is introduced.

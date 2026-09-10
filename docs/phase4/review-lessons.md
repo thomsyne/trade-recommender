@@ -1,5 +1,27 @@
 # Phase 4 — review lessons and remaining review boundaries
 
+## Requirements-only omissions (0.12.0)
+
+- Closing a bounded bug review does not complete omitted requirements. Trace
+  operational commands, event policy and every lifecycle field separately.
+- A `defined` label is not a window. Pin exact bounds, inclusivity, timezone,
+  status eligibility and unknown/empty meaning in the definition hash.
+- Report integrity, input coverage, snapshot freshness and feature availability
+  independently. A complete input interval does not imply sufficient ATR history
+  or an attested event calendar.
+- Test read-only claims with both traced SQL and every table's count/content
+  fingerprint, including populated snapshots and nonzero command exits.
+- Canonical schema validation must distinguish JSON booleans from integers;
+  Python dictionary equality alone does not.
+- Lifecycle formation, confirmation, knowledge time and terminal state need
+  separate fields. Normalize at the breach, cite actual prerequisites, and test
+  both directions with unequal values and exact boundaries.
+- A newly reversible migration can run before an older rollback refuses. Tests
+  must restore their own migration graph through the executor in `finally`;
+  do not repair installed SQL in unrelated parity-test setup.
+- Static direct-consumer scans are bounded detection, not proof against arbitrary
+  dynamic reflection or external consumers. Engineering tests are not acceptance.
+
 ## Final recording boundary (0.11.0)
 
 - Source observation time is not database first-known time. Preserve unknown

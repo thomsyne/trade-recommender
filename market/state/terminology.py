@@ -182,22 +182,22 @@ REGISTRY = {
         invalidation="none",
         limitations="a partial period is never completed",
     ),
-    "sweep-v1": _term(
+    "sweep-v2": _term(
         "liquidity sweep proxy",
         "a wick through a level (>= 0.1*ATR) with a reclaim close on the origin side.",
         formation="at the breach candle",
         availability="on the reclaim close",
-        expiry="none",
-        invalidation="acceptance beyond the level",
+        expiry="strictly more than 50 registered successors after confirmation; terminal",
+        invalidation="first completed close beyond the level; missing successor terminates tracking as unavailable",
         limitations="proxy for a rejection, not observed order flow",
     ),
-    "acceptance-v1": _term(
+    "acceptance-v2": _term(
         "acceptance proxy",
         "a completed close beyond a level not reclaimed within 3 intervals.",
         formation="at the accepting close",
         availability="after the 3-interval window matures",
-        expiry="none",
-        invalidation="a later reclaim",
+        expiry="strictly more than 50 registered successors after confirmation; terminal",
+        invalidation="first later strict reclaim; missing successor terminates tracking as unavailable",
         limitations="pending until the window elapses",
     ),
     "fvg-v1": _term(
@@ -236,9 +236,9 @@ REGISTRY = {
         invalidation="none",
         limitations="no historical spread => unavailable",
     ),
-    "event-state-v1": _term(
+    "event-state-v2": _term(
         "scheduled-event state",
-        "pair-currency events, vintage-correct, exact vs date-only, severity unavailable.",
+        "pair-currency events, latest known vintage; exact scheduled/released events have inclusive UTC +/-30 minute windows; severity unavailable.",
         formation="at the event vintage",
         availability="when the vintage is known by the cutoff",
         expiry="past the display window",
@@ -275,10 +275,10 @@ REGISTRY["fvg-v1"]["formula"] = (
 )
 REGISTRY["orb-v1"]["timeframe"] = ["M15"]
 REGISTRY["monthly-context-v1"]["timeframe"] = ["D", "M"]
-REGISTRY["event-state-v1"]["inputs"] = (
+REGISTRY["event-state-v2"]["inputs"] = (
     "EconomicEvent vintage, RawRetrieval, SourcePolicy, source and optional series"
 )
-REGISTRY["event-state-v1"]["timeframe"] = ["point-in-time"]
+REGISTRY["event-state-v2"]["timeframe"] = ["point-in-time"]
 REGISTRY["macro-regime-v1"]["inputs"] = (
     "latest and predecessor policy-rate MacroObservation periods, retrievals, source, policy and series"
 )
