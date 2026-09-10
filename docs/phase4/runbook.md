@@ -96,9 +96,8 @@ result is `unavailable(incomplete_period)`.
   point-in-time policy-rate level and direction per currency; other indicators
   are a later extension.
 - **Spread** is the observed bid/ask at the candle close, never backfilled. FVG
-  spread-normalization is reported `unavailable(spread_unavailable)` in this
-  release (its price facts are retained); wiring per-candle spread into the FVG
-  qualifier is a documented follow-up.
+  spread-normalization uses the candle-3 spread when available, else is reported
+  `unavailable(spread_unavailable)` with the price facts retained.
 
 ## Integrity report
 
