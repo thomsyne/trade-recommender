@@ -4,10 +4,11 @@ from decimal import Decimal as D
 from decimal import localcontext
 
 from market.state.features import contiguous
-from market.strategy.contracts import Component, ContinuousForecast
+from market.strategy.contracts import Component, ContinuousForecast, arithmetic
 from market.strategy.definitions import HORIZONS, SPEEDS
 
 
+@arithmetic
 def ema(values, span):
     if not values or span < 1:
         raise ValueError("ema_inputs")
@@ -20,6 +21,7 @@ def ema(values, span):
         return +value
 
 
+@arithmetic
 def sigma(closes):
     if len(closes) < 97:
         return None
@@ -29,10 +31,12 @@ def sigma(closes):
         return variance.sqrt() if variance > 0 else None
 
 
+@arithmetic
 def cap(value):
     return max(D(-20), min(D(20), value))
 
 
+@arithmetic
 def buffer(target, previous=D(0)):
     if not previous.is_finite() or abs(previous) > 20:
         raise ValueError("invalid_previous_forecast")
@@ -40,6 +44,7 @@ def buffer(target, previous=D(0)):
     return previous if abs(difference) <= 1 else target - (1 if difference > 0 else -1)
 
 
+@arithmetic
 def combine(strategy, components, previous=D(0)):
     included = [c.capped for c in components if c.exclusion is None]
     with localcontext() as ctx:
@@ -66,6 +71,7 @@ def _component(name, raw, volatility, costs, cutoff):
     return Component(name, raw, cap(raw), reason)
 
 
+@arithmetic
 def ewmac(bars, *, costs, cutoff, previous=D(0)):
     """Each speed retains raw/capped value and its exact exclusion independently."""
     with localcontext() as ctx:
@@ -81,6 +87,7 @@ def ewmac(bars, *, costs, cutoff, previous=D(0)):
         return combine("ewmac-d-v1", components, previous)
 
 
+@arithmetic
 def breakout(bars, *, costs, cutoff, previous=D(0)):
     with localcontext() as ctx:
         ctx.prec = 34

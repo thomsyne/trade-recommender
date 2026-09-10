@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal as D
 
 from market.models import StrategyEvaluation
+from market.strategy.contracts import arithmetic
 from market.strategy.definitions import STRATEGIES, definition_digest, population_definition
 
 
@@ -18,6 +19,7 @@ def population(cutoff):
     return "exploratory_outside_registered_population"
 
 
+@arithmetic
 def summarize_outcomes(rows, *, strategy, era):
     """Rows must already cite immutable simulation results; never pooled variants.
 

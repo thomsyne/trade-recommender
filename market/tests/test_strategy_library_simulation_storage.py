@@ -42,7 +42,7 @@ class SimulationStorageTests(TestCase):
             "outputs": [
                 setup_payload
                 | {
-                    "available_at": "2026-01-05T12:59:00+00:00",
+                    "available_at": "2026-01-05T12:59:00.000000+00:00",
                     "entry_at": "2026-01-05T12:59:59.999999+00:00",
                 }
             ]
@@ -107,6 +107,18 @@ class SimulationStorageTests(TestCase):
             "output_sha256": identity_digest(output),
             "identity": identity_digest([row.pk, intent, evidence]),
         }
+        for bad in (
+            output | {"strategy": "fixed-risk-v1"},
+            output | {"net_account": "0.000000"},
+            {k: v for k, v in output.items() if k != "reason"},
+        ):
+            with (
+                self.assertRaisesMessage(DatabaseError, "phase5_simulation_shape"),
+                transaction.atomic(),
+            ):
+                StrategySimulation.objects.create(
+                    **(values | {"output": bad, "output_sha256": identity_digest(bad)})
+                )
         record = StrategySimulation.objects.create(**values)
         self.assertEqual(len(simulation_integrity()["violations"]), 1)
         for sql in (

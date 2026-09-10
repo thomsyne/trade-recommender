@@ -48,7 +48,21 @@ class SimulationTests(SimpleTestCase):
             (),
         )
         end = self.outcome.end
-        self.terms = OutcomeTerms("d" * 64, "USD", "CAD", START, end, end, end, D("1.3"), ())
+        self.terms = OutcomeTerms(
+            "d" * 64,
+            "USD",
+            "CAD",
+            START,
+            end,
+            end,
+            end,
+            D("1.3"),
+            (),
+            base_currency="EUR",
+            provenance="synthetic fixture",
+            cost_unit="quote_per_base",
+            conversion_unit="account_per_quote",
+        )
 
     def run_model(self, bars=None, **kwargs):
         return simulate(

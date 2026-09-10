@@ -6,10 +6,11 @@ from decimal import localcontext
 
 from market.state.features import contiguous
 from market.state.sessions import session_open_utc
-from market.strategy.contracts import Unavailable, iso
+from market.strategy.contracts import Unavailable, arithmetic, iso
 from market.strategy.setups import atr, candidate
 
 
+@arithmetic
 def opening_range(inputs, *, session, session_date, variant):
     if session not in ("london", "new_york") or variant not in (
         "orb-m15-wick-v1",

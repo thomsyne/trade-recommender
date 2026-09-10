@@ -54,7 +54,7 @@ class PersistenceTests(TestCase):
         self.assertEqual(integrity()["violations"], [])
 
     def test_all_definitions_are_sql_pinned_and_retries_are_exact(self):
-        pins = import_module("market.migrations.0039_strategy_library_guards").PINS
+        pins = import_module("market.migrations.0040_strategy_contract_corrections").PINS
         self.assertEqual(pins, {s: definition_digest(s) for s in STRATEGIES})
         for strategy in STRATEGIES:
             first, created = calculate(self.snapshot.pk, strategy)

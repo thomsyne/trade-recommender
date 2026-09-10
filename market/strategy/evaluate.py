@@ -12,6 +12,7 @@ from market.strategy.contracts import (
     ContinuousForecast,
     SetupCandidate,
     Unavailable,
+    arithmetic,
     encoded,
 )
 from market.strategy.costs import CostEvidence
@@ -23,6 +24,7 @@ from market.strategy.risk import (
     surprise_readiness,
     volatility_overlay,
 )
+from market.strategy.schema import validate_evaluation
 from market.strategy.setups import atr, fast_mean_reversion, mean_reversion_risk
 from market.strategy.structure import failed_break, pullback, range_reversion
 from market.strategy.trend import breakout, cap, ema, ewmac, sigma
@@ -37,6 +39,7 @@ def cost_from_payload(body):
     return CostEvidence(**body)
 
 
+@arithmetic
 def evaluate(inputs, strategy, *, costs=(), previous=D(0)):
     if strategy not in STRATEGIES:
         raise ValueError("unsupported_strategy")
@@ -95,9 +98,11 @@ def evaluate(inputs, strategy, *, costs=(), previous=D(0)):
         else result
         for result in results
     )
-    return {
+    output = {
         "schema": "phase5/evaluation-v1",
         "strategy": strategy,
         "outputs": [json.loads(encoded(r)) for r in results],
         "activation": "forbidden",
     }
+    validate_evaluation(output, strategy)
+    return output

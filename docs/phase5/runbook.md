@@ -7,6 +7,15 @@ to exercise it. Four decision-enabled and eight ingestion-only instruments remai
 the existing policy. No executable quote or profitability claim follows from a
 successful calculation or a passing engineering test.
 
+Correction revision 2 requires forward migration0040 and its exact definition
+digests. Old revision-1 definitions/evidence stay immutable; registration refuses
+to overwrite them, and corrected replay refuses unsupported old definitions.
+Do not delete old evidence to resolve a version conflict. Fast MR now owns the
+separately pinned `adverse-limit-h1-v1`; ORB and other setup versions retain their
+market-next-interval hypothesis. Lineage replay is bounded to256 records including
+the current evaluation. See [correction handoff](corrections.md); acceptance is
+pending independent final verification.
+
 ## Read-only inspection
 
 Use an authorized local database with the new forward migrations applied; never

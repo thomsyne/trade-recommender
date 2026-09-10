@@ -1,13 +1,17 @@
-# Frozen deterministic library v1
+# Frozen deterministic library, correction revision 2
 
 Status: return-blind engineering specification. Constants below are hypotheses,
 not calibrated claims or reproductions of any author's published track record.
 All strategies are offline. No observed outcomes have been inspected to select
-these parameters. A change to any rule, cost policy or boundary needs a new ID.
+these parameters. Corrected contracts have new immutable definition digests;
+the 19 strategy IDs are retained for this unaccepted engineering correction.
+Revision-1 records are never rewritten or silently reused. See
+[correction contracts and review lessons](corrections.md).
 
 ## 1. Shared arithmetic, evidence and evaluation
 
-Decimal precision 34, half-even; compare before rounding, serialize outputs to
+Fresh local Decimal context: precision 34, half-even, fixed exponent bounds and
+traps, independent of ambient context; compare before rounding, serialize outputs to
 six decimals. Input costs, financing and conversion evidence retain exact decimal
 strings, without quantization, so replay cannot move an affordability boundary.
 Prices are midpoint quote currency/base unit. EUR/GBP/CAD/USD pairs use 0.0001
@@ -55,7 +59,10 @@ capped speeds, frozen diversification multiplier 1, cap again. No dynamic
 correlation estimate. Buffer: starting previous forecast 0, retain previous when
 absolute difference ≤1; otherwise move to target−sign(target−previous)×1.
 Previous value must be explicitly supplied from same-version prior evidence;
-offline default is initialization, not an invented position.
+offline default is initialization, not an invented position. Verify the complete
+bounded ancestor chain (maximum256 records including the current evaluation),
+all hashes and semantic replay before consuming a buffer. Cycles, missing or
+invalid ancestors, cross-definition/instrument links and unordered cutoffs fail.
 
 ## 3. Breakout (`breakout-d-v1`)
 
@@ -75,8 +82,17 @@ z=(equilibrium−H1 close)/H1 ATR; require |z|≥1 and sign(z)=sign(EWMAC16/64).
 Forecast clip(10z,±20); volatility reduction: multiply by 0.5 when latest
 daily sigma/prior daily sigma >1.5, otherwise 1 (prior sigma required).
 Candidate stop=signal close−direction×1.5ATR; target=frozen equilibrium;
-entry expires after one H1 successor; time stop six H1 intervals. Conservative
-market-next-interval simulation only; no limit-fill or intrabar-path inference.
+entry expires after one H1 successor; time stop six H1 intervals.
+`adverse-limit-h1-v1` alone owns MR simulation: limit=completed signal close,
+placement at next eligible H1 opening after availability and latency, validity
+[entry,next registered H1 opening). Candidate expiry bounds latest placement,
+not order lifetime; delayed recording must not collapse order validity to zero.
+Only an opening ask/bid through the limit models a fill at the
+limit, with no favorable gap improvement or adverse entry slippage. Intrabar
+touches are unavailable (queue/path unknown); an opening beyond invalidation is
+unavailable. Stop-first after an opening fill; exit spread/slippage, two-sided
+commission and documented financing/conversion remain explicit. This is a
+conservative modeled limit hypothesis, never a realistic executable-fill claim.
 
 ## 5. ORB, M15 confirmation and next interval
 
@@ -130,7 +146,8 @@ IDs use `phase5` prefix; do not revise failed-break v1/v2 or their terminal bind
 
 ## 7. Simulation and overlays
 
-Intent is not an order. Exact next eligible registered interval required, with
+Intent is not an order. Non-MR versions own `adverse-next-interval-v1` only.
+Exact next eligible registered interval required, with
 calendar profile/version known at decision. Entry uses next open midpoint plus
 directional half spread and slippage; commission charged on both sides. Price
 gap through stop closes at adverse open; otherwise stop wins a same-bar dual hit.
@@ -143,6 +160,11 @@ FX rates. Rollover coverage includes entry and exit equality. Costs are signed
 start charges max(cost,0): ambiguous ordering cannot award an unearned credit.
 Rollovers strictly between entry and the exit bar's start retain their documented
 signed amounts. Gross price P&L and modeled costs stay separate.
+Outcome series retain exact sorted cited bars; continuity checks stop at terminal
+exit. Missing pre-entry/active intervals fail closed; post-exit gaps cannot erase
+the result. Required outcome terms include canonical base/quote/account currency
+IDs, quote-per-base costs, account-per-quote conversion, nonempty provenance,
+lowercase SHA256, aware ordered times and finite Decimal values.
 
 Macro `macro-risk-v1`: risk only. Named central-bank decisions and CPI/employment/
 GDP exact-time vintages; latest known wins before filtering, cancellations and

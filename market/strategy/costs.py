@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from market.strategy.contracts import iso
+from market.strategy.contracts import arithmetic, iso
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,7 @@ class CostEvidence:
         return None
 
     @property
+    @arithmetic
     def roundtrip(self):
         return (
             self.spread

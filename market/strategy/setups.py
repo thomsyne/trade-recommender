@@ -5,10 +5,11 @@ from decimal import localcontext
 
 from market.quality import registered_successor
 from market.state.features import contiguous
-from market.strategy.contracts import RiskOverlay, SetupCandidate, Unavailable
+from market.strategy.contracts import RiskOverlay, SetupCandidate, Unavailable, arithmetic
 from market.strategy.trend import ema, sigma
 
 
+@arithmetic
 def mean_reversion_risk(current, prior):
     if current is None or prior is None or current <= 0 or prior <= 0:
         return RiskOverlay("fast-mr-h1-v1", None, "daily_volatility_unavailable")
@@ -16,6 +17,7 @@ def mean_reversion_risk(current, prior):
     return RiskOverlay("fast-mr-h1-v1", multiplier, "frozen_high_vol_reduction")
 
 
+@arithmetic
 def atr(bars):
     if len(bars) < 15 or not contiguous(bars[-15:]):
         return None
@@ -34,6 +36,7 @@ def atr(bars):
         return value if value > 0 else None
 
 
+@arithmetic
 def candidate(
     strategy,
     signal,
@@ -78,6 +81,7 @@ def candidate(
     )
 
 
+@arithmetic
 def fast_mean_reversion(inputs):
     strategy = "fast-mr-h1-v1"
     hours = inputs.series("H1")

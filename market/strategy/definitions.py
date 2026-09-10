@@ -18,8 +18,9 @@ IMPLEMENTATION_FILES = (
     "trend.py",
     "persistence.py",
     "reports.py",
+    "schema.py",
 )
-IMPLEMENTATION_SHA256 = "554b925a6c67adc8f1cccdd7fdc086d49a0392678d63b8adaa304815a47d4591"
+IMPLEMENTATION_SHA256 = "e67a882b0733ac0282101fcab7b65fc8e2f9ff15f2bd6085453f8394bef69e47"
 
 
 def verify_implementation():
@@ -64,8 +65,8 @@ STRATEGIES = (
 )
 
 
-def simulator_definition():
-    return {
+def simulator_definition(strategy=None):
+    body = {
         "version": "adverse-next-interval-v1",
         "price": "midpoint_not_executable",
         "dual_hit": "stop_first",
@@ -79,6 +80,17 @@ def simulator_definition():
         "conversion": "cited_exit_pit",
         "costs": "complete_known_at_decision",
     }
+    if strategy == "fast-mr-h1-v1":
+        body.update(
+            version="adverse-limit-h1-v1",
+            limit="completed_signal_close",
+            placement="next_eligible_H1_open_after_latency",
+            validity="entry_inclusive_next_H1_open_exclusive",
+            fill="opening_quote_through_limit_only_no_improvement",
+            intrabar="unavailable_no_queue_or_path_evidence",
+            entry_slippage="none_limit_protection",
+        )
+    return body
 
 
 def population_definition():
@@ -104,9 +116,10 @@ def definition(strategy):
     return {
         "strategy": strategy,
         "phase4_sha256": PHASE4_DIGEST,
-        "specification_sha256": "d4e1f0e635f8faf800feddf5a61ec6ce88932fcdae6642930766ce31c61d3c64",
+        "specification_sha256": "0d00112e26ee38b19f92d970b02c6573cce4fb51943ede7a2d9d2f572b58e489",
         "implementation_sha256": IMPLEMENTATION_SHA256,
         "schema": "phase5/definition-v1",
+        "revision": 2,
         "arithmetic": "decimal34_half_even_6dp",
         "speeds": SPEEDS,
         "horizons": HORIZONS,
@@ -118,7 +131,7 @@ def definition(strategy):
         "diversification": "1",
         "combination": "equal_available_affordable_with_components",
         "affordability": "roundtrip_quote_cost/sigma<=0.1",
-        "simulator": simulator_definition(),
+        "simulator": simulator_definition(strategy),
         "population": population_definition(),
         "activation": "forbidden",
     }

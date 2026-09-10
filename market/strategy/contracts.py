@@ -3,12 +3,42 @@
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal, localcontext
+from decimal import (
+    ROUND_HALF_EVEN,
+    Context,
+    Decimal,
+    DivisionByZero,
+    InvalidOperation,
+    Overflow,
+    localcontext,
+)
+from functools import wraps
 
 from market.state.canonical import canonical_json, format_decimal, identity_digest
 from market.state.features import Bar, contiguous
 
 PHASE4_DIGEST = "9213b548d3e6c6656805d2cf230c242926f08a42112373d7518d685384b9f7d3"
+
+
+def arithmetic(function):
+    """Own rounding, precision, exponent bounds, traps and flags at every boundary."""
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with localcontext(
+            Context(
+                prec=34,
+                rounding=ROUND_HALF_EVEN,
+                Emin=-999999,
+                Emax=999999,
+                capitals=1,
+                clamp=0,
+                traps=[InvalidOperation, DivisionByZero, Overflow],
+            )
+        ):
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def iso(value):
@@ -26,6 +56,7 @@ def decimal(value):
     return result
 
 
+@arithmetic
 def encoded(value, *, exact=False):
     """Quantize outputs, but preserve decimal input evidence losslessly for replay."""
 
@@ -69,6 +100,7 @@ class ContinuousForecast:
     reason: str | None = None
     schema: str = field(default="phase5/continuous-v1", init=False)
 
+    @arithmetic
     def __post_init__(self):
         if any(
             v is not None and (not v.is_finite() or abs(v) > 20)
@@ -97,6 +129,7 @@ class SetupCandidate:
     evidence: tuple[str, ...]
     schema: str = field(default="phase5/setup-v1", init=False)
 
+    @arithmetic
     def __post_init__(self):
         if (
             type(self.direction) is not int
@@ -234,7 +267,7 @@ class SnapshotInput:
     def payload(self):
         return json.loads(self.envelope_json)["output_payload"]
 
-    def series(self, granularity, *, before=None):
+    def series(self, granularity, *, before=None, outcome=False):
         values = tuple(
             sorted(
                 (
@@ -245,6 +278,6 @@ class SnapshotInput:
                 key=lambda b: b.timestamp,
             )
         )
-        if not contiguous(values):
+        if not outcome and not contiguous(values):
             return ()
         return values

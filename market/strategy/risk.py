@@ -5,7 +5,7 @@ from decimal import Decimal as D
 from decimal import localcontext
 from importlib.metadata import PackageNotFoundError, version
 
-from market.strategy.contracts import RiskOverlay, Unavailable
+from market.strategy.contracts import RiskOverlay, Unavailable, arithmetic
 from market.strategy.trend import ema
 
 # Exact source names, not substring/LLM severity inference. Unknown names stay unknown.
@@ -25,6 +25,7 @@ EVENT_NAMES = frozenset(
 )
 
 
+@arithmetic
 def macro_overlay(inputs):
     block = inputs.payload.get("event_state", {})
     if block.get("version") != "event-state-v2":
@@ -64,6 +65,7 @@ def carry_readiness(inputs):
     return Unavailable("carry-readiness-v1", "pit_forwards_financing_rollover_ranking_unavailable")
 
 
+@arithmetic
 def risk_ratio(strategy, baseline, current):
     if (
         baseline is None
@@ -79,6 +81,7 @@ def risk_ratio(strategy, baseline, current):
         return RiskOverlay(strategy, min(D(1), baseline / current), "capped_at_baseline")
 
 
+@arithmetic
 def volatility_overlay(inputs, strategy):
     if strategy == "fixed-risk-v1":
         return RiskOverlay(strategy, D(1), "fixed_baseline_only")
@@ -97,6 +100,7 @@ def volatility_overlay(inputs, strategy):
         return garch_overlay(returns, baseline)
 
 
+@arithmetic
 def garch_overlay(returns, baseline):
     strategy = "garch-t-risk-v1"
     if not 250 <= len(returns) <= 399 or any(not r.is_finite() for r in returns):

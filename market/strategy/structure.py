@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal as D
 from decimal import localcontext
 
-from market.strategy.contracts import Unavailable
+from market.strategy.contracts import Unavailable, arithmetic
 from market.strategy.setups import atr, candidate
 
 
@@ -23,6 +23,7 @@ def _continuation(rejection, signal, direction):
     return signal.close > rejection.high if direction == 1 else signal.close < rejection.low
 
 
+@arithmetic
 def pullback(inputs, timeframe):
     if timeframe not in ("M15", "H1"):
         raise ValueError("unsupported_pullback_interval")
@@ -76,6 +77,7 @@ def pullback(inputs, timeframe):
         return Unavailable(strategy, "no_qualified_pullback")
 
 
+@arithmetic
 def range_reversion(inputs):
     strategy = "range-m15-v1"
     bars = inputs.series("M15")
@@ -99,6 +101,7 @@ def range_reversion(inputs):
     return Unavailable(strategy, "event_expansion_clearance_unavailable")
 
 
+@arithmetic
 def range_geometry(signal, rejection, low, high, volatility):
     """Price-only hypothesis; range_reversion separately enforces readiness."""
     strategy = "range-m15-v1"
@@ -124,6 +127,7 @@ def range_geometry(signal, rejection, low, high, volatility):
         )
 
 
+@arithmetic
 def failed_break(inputs, *, continuation=False):
     strategy = "phase5-acceptance-continuation-v1" if continuation else "phase5-sweep-reversal-v1"
     bars = inputs.series("M15")

@@ -1,5 +1,11 @@
 # Phase5 acceptance matrix — not acceptance
 
+The independent review of the initial handoff requested six corrections.
+[Correction contracts, reproduction evidence and review lessons](corrections.md)
+supersede the original implementation claims for lineage, schemas, simulator
+causality, outcome terms, MR execution and Decimal determinism. All six require
+independent final verification; this correction cycle does not self-accept them.
+
 Owner of implementation/tests: Phase5 engineer. Owner of hypothesis acceptance,
 holdout release, combination and rollout: project owner after independent review.
 No row is self-accepted. Evidence must distinguish synthetic engineering checks
@@ -55,8 +61,8 @@ commands, failures and limits. [Runbook](runbook.md) gives the operational gates
 | A4 | Implemented frozen definition/population/holdout hashes and SQL pins; `ContractTests.test_definitions_are_fresh_and_distinct`, `PersistenceTests.test_definition_holdout_and_raw_mutations_are_refused`. | Owner controls holdout release; historical data never becomes untouched by relabeling. |
 | B1 | Implemented independent EWMAC components, frozen scalars, EMA variance, cap, cost screen, FDM and buffer. `library_trend.TrendTests` covers asymmetric EMA, variance versus sample standard deviation, affordability equality, warmup and buffer boundaries. | EWMAC64/256 unavailable under D400; no profitability claim. |
 | B2 | Implemented separately attributed completed-range breakout with quarter-ceil EMA. `TrendTests.test_breakout_completed_high_low_and_quarter_warmup`. | Breakout320 unavailable under D400; no EWMAC pooling. |
-| C1 | Implemented prior-D equilibrium, H1 alignment and separate high-vol reduction. `FormulaBoundaryTests.test_prior_daily_equilibrium_and_h1_alignment`, `library_structure.StructureTests.test_unavailable_is_not_sideways_or_safe`. | No limit-order fills or intrabar path claim. |
-| C2 | Implemented adverse next-interval model. `library_simulation.SimulationTests` covers dual hits, delayed entry, missing costs, directional gaps, exact rollover equality, weekend reopening and PIT conversion. | Net unavailable without complete documented assumptions; synthetic checks are not broker evidence. |
+| C1 | Implemented prior-D equilibrium, H1 alignment and separate high-vol reduction. `FormulaBoundaryTests.test_prior_daily_equilibrium_and_h1_alignment`, `library_structure.StructureTests.test_unavailable_is_not_sideways_or_safe`. Correction revision 2 owns the separately attributed `adverse-limit-h1-v1` model; `PureCorrections.test_limit_fill_nonfill_gap_ambiguity_latency_and_quote` covers placement, expiry and adverse/unavailable outcomes. | Modeled opening limit fills only; no executable-fill or intrabar path claim. |
+| C2 | Market-owning versions retain the adverse next-interval model; fast MR uses its separate limit model. `library_simulation.SimulationTests` covers dual hits, delayed entry, missing costs, directional gaps, exact rollover equality, weekend reopening and PIT conversion; correction tests cover strict terms and terminal-prefix causality through persistence. | Net unavailable without complete documented assumptions; synthetic checks are not broker evidence. |
 | D1, D2 | Implemented six session/variant IDs with terminal first attempt; `library_orb.OrbTests`, `FormulaBoundaryTests.test_fvg_qualification_and_equality_use_real_phase4_geometry`, `library_simulation_storage.SimulationStorageTests`. | Approved M15-close assumptions only; M1 separate. FVG retention awaits untouched paired net evidence. |
 | E1 | Implemented independently versioned M15/H1 qualified pullback. `StructureTests.test_qualified_zone_and_continuation_both_required`. | Requires available pre-rejection HTF evidence and non-invalidated qualified zone. |
 | E2 | Implemented range edge/center formula and unavailable event-clearance contract. `FormulaBoundaryTests.test_range_is_edge_only_with_frozen_center_exit`, `StructureTests.test_unavailable_is_not_sideways_or_safe`. | Data-readiness blocked on attested event/expansion clearance; never infer safe. |

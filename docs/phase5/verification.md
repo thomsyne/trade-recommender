@@ -1,5 +1,9 @@
 # Phase5 engineering evidence — not strategy acceptance
 
+This is the historical initial handoff at `4424f5a`. The consolidated correction
+cycle's contracts, verification and remaining gates supersede it where stated in
+[corrections](corrections.md); acceptance remains pending independent verification.
+
 Verification date: 2026-09-10. No market outcomes were used to tune definitions,
 scalars, simulator rules, cost screens, populations, eras or thresholds. Tests use
 synthetic inputs or disposable local databases. No provider request, deployed
