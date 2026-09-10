@@ -9,6 +9,7 @@ from market.models import (
     HistoricalDiscoveryPlan,
     HistoricalDiscoveryRegistration,
 )
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_replacement_canary_activation import (
     MIGRATION_0015,
@@ -27,7 +28,8 @@ GOVERNED_FUNCTIONS = (
 )
 
 
-class Gate5RegistrationMigrationTests(TransactionTestCase):
+class Gate5RegistrationMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0018_"
     current = [("market", "0018_provider_observed_discovery_registration_activation")]
     previous = [("market", "0017_provider_observed_full_discovery_activation")]
 

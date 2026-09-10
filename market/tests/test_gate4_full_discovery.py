@@ -33,6 +33,7 @@ from market.models import (
 )
 from market.oanda import OandaError
 from market.services import DatasetQualityError
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.test_replacement_canary_activation import (
     MIGRATION_0015,
     MIGRATION_0016,
@@ -111,7 +112,8 @@ class WaveSuccessClient:
         )
 
 
-class Gate4FixtureTestCase(TransactionTestCase):
+class Gate4FixtureTestCase(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0015_"
     retention_policy = "gate4 fixture"
 
     def setUp(self):
@@ -377,7 +379,9 @@ class Gate4ActivationTests(Gate4FixtureTestCase):
         )
 
 
-class Gate4PrerequisiteTests(TransactionTestCase):
+class Gate4PrerequisiteTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0015_"
+
     def tearDown(self):
         migrate_to(MIGRATION_0022)
         super().tearDown()

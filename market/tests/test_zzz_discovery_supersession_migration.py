@@ -12,6 +12,7 @@ from market.historical_discovery import (
 )
 from market.models import HistoricalDiscoveryAttempt, Instrument, SourceRegistry
 from market.oanda import OandaError
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 
 
@@ -36,7 +37,8 @@ class FailedClient:
         )
 
 
-class HistoricalDiscoverySupersessionMigrationTests(TransactionTestCase):
+class HistoricalDiscoverySupersessionMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0014_"
     current = [("market", "0014_historical_discovery_supersession")]
     previous = [("market", "0013_provider_observed_inventory")]
     latest = [("market", "0019_provider_observed_data_contract")]

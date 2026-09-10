@@ -9,10 +9,12 @@ from queue import Queue
 from django.db import DatabaseError, close_old_connections, connection, connections, transaction
 from django.test import TransactionTestCase
 
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 
 
-class Phase2BMigrationSafetyTests(TransactionTestCase):
+class Phase2BMigrationSafetyTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0012_"
     latest = [("market", "0012_operation_aware_historical_dataset")]
     portable_identities = [("market", "0011_portable_acquisition_identities")]
     before_enforcement = [("market", "0009_historical_dataset_governance")]

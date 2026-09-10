@@ -4,6 +4,7 @@ from django.db import connection, transaction
 from django.test import TransactionTestCase
 
 from market.historical_discovery import CANARY_V2_LOGICAL_KEY
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_replacement_canary_activation import (
     build_superseded_state,
@@ -15,7 +16,8 @@ from market.tests.test_replacement_canary_activation import (
 ACTIVATION_SIGNATURE = "market_validate_replacement_canary_attempt"
 
 
-class ReplacementCanaryActivationMigrationTests(TransactionTestCase):
+class ReplacementCanaryActivationMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0015_"
     current = [("market", "0015_provider_observed_canary_activation")]
     previous = [("market", "0014_historical_discovery_supersession")]
     latest = [("market", "0019_provider_observed_data_contract")]

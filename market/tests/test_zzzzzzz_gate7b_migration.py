@@ -5,6 +5,7 @@ from importlib import import_module
 from django.db import connection
 from django.test import TransactionTestCase
 
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_replacement_canary_activation import (
     MIGRATION_0015,
@@ -29,7 +30,8 @@ NEW_FUNCTIONS = (
 )
 
 
-class Gate7BMigrationTests(TransactionTestCase):
+class Gate7BMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0021_"
     current = [("market", "0021_provider_observed_full_acquisition_activation")]
     previous = [("market", "0020_provider_observed_acquisition_canary_activation")]
 

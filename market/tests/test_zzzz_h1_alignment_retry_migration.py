@@ -3,6 +3,7 @@ from importlib import import_module
 from django.db import connection
 from django.test import TransactionTestCase
 
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_replacement_canary_activation import (
     attempt_one_hash,
@@ -20,7 +21,8 @@ REPLACED_FUNCTIONS = (
 )
 
 
-class H1AlignmentRetryMigrationTests(TransactionTestCase):
+class H1AlignmentRetryMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0016_"
     current = [("market", "0016_provider_observed_h1_alignment_retry")]
     previous = [("market", "0015_provider_observed_canary_activation")]
     latest = [("market", "0019_provider_observed_data_contract")]

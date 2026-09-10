@@ -369,7 +369,12 @@ class ProviderObservedRunTests(Gate1BFixtureTestCase):
             if candle_completion(timestamp, "H1", self.contract) < entry_timestamp
         ]
         self.assertEqual(effective_at, candle_completion(qualifying[-1], "H1", self.contract))
-        self.assertIsNone(_latest_pre_entry_close(self.dataset, "USD_CAD", entry_timestamp))
+        # Legacy completion excludes both colliding Sunday hours at this cutoff,
+        # but still admits the fixture's earlier Friday close (index 1 modulo 7).
+        self.assertEqual(
+            _latest_pre_entry_close(self.dataset, "USD_CAD", entry_timestamp),
+            (Decimal("1.1012"), datetime(2010, 11, 5, 11, tzinfo=UTC)),
+        )
         usd_quoted = self.plan.chunks.filter(instrument__code="EUR_USD").first().instrument
         conversion_rate, conversion_at, conversion_identity = _cad_conversion(
             self.dataset, usd_quoted, entry_timestamp, self.contract

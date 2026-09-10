@@ -173,7 +173,12 @@ class DeferredAuditEvidenceTests(Gate7BAuditFixture):
         self.assert_rejected_at_commit(lambda cursor: self.fail_run(cursor, run.pk))
         run.refresh_from_db()
         self.assertEqual(run.status, IngestionRun.Status.RUNNING)
-        self.assertEqual(AuditEvent.objects.filter(subject_id=str(attempt.pk)).count(), 0)
+        self.assertEqual(
+            AuditEvent.objects.filter(
+                subject_type="HistoricalIngestionAttempt", subject_id=str(attempt.pk)
+            ).count(),
+            0,
+        )
 
         # 2. running -> succeeded carrying no audit evidence, with the manifest
         # the immediate run guard requires already present.

@@ -50,6 +50,7 @@ from market.provider_observed_successor import (
     successor_stage,
 )
 from market.services import DatasetQualityError
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_replacement_canary_activation import migrate_to, seed_governed_market
 
@@ -164,7 +165,9 @@ def materialize_partial(payload, source, limit):
     return plan
 
 
-class Gate8bPrimeMigrationTests(TransactionTestCase):
+class Gate8bPrimeMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0023_"
+
     def setUp(self):
         super().setUp()
         MigrationExecutor(connection).migrate(MIGRATION_0023)
@@ -285,7 +288,9 @@ class Gate8bPrimeMigrationTests(TransactionTestCase):
             self.assertEqual(live[name], tuple(migration.REQUIRED_0022_FUNCTIONS[name]), name)
 
 
-class Gate8bPrimePlanTests(TransactionTestCase):
+class Gate8bPrimePlanTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0023_"
+
     def setUp(self):
         super().setUp()
         migrate_to(MIGRATION_0023)
@@ -386,7 +391,9 @@ class Gate8bPrimePlanTests(TransactionTestCase):
         self.assertEqual(plan.chunks.count(), 132)
 
 
-class Gate8bPrimeStagedExecutionTests(TransactionTestCase):
+class Gate8bPrimeStagedExecutionTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0023_"
+
     def setUp(self):
         super().setUp()
         migrate_to(MIGRATION_0023)
@@ -627,7 +634,7 @@ class Gate8bPrimeStagedExecutionTests(TransactionTestCase):
             )
 
 
-class Gate8bPrimeFailedPlanTests(TransactionTestCase):
+class Gate8bPrimeFailedPlanTests(HistoricalDatabaseMixin, TransactionTestCase):
     """A failed successor attempt ends the plan, not merely its own chunk.
 
     Attempt 2 is prohibited, so once any chunk fails the 132-chunk plan can
@@ -636,6 +643,7 @@ class Gate8bPrimeFailedPlanTests(TransactionTestCase):
     """
 
     FAILED_PLAN = "a failed successor discovery attempt permanently stops this plan"
+    historical_market_migration = "0023_"
 
     def setUp(self):
         super().setUp()

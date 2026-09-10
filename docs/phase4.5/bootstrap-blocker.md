@@ -1,5 +1,10 @@
 # Checkpoint 1 blocked: empty bootstrap versus historical acceptance
 
+Historical investigation record, superseded by the authorized narrow replacement
+design and [checkpoint-1.md](checkpoint-1.md). The statements below describe the
+pre-authorization worktree, not the current implementation. Genuine accepted
+restore proof remains a mandatory pre-deployment gate, not a bootstrap bypass.
+
 This is a reproducible architectural conflict, not a waived test failure or
 Phase 4.5 completion. No application, test, migration or CI code has changed.
 

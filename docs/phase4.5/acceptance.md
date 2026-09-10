@@ -5,6 +5,13 @@ Base, local main and fetched origin/main: `62cf0a095407b1ec29d9c4999ccc56de38fee
 Initial worktree clean; fast-forward was a no-op. Working branch:
 `phase4.5/architecture-stabilization`. No unrelated changes may be overwritten.
 
+Authorization update: the owner subsequently permitted deployed-environment and
+provider access when it materially improves proof. This task used only AWS
+metadata/object reads and read-only SSM database inspection, then disposable local
+restores. No deployed mutation, OANDA request, new instance or teardown was needed.
+See [external action evidence](external-actions.md). This supersedes the original
+blanket AWS/production-access restriction below only for the recorded actions.
+
 | Gate | Requirement / owner | Verification / completion gate | Non-goal |
 |---|---|---|---|
 | 1a | Test infrastructure: trustworthy ordinary current-state suite | Exact base/final failing identities; broad current-state suite green without skips or weakened assertions | Production behavior changes to satisfy tests |
