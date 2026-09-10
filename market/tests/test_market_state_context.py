@@ -102,9 +102,19 @@ def observation(ser, pol, period, value, available_at, vintage_at, revision=0):
     )
 
 
-def event(pol, country, event_at, first_observed_at, *, precision="exact", key="k", fp=None):
+def event(
+    pol,
+    country,
+    event_at,
+    first_observed_at,
+    *,
+    precision="exact",
+    key="k",
+    fp=None,
+    retrieval_at=None,
+):
     return EconomicEvent.objects.create(
-        retrieval=retrieval(pol, first_observed_at),
+        retrieval=retrieval(pol, retrieval_at or first_observed_at),
         provider_event_key=key,
         event_at=event_at,
         time_precision=precision,
@@ -150,10 +160,38 @@ class EventStateTests(TestCase):
         # Severity is never invented.
         self.assertTrue(all(e["severity"]["state"] == "unavailable" for e in result["events"]))
 
-    def test_event_not_yet_observed_is_excluded(self):
+    def test_event_not_yet_observed_leaves_coverage_unavailable(self):
         us = policy("US", "USD")
         event(us, "US", CUTOFF + timedelta(days=2), CUTOFF + timedelta(days=1), key="future")
+        # The only vintage is observed after the cutoff, so nothing is known: this
+        # is unavailable coverage, not an attested-empty calendar.
+        result = event_state(instrument(), CUTOFF)
+        self.assertEqual(result["state"], "unavailable")
+        self.assertEqual(result["reason_code"], "event_coverage_unavailable")
+
+    def test_reschedule_out_of_window_hides_obsolete_vintage(self):
+        us = policy("US", "USD")
+        # v1 (known) schedules the event in-window at cutoff+2d; v2 (also known)
+        # reschedules it to cutoff+45d, out of the display window. The latest
+        # vintage wins BEFORE the window is applied, so the event is absent — the
+        # obsolete in-window v1 is not resurrected.
+        event(us, "US", CUTOFF + timedelta(days=2), CUTOFF - timedelta(days=3), key="e", fp="v1")
+        event(us, "US", CUTOFF + timedelta(days=45), CUTOFF - timedelta(days=1), key="e", fp="v2")
         self.assertEqual(event_state(instrument(), CUTOFF)["events"], [])
+
+    def test_retrieval_after_cutoff_is_excluded(self):
+        us = policy("US", "USD")
+        # Observed-at is backdated but the retrieval itself is after the cutoff.
+        event(
+            us,
+            "US",
+            CUTOFF + timedelta(days=2),
+            CUTOFF - timedelta(days=1),
+            key="r",
+            retrieval_at=CUTOFF + timedelta(days=1),
+        )
+        result = event_state(instrument(), CUTOFF)
+        self.assertEqual(result["reason_code"], "event_coverage_unavailable")
 
     def test_latest_vintage_known_by_cutoff_is_used(self):
         us = policy("US", "USD")

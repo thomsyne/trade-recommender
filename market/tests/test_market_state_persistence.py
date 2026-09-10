@@ -221,11 +221,20 @@ class SnapshotPersistenceTests(TestCase):
     def setUp(self):
         self.definition = register_definition("k", "1.0.0", _valid_definition_body())
 
-    def persist(self, output, cutoff=MON_0800, manifest=None, manifest_sha=None):
+    def persist(self, output, cutoff=MON_0800, manifest=None, manifest_sha=None, scope=("H1",)):
         manifest = manifest if manifest is not None else []
         manifest_sha = manifest_sha or identity_digest(manifest)
+        evidence = {"events": [], "macro": {}}
         return persist_snapshot(
-            self.instrument, self.definition, cutoff, manifest, manifest_sha, output
+            self.instrument,
+            self.definition,
+            cutoff,
+            manifest,
+            manifest_sha,
+            output,
+            scope=list(scope),
+            evidence_manifest=evidence,
+            evidence_sha256=identity_digest(evidence),
         )
 
     def test_persist_is_idempotent(self):

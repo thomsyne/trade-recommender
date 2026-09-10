@@ -9,9 +9,15 @@ from django.core.management import call_command
 from django.db import connection
 from django.test import TestCase
 
-from market.models import MarketStateSnapshot
+from market.models import MarketStateDefinition, MarketStateSnapshot
 from market.services import store_ingestion
-from market.state.compute import ensure_descriptor_definition
+from market.state.compute import (
+    DESCRIPTOR_DEFINITION,
+    DESCRIPTOR_KEY,
+    DESCRIPTOR_VERSION,
+    ensure_descriptor_definition,
+)
+from market.state.definitions import register_definition
 from market.state.integrity import verify_snapshots
 from market.state.tasks import run_compute_market_state
 from market.tests.factories import candle
@@ -60,6 +66,43 @@ class IntegrityAndTaskTests(TestCase):
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(MarketStateSnapshot.objects.count(), 1)
 
+    def test_missing_cutoff_raises(self):
+        # A durable job must freeze its cutoff before execution; defaulting to
+        # now() would make two retries produce different snapshots (P2-14a).
+        with self.assertRaisesMessage(
+            ValueError, "cutoff is required for a durable market-state computation"
+        ):
+            run_compute_market_state({"instrument": self.instrument.code})
+        self.assertEqual(MarketStateSnapshot.objects.count(), 0)
+
+    def test_register_definition_is_atomically_idempotent(self):
+        # Happy path: a second registration of the same body returns the same row.
+        first = register_definition(DESCRIPTOR_KEY, DESCRIPTOR_VERSION, DESCRIPTOR_DEFINITION)
+        again = register_definition(DESCRIPTOR_KEY, DESCRIPTOR_VERSION, DESCRIPTOR_DEFINITION)
+        self.assertEqual(first.pk, again.pk)
+
+        # Race path: force the pre-checks to miss so the create fires against an
+        # already-present row, raising IntegrityError. The nested atomic must roll
+        # back and the except clause must re-fetch and return the existing winner.
+        original_filter = MarketStateDefinition.objects.filter
+
+        class _Miss:
+            def first(self):
+                return None
+
+        calls = {"n": 0}
+
+        def _side_effect(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= 2:  # existing-by-digest and key/version pre-checks
+                return _Miss()
+            return original_filter(*args, **kwargs)
+
+        with patch.object(MarketStateDefinition.objects, "filter", side_effect=_side_effect):
+            raced = register_definition(DESCRIPTOR_KEY, DESCRIPTOR_VERSION, DESCRIPTOR_DEFINITION)
+        self.assertEqual(first.pk, raced.pk)
+        self.assertEqual(MarketStateDefinition.objects.count(), 1)
+
     def test_clean_snapshot_has_no_violations(self):
         self._seed_snapshot()
         report = verify_snapshots(MarketStateSnapshot.objects.all())
@@ -93,7 +136,7 @@ class IntegrityAndTaskTests(TestCase):
                     json.dumps({"definition": ["wrong", "9.9.9"]}),
                     "0" * 64,
                     "complete",
-                    "forged-key",
+                    "1" * 64,
                 ],
             )
         report = verify_snapshots(MarketStateSnapshot.objects.all())
@@ -128,7 +171,7 @@ class IntegrityAndTaskTests(TestCase):
                     json.dumps({}),
                     "0" * 64,
                     "complete",
-                    "forged-key-2",
+                    "2" * 64,
                 ],
             )
         with self.assertRaises(SystemExit):
@@ -153,7 +196,10 @@ class DryRunCliTests(TestCase):
         )
         payload = json.loads(out.getvalue())
         self.assertTrue(payload["preview"])
-        self.assertEqual(MarketStateSnapshot.objects.count(), 0)  # nothing persisted
+        # A read-only preview must persist NOTHING: neither a snapshot nor a
+        # definition row (P2-13 — it must not call register_definition).
+        self.assertEqual(MarketStateSnapshot.objects.count(), 0)
+        self.assertEqual(MarketStateDefinition.objects.count(), 0)
 
     def test_estimate_is_labelled_unmeasured(self):
         out = StringIO()

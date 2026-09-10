@@ -37,7 +37,7 @@ def ohlc(i, o, h, low, c):
 class FvgGeometryTests(TestCase):
     def test_bullish_gap(self):
         bars = [ohlc(0, 9, 10, 9, 9.5), ohlc(1, 10, 13, 10, 13), ohlc(2, 12, 14, 11, 13)]
-        result = find_fvgs(bars, ATR1, PIP)
+        result = find_fvgs(bars, PIP, atr_override=ATR1)
         self.assertEqual(len(result["fvgs"]), 1)
         gap = result["fvgs"][0]
         self.assertEqual(gap["direction"], "bullish")
@@ -47,7 +47,7 @@ class FvgGeometryTests(TestCase):
 
     def test_bearish_gap(self):
         bars = [ohlc(0, 14, 15, 13, 14), ohlc(1, 13, 13, 10, 10), ohlc(2, 11, 12, 10, 11)]
-        result = find_fvgs(bars, ATR1, PIP)
+        result = find_fvgs(bars, PIP, atr_override=ATR1)
         self.assertEqual(result["fvgs"][0]["direction"], "bearish")
         self.assertEqual(
             (result["fvgs"][0]["gap_low"], result["fvgs"][0]["gap_high"]),
@@ -56,22 +56,26 @@ class FvgGeometryTests(TestCase):
 
     def test_equality_is_no_gap(self):
         bars = [ohlc(0, 9, 11, 9, 10), ohlc(1, 10, 13, 10, 13), ohlc(2, 12, 14, 11, 13)]
-        self.assertEqual(find_fvgs(bars, ATR1, PIP)["fvgs"], [])  # c1.high 11 not < c3.low 11
+        self.assertEqual(
+            find_fvgs(bars, PIP, atr_override=ATR1)["fvgs"], []
+        )  # c1.high 11 not < c3.low 11
 
     def test_middle_candle_wrong_direction(self):
         bars = [ohlc(0, 9, 10, 9, 9.5), ohlc(1, 13, 13, 10, 10), ohlc(2, 12, 14, 11, 13)]
-        self.assertEqual(find_fvgs(bars, ATR1, PIP)["fvgs"], [])  # c2 closes down
+        self.assertEqual(find_fvgs(bars, PIP, atr_override=ATR1)["fvgs"], [])  # c2 closes down
 
     def test_insufficient_displacement(self):
         bars = [ohlc(0, 9, 10, 9, 9.5), ohlc(1, 10, 11, 10, D("10.5")), ohlc(2, 12, 14, 11, 13)]
-        self.assertEqual(find_fvgs(bars, ATR1, PIP)["fvgs"], [])  # body 0.5 < 1.0*ATR
+        self.assertEqual(find_fvgs(bars, PIP, atr_override=ATR1)["fvgs"], [])  # body 0.5 < 1.0*ATR
 
     def test_partial_and_full_fill(self):
         base = [ohlc(0, 9, 10, 9, 9.5), ohlc(1, 10, 13, 10, 13), ohlc(2, 12, 14, 11, 13)]
         half = base + [ohlc(3, 11, 11, D("10.5"), 11)]  # dips to 10.5 into [10,11]
-        self.assertEqual(find_fvgs(half, ATR1, PIP)["fvgs"][0]["partial_fill_pct"], "50.0")
+        self.assertEqual(
+            find_fvgs(half, PIP, atr_override=ATR1)["fvgs"][0]["partial_fill_pct"], "50.0"
+        )
         full = base + [ohlc(3, 11, 11, 9, D("9.5"))]  # closes below gap_low 10
-        self.assertTrue(find_fvgs(full, ATR1, PIP)["fvgs"][0]["full_fill"])
+        self.assertTrue(find_fvgs(full, PIP, atr_override=ATR1)["fvgs"][0]["full_fill"])
 
 
 class SessionConversionTests(TestCase):

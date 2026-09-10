@@ -21,6 +21,7 @@ CONSOLIDATION_V = "consolidation-v1"
 PRIOR_EXTREME_V = "prior-extreme-v1"
 
 ZONE_CLUSTER_ATR = Decimal("0.25")  # c: swing merge distance / test-exit margin
+ZONE_EXPIRY_INTERVALS = 500  # A: zone age (intervals) after which it expires
 EQUAL_LEVEL_ATR = Decimal("0.1")  # e: equal/clustered level distance
 DISPLACEMENT_ATR = Decimal("1.5")  # d: displacement body threshold
 CONSOLIDATION_ATR = Decimal("1.5")  # r: consolidation range ceiling
@@ -54,8 +55,10 @@ def _single_linkage(points, key, margin):
 
 
 def _zone_test_count(bars, low, high, margin):
-    """Separate approaches to [low, high]. Consecutive candles inside count once;
-    a new test requires leaving the zone by at least ``margin`` and returning."""
+    """Separate approaches to [low, high] over ``bars`` (which must begin at the
+    zone's formation). Consecutive candles inside count once; a new test requires
+    leaving the zone by at least ``margin`` (``>=``, the exact threshold) and
+    returning."""
     count = 0
     inside = False
     for bar in bars:
@@ -64,7 +67,7 @@ def _zone_test_count(bars, low, high, margin):
             if not inside:
                 count += 1
                 inside = True
-        elif bar.high < low - margin or bar.low > high + margin:
+        elif bar.high <= low - margin or bar.low >= high + margin:
             inside = False
     return count
 
@@ -81,39 +84,59 @@ def support_resistance_zones(bars, atr, instrument_code, timeframe, cluster=ZONE
         prices = [m.price for m in cluster_members]
         low, high = min(prices), max(prices)
         earliest = min(m.index for m in cluster_members)
+        age = (len(bars) - 1) - earliest
+        # Only bars at or after the zone formed can test or invalidate it.
+        since_formation = bars[earliest:]
+        invalidated = any(
+            bar.close >= high + margin or bar.close <= low - margin for bar in bars[earliest + 1 :]
+        )
         zones.append(
             {
                 "zone_id": _zone_id(low, high, instrument_code, timeframe),
                 "range_low": format_decimal(low),
                 "range_high": format_decimal(high),
                 "member_count": len(cluster_members),
-                "age_intervals": (len(bars) - 1) - earliest,
-                "distinct_tests": _zone_test_count(bars, low, high, margin),
+                "age_intervals": age,
+                "distinct_tests": _zone_test_count(since_formation, low, high, margin),
+                "invalidated": invalidated,
+                "expired": age > ZONE_EXPIRY_INTERVALS,
             }
         )
     zones.sort(key=lambda z: (z["range_low"], z["range_high"]))
     return {"state": "available", "version": ZONE_V, "cluster_atr": str(cluster), "zones": zones}
 
 
+def _local_extrema(bars, kind):
+    """Local highs/lows using non-strict comparison, so adjacent EQUAL highs/lows
+    (which the strict swing rule rejects) are still surfaced as levels."""
+    prices = []
+    for i in range(1, len(bars) - 1):
+        if kind == "high":
+            if bars[i].high >= bars[i - 1].high and bars[i].high >= bars[i + 1].high:
+                prices.append(bars[i].high)
+        elif bars[i].low <= bars[i - 1].low and bars[i].low <= bars[i + 1].low:
+            prices.append(bars[i].low)
+    return prices
+
+
 def equal_levels(bars, atr, tolerance=EQUAL_LEVEL_ATR):
     if atr is None or atr == 0:
         return _unavailable(EQUAL_LEVELS_V, "atr_unavailable")
-    swings = confirmed_swings(bars)
-    if not swings:
+    if len(bars) < 3:
         return _unavailable(EQUAL_LEVELS_V, "insufficient_history")
     margin = tolerance * atr
     result = {"state": "available", "version": EQUAL_LEVELS_V}
     for kind, name in (("high", "equal_highs"), ("low", "equal_lows")):
-        members = [s for s in swings if s.kind == kind]
+        prices = _local_extrema(bars, kind)
         groups = []
-        if members:
-            for cluster in _single_linkage(members, lambda s: s.price, margin):
+        if prices:
+            for cluster in _single_linkage(prices, lambda p: p, margin):
                 if len(cluster) >= 2:
                     groups.append(
                         {
                             "count": len(cluster),
-                            "low": format_decimal(min(m.price for m in cluster)),
-                            "high": format_decimal(max(m.price for m in cluster)),
+                            "low": format_decimal(min(cluster)),
+                            "high": format_decimal(max(cluster)),
                         }
                     )
         result[name] = groups
@@ -202,10 +225,19 @@ def consolidation_state(
         after = tail[breakout_index + 1 :]
         boundary = high if breakout == "up" else low
         result["breakout"] = breakout
-        # Retest: a later bar returns to touch the broken boundary.
-        result["retest"] = any(bar.low <= boundary <= bar.high for bar in after)
-        # Failed breakout: a later completed close back inside the range.
-        result["failed"] = any(low <= bar.close <= high for bar in after)
+        failed = False
+        retest = False
+        for bar in after:
+            if low <= bar.close <= high:
+                # Closed back inside the range: a failed breakout, not a retest.
+                failed = True
+            elif breakout == "up" and bar.low <= boundary and bar.close > high:
+                # Touched the broken boundary from above but held beyond it.
+                retest = True
+            elif breakout == "down" and bar.high >= boundary and bar.close < low:
+                retest = True
+        result["failed"] = failed
+        result["retest"] = retest
     return result
 
 

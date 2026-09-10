@@ -75,12 +75,18 @@ def detect_sweep(bars, atr, level, side, *, level_id, depth=SWEEP_DEPTH_ATR, win
 
 
 def detect_acceptance(bars, atr, level, side, *, level_id, window=RECLAIM_WINDOW):
-    """Latest completed close beyond ``level`` that is not reclaimed within ``window``."""
+    """Latest completed close beyond ``level`` that is not reclaimed within ``window``.
+
+    Acceptance is only declared once the full confirmation window has elapsed with
+    no reclaim: a close beyond the level with fewer than ``window`` subsequent
+    bars is still pending, not accepted."""
     latest = None
     for i, bar in enumerate(bars):
         accepted = bar.close > level if side == "above" else bar.close < level
         if not accepted:
             continue
+        if len(bars) - 1 - i < window:
+            continue  # confirmation window has not matured -> pending, not accepted
         reclaimed = any(
             (bars[j].close < level if side == "above" else bars[j].close > level)
             for j in range(i + 1, min(i + window + 1, len(bars)))

@@ -11,8 +11,14 @@ from datetime import UTC, datetime
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from market.models import Instrument
-from market.state.compute import build_market_state, ensure_descriptor_definition
+from market.models import Instrument, MarketStateDefinition
+from market.state.canonical import identity_digest
+from market.state.compute import (
+    DESCRIPTOR_DEFINITION,
+    DESCRIPTOR_KEY,
+    DESCRIPTOR_VERSION,
+    build_market_state,
+)
 from market.state.tasks import DEFAULT_GRANULARITIES
 
 
@@ -33,9 +39,17 @@ class Command(BaseCommand):
             cutoff = cutoff.astimezone(UTC)
         else:
             cutoff = timezone.now()
-        definition = ensure_descriptor_definition()
-        payload, _manifest, manifest_sha256, quality = build_market_state(
-            instrument, definition, cutoff, options["granularities"]
+        # Read-only preview: build an in-memory, UNSAVED definition instance so
+        # the command never writes a MarketStateDefinition row. build_market_state
+        # only reads .key, .version, .definition and .definition_sha256.
+        definition = MarketStateDefinition(
+            key=DESCRIPTOR_KEY,
+            version=DESCRIPTOR_VERSION,
+            definition=DESCRIPTOR_DEFINITION,
+            definition_sha256=identity_digest(DESCRIPTOR_DEFINITION),
+        )
+        payload, _scope, _manifest, manifest_sha256, _evidence, _evidence_sha, quality = (
+            build_market_state(instrument, definition, cutoff, options["granularities"])
         )
         self.stdout.write(
             json.dumps(

@@ -8,8 +8,6 @@ model or provider budget and registers no schedule.
 
 from datetime import UTC, datetime
 
-from django.utils import timezone
-
 from market.models import Instrument
 from market.state.compute import compute_market_state, ensure_descriptor_definition
 
@@ -18,7 +16,7 @@ DEFAULT_GRANULARITIES = ("M15", "H1", "H4", "D", "W")
 
 def _cutoff(value):
     if value is None:
-        return timezone.now()
+        raise ValueError("cutoff is required for a durable market-state computation")
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         raise ValueError("cutoff must be timezone-aware")

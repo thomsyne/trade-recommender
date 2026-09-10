@@ -59,11 +59,18 @@ class SweepTests(TestCase):
 
 class AcceptanceTests(TestCase):
     def test_close_beyond_not_reclaimed_is_acceptance(self):
-        bars = [ohlc(0, 10, 11, 10, 11), ohlc(1, 11, 12, 11, D("11.5"))]
+        # The accepting close (bar 0) needs the full 3-interval window to elapse
+        # with no reclaim before acceptance is declared.
+        bars = [ohlc(i, 11, 12, 11, D("11.5")) for i in range(4)]
         self.assertIsNotNone(detect_acceptance(bars, ATR1, LEVEL, "above", level_id="lid"))
 
+    def test_pending_before_window_matures_is_not_acceptance(self):
+        # Close beyond with fewer than the window's bars after it is still pending.
+        bars = [ohlc(0, 10, 11, 10, 11), ohlc(1, 11, 12, 11, D("11.5"))]
+        self.assertIsNone(detect_acceptance(bars, ATR1, LEVEL, "above", level_id="lid"))
+
     def test_close_beyond_then_reclaimed_is_not_acceptance(self):
-        bars = [ohlc(0, 10, 11, 10, 11), ohlc(1, 11, 11, 9, D("9.5"))]  # reclaimed next bar
+        bars = [ohlc(0, 10, 11, 10, 11)] + [ohlc(i, 11, 11, 9, D("9.5")) for i in range(1, 4)]
         self.assertIsNone(detect_acceptance(bars, ATR1, LEVEL, "above", level_id="lid"))
 
     def test_a_sweep_bar_is_not_an_acceptance(self):

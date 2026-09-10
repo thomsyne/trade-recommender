@@ -905,7 +905,14 @@ class CandleObservation(ImmutableModel):
                 name="candle_observation_increasing_interval",
             ),
         ]
-        indexes = [models.Index(fields=("candle", "-revision"), name="candle_observation_rev_idx")]
+        indexes = [
+            models.Index(fields=("candle", "-revision"), name="candle_observation_rev_idx"),
+            # Supports the bounded DISTINCT ON (timestamp) eligible-observation scan.
+            models.Index(
+                fields=("instrument", "granularity", "-timestamp", "-revision"),
+                name="candle_obs_series_rev_idx",
+            ),
+        ]
 
 
 class IngestionManifest(ImmutableModel):
@@ -1222,6 +1229,12 @@ class MarketStateDefinition(ImmutableModel):
             models.UniqueConstraint(
                 fields=("key", "version"), name="unique_market_state_definition_version"
             ),
+            # Reject a malformed digest at the database boundary (also for raw
+            # INSERTs that bypass save()): the SHA-256 must be 64 lowercase hex.
+            models.CheckConstraint(
+                condition=models.Q(definition_sha256__regex=r"^[0-9a-f]{64}$"),
+                name="market_state_definition_sha256_hex",
+            ),
         ]
 
     def save(self, *args, **kwargs):
@@ -1273,6 +1286,13 @@ class MarketStateSnapshot(ImmutableModel):
                     data_quality_status__in=[s for s, _ in MARKET_STATE_QUALITY_STATES]
                 ),
                 name="market_state_snapshot_quality_status_valid",
+            ),
+            # DB-boundary rejection of malformed hashes (also for raw INSERTs).
+            models.CheckConstraint(
+                condition=models.Q(output_sha256__regex=r"^[0-9a-f]{64}$")
+                & models.Q(input_manifest_sha256__regex=r"^[0-9a-f]{64}$")
+                & models.Q(idempotency_key__regex=r"^[0-9a-f]{64}$"),
+                name="market_state_snapshot_sha256_hex",
             ),
         ]
 

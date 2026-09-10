@@ -10,7 +10,7 @@ here selects a trade — these are descriptive facts (docs/phase4/design.md §7.
 """
 
 from collections import defaultdict
-from datetime import timedelta
+from datetime import UTC, timedelta
 from decimal import Decimal
 
 from market.quality import NEW_YORK
@@ -21,7 +21,7 @@ from market.state.manifest import _iso, build_input_manifest, eligible_observati
 from market.state.snapshots import persist_snapshot
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.7.0"
+DESCRIPTOR_VERSION = "0.8.0"
 
 FVG_GRANULARITIES = frozenset({"M15", "H1", "H4"})
 ORB_SESSION_WINDOW_HOURS = 12
@@ -45,6 +45,8 @@ DESCRIPTOR_DEFINITION = {
         "descriptor": "latest-eligible-candle-v1",
         "higher_timeframe": "htf-context-v1",
         "structure": "structure-context-v1",
+        "monthly_context": "monthly-context-v1",
+        "evidence_manifest": "vintage-evidence-v1",
     },
     "features": [
         "eligible_candle_count",
@@ -122,6 +124,8 @@ def _bars_from_observations(rows):
             high=_midpoint(row.bid_high, row.ask_high),
             low=_midpoint(row.bid_low, row.ask_low),
             close=_midpoint(row.bid_close, row.ask_close),
+            end=row.interval_end,
+            spread=row.ask_close - row.bid_close,
         )
         for row in rows
     ]
@@ -137,7 +141,9 @@ def _granularity_descriptor(instrument, granularity, information_cutoff):
     bars = _bars_from_observations(rows)
     atr = features._current_atr(bars)
     if granularity in FVG_GRANULARITIES:
-        fvg_block = fvg.find_fvgs(bars, atr, _pip_size(instrument))
+        # No single atr: find_fvgs qualifies each gap with the ATR contemporaneous
+        # to its candle 3, and uses each candle's own spread for normalization.
+        fvg_block = fvg.find_fvgs(bars, _pip_size(instrument))
     else:
         fvg_block = {"state": "not_applicable", "reason_code": "unsupported_granularity"}
     return {
@@ -164,8 +170,7 @@ def _orb_block(instrument, information_cutoff):
             out[name] = orb.orb_unavailable("insufficient_history", session_name=name)
         return out
     bars = _bars_from_observations(rows)
-    atr = features._current_atr(bars)
-    obs_by_ts = {row.timestamp: row for row in rows}
+    index_by_ts = {row.timestamp: i for i, row in enumerate(rows)}
     bar_by_ts = {row.timestamp: bar for row, bar in zip(rows, bars)}
     for name in sessions.SESSIONS:
         found = sessions.most_recent_completed_orb_open(information_cutoff, name)
@@ -173,25 +178,54 @@ def _orb_block(instrument, information_cutoff):
             out[name] = orb.orb_unavailable("session_market_closed", session_name=name)
             continue
         utc_open, local_open, tz = found
-        opening = obs_by_ts.get(utc_open)
-        if opening is None:
+        if utc_open not in index_by_ts:
             out[name] = orb.orb_unavailable("opening_interval_missing", session_name=name)
             continue
+        opening_bar = bar_by_ts[utc_open]
         window_end = utc_open + timedelta(hours=ORB_SESSION_WINDOW_HOURS)
         session_bars = [
             bar_by_ts[row.timestamp] for row in rows if utc_open < row.timestamp <= window_end
         ]
-        spread = opening.ask_close - opening.bid_close
+        # ATR contemporaneous with the opening interval, spread from the opening
+        # candle itself — the ORB facts must not be requalified by later bars.
+        atr = features.atr_at_index(bars, index_by_ts[utc_open])
         out[name] = orb.opening_range(
-            bar_by_ts[utc_open],
+            opening_bar,
             session_bars,
             atr,
-            spread,
+            opening_bar.spread,
             session_name=name,
             local_open=local_open,
             tzinfo=tz,
         )
     return out
+
+
+def _overnight_extreme(instrument, information_cutoff):
+    """High/low of the most recent completed overnight window: the previous New
+    York 17:00 session open through the London 08:00 open (design §7.4)."""
+    found = sessions.most_recent_completed_orb_open(information_cutoff, "london")
+    if found is None:
+        return {
+            "state": "unavailable",
+            "version": structure.PRIOR_EXTREME_V,
+            "reason_code": "session_market_closed",
+        }
+    london_open, _local_open, _tz = found
+    ny = london_open.astimezone(NEW_YORK)
+    start_local = ny.replace(hour=17, minute=0, second=0, microsecond=0)
+    if start_local >= ny:
+        start_local -= timedelta(days=1)
+    overnight_start = start_local.astimezone(UTC)
+    rows = eligible_observations(instrument, "M15", information_cutoff, lookback=LOOKBACKS["M15"])
+    window = [r for r in rows if overnight_start <= r.timestamp < london_open]
+    if not window:
+        return {
+            "state": "unavailable",
+            "version": structure.PRIOR_EXTREME_V,
+            "reason_code": "insufficient_history",
+        }
+    return structure.prior_period_extreme(_bars_from_observations(window))
 
 
 def _prior_extreme(instrument, granularity, information_cutoff):
@@ -207,67 +241,157 @@ def _prior_extreme(instrument, granularity, information_cutoff):
     return structure.prior_period_extreme(_bars_from_observations(rows[-1:]))
 
 
-def _prior_completed_month(instrument, information_cutoff):
+def _expected_daily_opens(year, month):
+    """UTC open instants of every registered daily session in a NY calendar month
+    (weekday Sun-Thu 17:00). Holidays are not modelled, so a month missing one of
+    these is treated as incomplete rather than silently complete."""
+    from calendar import monthrange
+    from datetime import date, datetime, time
+
+    from market.quality import DAILY_SESSION_WEEKDAYS
+
+    opens = set()
+    for day in range(1, monthrange(year, month)[1] + 1):
+        d = date(year, month, day)
+        if d.weekday() in DAILY_SESSION_WEEKDAYS:
+            opens.add(datetime.combine(d, time(17), NEW_YORK).astimezone(UTC))
+    return opens
+
+
+def _completed_months(instrument, information_cutoff):
+    """Ordered ``[(‘YYYY-MM’, monthly_Bar)]`` for every fully-past NY month whose
+    registered daily sessions are all present. A partial current month, or a past
+    month missing any registered daily session, is excluded (never completed)."""
     rows = eligible_observations(instrument, "D", information_cutoff, lookback=PRIOR_MONTH_LOOKBACK)
     if not rows:
-        return {
-            "state": "unavailable",
-            "version": structure.PRIOR_EXTREME_V,
-            "reason_code": "insufficient_history",
-        }
+        return []
     cutoff_local = information_cutoff.astimezone(NEW_YORK)
     cutoff_month = (cutoff_local.year, cutoff_local.month)
     months = defaultdict(list)
     for bar, row in zip(_bars_from_observations(rows), rows):
         local = row.timestamp.astimezone(NEW_YORK)
-        months[(local.year, local.month)].append(bar)
-    completed = [m for m in months if m < cutoff_month]
+        months[(local.year, local.month)].append((row.timestamp, bar))
+    completed = []
+    for key in sorted(m for m in months if m < cutoff_month):
+        present = {ts for ts, _ in months[key]}
+        if not _expected_daily_opens(*key) <= present:
+            continue  # a registered daily session is missing -> not complete
+        ordered = [bar for _, bar in sorted(months[key])]
+        monthly = features.Bar(
+            timestamp=ordered[0].timestamp,
+            open=ordered[0].open,
+            high=max(b.high for b in ordered),
+            low=min(b.low for b in ordered),
+            close=ordered[-1].close,
+        )
+        completed.append((f"{key[0]:04d}-{key[1]:02d}", monthly))
+    return completed
+
+
+def _prior_completed_month(instrument, information_cutoff):
+    completed = _completed_months(instrument, information_cutoff)
     if not completed:
         return {
             "state": "unavailable",
             "version": structure.PRIOR_EXTREME_V,
             "reason_code": "incomplete_period",
         }
-    latest = max(completed)
-    result = structure.prior_period_extreme(months[latest])
-    result["month"] = f"{latest[0]:04d}-{latest[1]:02d}"
+    label, monthly = completed[-1]
+    result = structure.prior_period_extreme([monthly])
+    result["month"] = label
     return result
 
 
-def build_market_state(instrument, definition, information_cutoff, granularities):
-    """Build the canonical payload and input manifest without persisting.
+def _monthly_context(instrument, information_cutoff):
+    """Monthly trend over completed NY-session months (aggregated daily candles)."""
+    completed = _completed_months(instrument, information_cutoff)
+    if not completed:
+        return {
+            "state": "unavailable",
+            "version": features.TREND_V,
+            "reason_code": "incomplete_period",
+        }
+    monthly_bars = [bar for _, bar in completed]
+    return {
+        "state": "available",
+        "completed_months": [label for label, _ in completed],
+        "trend": features.trend_feature(monthly_bars),
+    }
 
-    Returns ``(output_payload, manifest, manifest_sha256, data_quality_status)``.
-    This is the pure computation shared by the persisting path and the read-only
-    preview/dry-run command.
-    """
-    granularities = sorted(set(granularities))
+
+#: Granularities the computation always consumes beyond the requested set: M15
+#: (opening range) and D/W (prior-period and monthly context). The manifest binds
+#: all of them so any consumed candle is part of the snapshot identity.
+AUXILIARY_GRANULARITIES = frozenset({"M15", "D", "W"})
+
+
+def _require_governing_definition(definition):
+    """Fail closed unless the supplied definition is the contract this code
+    computes. A definition whose body does not match the pinned descriptor cannot
+    govern computation, so it is rejected rather than silently ignored."""
+    from market.state.canonical import identity_digest
+    from market.state.definitions import DefinitionError
+
+    if identity_digest(definition.definition) != identity_digest(DESCRIPTOR_DEFINITION):
+        raise DefinitionError(
+            f"definition {definition.key}@{definition.version} does not match the "
+            "descriptor contract this implementation computes"
+        )
+
+
+def build_market_state(instrument, definition, information_cutoff, granularities):
+    """Build the canonical payload, input manifest and evidence manifest without
+    persisting. Returns ``(payload, scope, manifest, manifest_sha256,
+    evidence_manifest, evidence_sha256, data_quality_status)``."""
+    from market.state.canonical import identity_digest
+
+    _require_governing_definition(definition)
+    scope = sorted(set(granularities))
+    consumed = sorted(set(scope) | AUXILIARY_GRANULARITIES)
     manifest, manifest_sha256 = build_input_manifest(
-        instrument, granularities, information_cutoff, lookbacks=LOOKBACKS
+        instrument, consumed, information_cutoff, lookbacks=LOOKBACKS
     )
     per_granularity = {
         granularity: _granularity_descriptor(instrument, granularity, information_cutoff)
-        for granularity in granularities
+        for granularity in scope
     }
-    prior_extremes = {
-        "prior_day": _prior_extreme(instrument, "D", information_cutoff),
-        "prior_week": _prior_extreme(instrument, "W", information_cutoff),
-        "prior_completed_month": _prior_completed_month(instrument, information_cutoff),
-    }
+    event_block = context.event_state(instrument, information_cutoff)
+    macro_block = context.macro_regime(instrument, information_cutoff)
+    evidence_manifest = context.evidence_manifest(event_block, macro_block)
     output_payload = {
         "schema": "market-state/descriptor-v0",
         "definition": [definition.key, definition.version],
         "instrument": instrument.code,
         "information_cutoff": _iso(information_cutoff),
+        "requested_granularities": scope,
         "granularities": per_granularity,
-        "prior_extremes": prior_extremes,
+        "prior_extremes": {
+            "prior_day": _prior_extreme(instrument, "D", information_cutoff),
+            "prior_week": _prior_extreme(instrument, "W", information_cutoff),
+            "prior_completed_month": _prior_completed_month(instrument, information_cutoff),
+            "overnight_session": _overnight_extreme(instrument, information_cutoff),
+        },
+        "monthly_context": _monthly_context(instrument, information_cutoff),
         "opening_range": _orb_block(instrument, information_cutoff),
-        "event_state": context.event_state(instrument, information_cutoff),
-        "macro_regime": context.macro_regime(instrument, information_cutoff),
+        "event_state": event_block,
+        "macro_regime": macro_block,
     }
+    from market.state import terminology
+
+    bad_terms = terminology.terminology_violations(output_payload)
+    if bad_terms:
+        raise ValueError(f"payload contains noncanonical terminology: {bad_terms}")
     all_available = all(g["state"] == "available" for g in per_granularity.values())
     data_quality_status = "complete" if all_available else "partial"
-    return output_payload, manifest, manifest_sha256, data_quality_status
+    return (
+        output_payload,
+        scope,
+        manifest,
+        manifest_sha256,
+        evidence_manifest,
+        identity_digest(evidence_manifest),
+        data_quality_status,
+    )
 
 
 def compute_market_state(instrument, definition, information_cutoff, granularities):
@@ -276,7 +400,7 @@ def compute_market_state(instrument, definition, information_cutoff, granulariti
     Returns ``(snapshot, created)``. Idempotent: recomputing the same identity
     returns the existing snapshot.
     """
-    payload, manifest, manifest_sha256, data_quality_status = build_market_state(
+    payload, scope, manifest, manifest_sha256, evidence, evidence_sha, quality = build_market_state(
         instrument, definition, information_cutoff, granularities
     )
     return persist_snapshot(
@@ -286,5 +410,8 @@ def compute_market_state(instrument, definition, information_cutoff, granulariti
         manifest,
         manifest_sha256,
         payload,
-        data_quality_status=data_quality_status,
+        scope=scope,
+        evidence_manifest=evidence,
+        evidence_sha256=evidence_sha,
+        data_quality_status=quality,
     )

@@ -35,27 +35,24 @@ def eligible_observations(instrument, granularity, information_cutoff, *, lookba
     """
     if not timezone.is_aware(information_cutoff):
         raise ValueError("information_cutoff must be timezone-aware")
-    rows = (
-        CandleObservation.objects.filter(
-            instrument=instrument,
-            granularity=granularity,
-            complete=True,
-            interval_end__lte=information_cutoff,
-            observed_at__lte=information_cutoff,
-        )
-        .exclude(content_sha256="")
-        # Descending so the first row seen per candle is its highest eligible
-        # revision, and the newest candles come first — which lets a bounded
-        # lookback stop the scan instead of reading all of history (design §14).
-        .order_by("-timestamp", "-revision")
-    )
-    latest_by_timestamp = {}
-    for row in rows.iterator():
-        if row.timestamp not in latest_by_timestamp:
-            if lookback is not None and len(latest_by_timestamp) >= lookback:
-                break  # already have the newest ``lookback`` distinct candles
-            latest_by_timestamp[row.timestamp] = row
-    return [latest_by_timestamp[key] for key in sorted(latest_by_timestamp)]
+    eligible = CandleObservation.objects.filter(
+        instrument=instrument,
+        granularity=granularity,
+        complete=True,
+        interval_end__lte=information_cutoff,
+        observed_at__lte=information_cutoff,
+    ).exclude(content_sha256="")
+    # DISTINCT ON (timestamp) over eligible revisions ordered by (timestamp desc,
+    # revision desc) yields exactly one row per candle — its highest *eligible*
+    # revision — newest first. A ``lookback`` then LIMITs the distinct candles in
+    # SQL (not just in Python), so the database scan itself is bounded and uses
+    # the (instrument, granularity, -timestamp, -revision) index (design §14).
+    distinct = eligible.order_by("-timestamp", "-revision").distinct("timestamp")
+    if lookback is not None:
+        distinct = distinct[:lookback]
+    rows = list(distinct)
+    rows.sort(key=lambda row: row.timestamp)
+    return rows
 
 
 def build_input_manifest(instrument, granularities, information_cutoff, *, lookbacks=None):

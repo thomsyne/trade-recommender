@@ -132,17 +132,22 @@ def expected_candle_timestamps(start, end, granularity):
     start = start.astimezone(UTC)
     end = end.astimezone(UTC)
     local = start.astimezone(NEW_YORK)
-    aligned = local.minute == local.second == local.microsecond == 0
-    if granularity == "W":
+    aligned = local.second == local.microsecond == 0
+    if granularity == "M15":
+        aligned = aligned and local.minute % 15 == 0 and _market_is_open(local)
+    elif granularity == "W":
+        aligned = aligned and local.minute == 0
         aligned = aligned and local.weekday() == WEEKLY_SESSION_WEEKDAY
         aligned = aligned and local.time() == SESSION_CLOSE
     elif granularity == "D":
+        aligned = aligned and local.minute == 0
         aligned = aligned and local.weekday() in DAILY_SESSION_WEEKDAYS
         aligned = aligned and local.time() == SESSION_CLOSE
     elif granularity == "H4":
+        aligned = aligned and local.minute == 0
         aligned = aligned and local.hour in FOUR_HOUR_SESSION_HOURS and _market_is_open(local)
     else:
-        aligned = aligned and _market_is_open(local)
+        aligned = aligned and local.minute == 0 and _market_is_open(local)
     if not aligned:
         raise ValueError("candle range start is not a registered market interval")
 

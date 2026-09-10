@@ -50,22 +50,35 @@ def opening_range(opening_bar, session_bars, atr, spread, *, session_name, local
 
 def _breakout_state(orh, orl, session_bars):
     breakout = None
-    breakout_at = None
+    breakout_bar = None
+    breakout_index = None
     wick_only = False
-    for bar in session_bars:
+    for i, bar in enumerate(session_bars):
         if breakout is None:
             if bar.close > orh:
-                breakout, breakout_at = "up", bar.timestamp
+                breakout, breakout_bar, breakout_index = "up", bar, i
             elif bar.close < orl:
-                breakout, breakout_at = "down", bar.timestamp
+                breakout, breakout_bar, breakout_index = "down", bar, i
             elif bar.high > orh or bar.low < orl:
                 wick_only = True  # pierced without a completed close outside
     state = {"breakout": breakout, "wick_only_breach": wick_only}
     if breakout is not None:
-        state["breakout_at"] = _iso(breakout_at)
-        # Failure/invalidation: a later completed close back inside the range.
-        after = [b for b in session_bars if b.timestamp > breakout_at]
-        state["failed"] = any(orl <= b.close <= orh for b in after)
+        boundary = orh if breakout == "up" else orl
+        # breakout_at is the breakout candle's completion (formation time), not its
+        # start, so the historical event fact is stamped at the right instant.
+        state["breakout_at"] = _iso(breakout_bar.end or breakout_bar.timestamp)
+        after = session_bars[breakout_index + 1 :]
+        failed = False
+        retest = False
+        for bar in after:
+            if orl <= bar.close <= orh:
+                failed = True  # closed back inside the range
+            elif breakout == "up" and bar.low <= boundary and bar.close > orh:
+                retest = True  # returned to the broken boundary but held beyond it
+            elif breakout == "down" and bar.high >= boundary and bar.close < orl:
+                retest = True
+        state["failed"] = failed
+        state["retest"] = retest
     return state
 
 

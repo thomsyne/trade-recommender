@@ -23,19 +23,17 @@ nonzero exit.
 from datetime import datetime
 
 from django.db.models import Count
+from django.utils import timezone
 
 from market.models import CandleObservation, MarketStateSnapshot
 from market.quality import LIVE_GRANULARITIES
 from market.services import live_candle_completion
 from market.state.canonical import identity_digest
 from market.state.snapshots import snapshot_idempotency_key
+from market.state.terminology import terminology_violations
 
 MAX_VIOLATIONS = 500
 REQUIRED_PAYLOAD_KEYS = frozenset({"schema", "definition", "instrument", "granularities"})
-
-
-def _parse(ts):
-    return datetime.fromisoformat(ts)
 
 
 def verify_snapshots(snapshots):
@@ -58,19 +56,19 @@ def verify_snapshots(snapshots):
             flag(snapshot.pk, "output_hash_mismatch")
         if identity_digest(snapshot.input_manifest) != snapshot.input_manifest_sha256:
             flag(snapshot.pk, "input_manifest_hash_mismatch")
+        payload = snapshot.output_payload
+        scope = payload.get("requested_granularities", []) if isinstance(payload, dict) else []
         expected_key = snapshot_idempotency_key(
             definition.definition_sha256,
             snapshot.instrument.code,
             snapshot.information_cutoff,
+            scope if isinstance(scope, list) else [],
             snapshot.input_manifest_sha256,
+            identity_digest(snapshot.evidence_manifest),
         )
         if expected_key != snapshot.idempotency_key:
             flag(snapshot.pk, "idempotency_key_mismatch")
-        payload = snapshot.output_payload
-        if not isinstance(payload, dict) or not REQUIRED_PAYLOAD_KEYS <= set(payload):
-            flag(snapshot.pk, "malformed_payload_schema")
-        elif payload.get("definition") != [definition.key, definition.version]:
-            flag(snapshot.pk, "payload_definition_mismatch")
+        _verify_payload(snapshot, definition, flag)
         _verify_manifest(snapshot, flag)
 
     duplicates = (
@@ -89,14 +87,38 @@ def verify_snapshots(snapshots):
     }
 
 
+def _verify_payload(snapshot, definition, flag):
+    payload = snapshot.output_payload
+    if not isinstance(payload, dict) or not REQUIRED_PAYLOAD_KEYS <= set(payload):
+        flag(snapshot.pk, "malformed_payload_schema")
+        return
+    if payload.get("definition") != [definition.key, definition.version]:
+        flag(snapshot.pk, "payload_definition_mismatch")
+    if payload.get("instrument") != snapshot.instrument.code:
+        flag(snapshot.pk, "payload_instrument_mismatch")
+    granularities = payload.get("granularities")
+    if isinstance(granularities, dict):
+        for granularity in granularities:
+            if granularity not in LIVE_GRANULARITIES:
+                flag(snapshot.pk, "unsupported_granularity", granularity)
+    for code in terminology_violations(payload):
+        flag(snapshot.pk, code)
+
+
 def _verify_manifest(snapshot, flag):
     for entry in snapshot.input_manifest:
+        if not isinstance(entry, dict):
+            flag(snapshot.pk, "malformed_manifest_entry")
+            continue
         try:
-            start = _parse(entry["timestamp"])
+            start = datetime.fromisoformat(entry["timestamp"])
             granularity = entry["granularity"]
             revision = entry["revision"]
             content_sha256 = entry["content_sha256"]
         except (KeyError, TypeError, ValueError):
+            flag(snapshot.pk, "malformed_manifest_entry")
+            continue
+        if not isinstance(start, datetime) or not timezone.is_aware(start):
             flag(snapshot.pk, "malformed_manifest_entry")
             continue
         if granularity not in LIVE_GRANULARITIES:
@@ -112,5 +134,8 @@ def _verify_manifest(snapshot, flag):
         ).first()
         if observation is None:
             flag(snapshot.pk, "missing_candle_identity", content_sha256)
-        elif observation.content_sha256 != content_sha256:
+            continue
+        if observation.content_sha256 != content_sha256:
             flag(snapshot.pk, "revised_content_substituted", content_sha256)
+        if observation.observed_at > snapshot.information_cutoff:
+            flag(snapshot.pk, "input_available_after_cutoff", content_sha256)

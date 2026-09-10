@@ -13,15 +13,28 @@ class DeterminismViolation(ValueError):
 
 
 def snapshot_idempotency_key(
-    definition_sha256, instrument_code, information_cutoff, manifest_sha256
+    definition_sha256,
+    instrument_code,
+    information_cutoff,
+    scope,
+    manifest_sha256,
+    evidence_sha256,
 ):
-    """Deterministic identity of a snapshot over exactly its defining inputs."""
+    """Deterministic identity of a snapshot over exactly its defining inputs:
+    the definition, instrument, cutoff, the requested granularity *scope*, and
+    the hashes of every consumed candle (manifest) and macro/event vintage
+    (evidence). Binding the scope means an empty M15 request and an empty H4
+    request at the same cutoff have distinct identities; binding the evidence
+    means a macro/event vintage change yields a new snapshot rather than a
+    determinism collision."""
     return identity_digest(
         [
             definition_sha256,
             instrument_code,
             information_cutoff.astimezone(UTC).isoformat(timespec="microseconds"),
+            sorted(scope),
             manifest_sha256,
+            evidence_sha256,
         ]
     )
 
@@ -35,7 +48,9 @@ def persist_snapshot(
     input_manifest_sha256,
     output_payload,
     *,
-    evidence_manifest=None,
+    scope,
+    evidence_manifest,
+    evidence_sha256,
     data_quality_status="complete",
 ):
     """Persist (or return the existing) snapshot for this identity.
@@ -47,7 +62,12 @@ def persist_snapshot(
     fails closed rather than forking the record.
     """
     key = snapshot_idempotency_key(
-        definition.definition_sha256, instrument.code, information_cutoff, input_manifest_sha256
+        definition.definition_sha256,
+        instrument.code,
+        information_cutoff,
+        scope,
+        input_manifest_sha256,
+        evidence_sha256,
     )
     output_sha256 = identity_digest(output_payload)
     with connection.cursor() as cursor:
@@ -67,7 +87,7 @@ def persist_snapshot(
         information_cutoff=information_cutoff,
         input_manifest=input_manifest,
         input_manifest_sha256=input_manifest_sha256,
-        evidence_manifest=evidence_manifest or {},
+        evidence_manifest=evidence_manifest,
         output_payload=output_payload,
         output_sha256=output_sha256,
         data_quality_status=data_quality_status,

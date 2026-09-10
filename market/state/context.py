@@ -63,24 +63,31 @@ def spread_context(observation, atr):
 
 
 def event_state(instrument, information_cutoff):
-    """Scheduled-event state for the pair's currencies, vintage-correct at cutoff."""
+    """Scheduled-event state for the pair's currencies, vintage-correct at cutoff.
+
+    Every vintage *known by the cutoff* (``first_observed_at`` and its retrieval
+    ``fetched_at`` both at or before the cutoff) is considered; the latest vintage
+    per event is selected FIRST, and only then is the display window applied — so a
+    reschedule out of the window cannot resurrect the obsolete in-window vintage.
+    If no event vintage is known at all for the pair, coverage is unavailable
+    rather than an attested-empty calendar."""
     from research.models import EconomicEvent
 
     countries = _pair_countries(instrument)
     if countries is None:
         return _unavailable(EVENT_STATE_V, "provenance_unavailable")
-    rows = EconomicEvent.objects.filter(
+    known = EconomicEvent.objects.filter(
         country__in=countries,
         first_observed_at__lte=information_cutoff,
-        event_at__gte=information_cutoff - timedelta(days=EVENT_BOUND_DAYS),
-        event_at__lte=information_cutoff + timedelta(days=EVENT_BOUND_DAYS),
+        retrieval__fetched_at__lte=information_cutoff,
     ).order_by("event_at", "provider_event_key")
-    # Keep the latest vintage (max first_observed_at) known by the cutoff per event.
     latest = {}
-    for event in rows:
+    for event in known:
         current = latest.get(event.provider_event_key)
         if current is None or event.first_observed_at > current.first_observed_at:
             latest[event.provider_event_key] = event
+    if not latest:
+        return _unavailable(EVENT_STATE_V, "event_coverage_unavailable")
     window_start = information_cutoff - timedelta(days=EVENT_LOOKBACK_DAYS)
     window_end = information_cutoff + timedelta(days=EVENT_HORIZON_DAYS)
     items = []
@@ -94,6 +101,7 @@ def event_state(instrument, information_cutoff):
             "time_precision": event.time_precision,
             "status": event.status,
             "first_observed_at": _iso(event.first_observed_at),
+            "vintage_id": event.payload_fingerprint,
             "severity": {"state": "unavailable", "reason_code": "severity_unavailable"},
         }
         if event.time_precision == EconomicEvent.TimePrecision.EXACT:
@@ -107,6 +115,23 @@ def event_state(instrument, information_cutoff):
             }
         items.append(item)
     return {"state": "available", "version": EVENT_STATE_V, "events": items}
+
+
+def evidence_manifest(event_block, macro_block):
+    """The macro/event vintage identities a snapshot consumed, for the snapshot
+    identity — so a change of consumed vintage yields a new snapshot."""
+    events = sorted(
+        e.get("vintage_id", "") for e in event_block.get("events", []) if isinstance(e, dict)
+    )
+    macro = {}
+    for currency, block in sorted((macro_block.get("by_currency") or {}).items()):
+        if isinstance(block, dict) and block.get("state") == "available":
+            macro[currency] = [
+                block.get("series"),
+                block.get("observation_period"),
+                block.get("vintage_at"),
+            ]
+    return {"events": events, "macro": macro}
 
 
 def _policy_rate_regime(country, information_cutoff):

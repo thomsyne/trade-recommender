@@ -8,6 +8,8 @@ unknown or tampered ``(key, version)`` fails closed rather than silently
 computing against an undefined contract.
 """
 
+from django.db import IntegrityError, transaction
+
 from market.models import MarketStateDefinition
 from market.state.canonical import NonCanonicalValue, canonical_json, identity_digest
 
@@ -61,7 +63,25 @@ def register_definition(key, version, body):
     clash = MarketStateDefinition.objects.filter(key=key, version=version).first()
     if clash is not None:
         raise DefinitionError(f"{key}@{version} already registered with different content")
-    return MarketStateDefinition.objects.create(key=key, version=version, definition=body)
+    try:
+        # Nested atomic block so a losing race (another process registered the
+        # same content-addressed body first) rolls back cleanly instead of
+        # poisoning the surrounding transaction, then re-fetches the winner.
+        with transaction.atomic():
+            return MarketStateDefinition.objects.create(key=key, version=version, definition=body)
+    except IntegrityError:
+        winner = MarketStateDefinition.objects.filter(definition_sha256=digest).first()
+        if winner is None:
+            # The uniqueness collision was on (key, version), not on the digest:
+            # a different body already holds this identity. Fail closed.
+            raise DefinitionError(
+                f"{key}@{version} already registered with different content"
+            ) from None
+        if (winner.key, winner.version) != (key, version):
+            raise DefinitionError(
+                f"definition content already registered as {winner.key}@{winner.version}"
+            ) from None
+        return winner
 
 
 def load_definition(key, version):

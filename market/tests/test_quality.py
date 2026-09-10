@@ -106,6 +106,24 @@ class CandleQualityTests(SimpleTestCase):
                     [],
                 )
 
+    def test_m15_range_expands_to_quarter_hour_starts_and_rejects_misalignment(self):
+        start = datetime(2026, 1, 5, 12, tzinfo=UTC)
+        end = datetime(2026, 1, 5, 13, tzinfo=UTC)
+
+        self.assertEqual(
+            expected_candle_timestamps(start, end, "M15"),
+            (
+                start,
+                start + timedelta(minutes=15),
+                start + timedelta(minutes=30),
+                start + timedelta(minutes=45),
+            ),
+        )
+
+        misaligned = datetime(2026, 1, 5, 12, 7, tzinfo=UTC)
+        with self.assertRaises(ValueError):
+            expected_candle_timestamps(misaligned, misaligned + timedelta(hours=1), "M15")
+
     def test_required_daily_and_weekly_ranges_preserve_new_york_dst_alignment(self):
         new_york = ZoneInfo("America/New_York")
         daily_start = datetime(2026, 3, 5, 17, tzinfo=new_york).astimezone(UTC)

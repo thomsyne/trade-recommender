@@ -42,11 +42,23 @@ PERSISTENCE_WINDOW = 20
 
 
 class Bar(NamedTuple):
-    timestamp: object  # aware UTC datetime
+    timestamp: object  # aware UTC datetime (interval start)
     open: Decimal
     high: Decimal
     low: Decimal
     close: Decimal
+    # Optional trailing fields set on the production path (compute); pure-function
+    # unit tests may omit them. ``end`` is the registered interval completion —
+    # two bars are registered-consecutive iff the earlier one's ``end`` equals the
+    # later one's ``timestamp``. ``spread`` is ask-bid at the candle close.
+    end: object = None
+    spread: Decimal = None
+
+
+def bars_are_consecutive(earlier, later):
+    """Registered consecutiveness. Unknown (``end`` unset) is treated as
+    consecutive so pure-geometry unit tests still exercise the shape."""
+    return earlier.end is None or earlier.end == later.timestamp
 
 
 class Swing(NamedTuple):
@@ -73,6 +85,12 @@ def confirmed_swings(bars, left=SWING_LEFT, right=SWING_RIGHT):
     ``right`` bars can never be confirmed, which is the confirmation delay."""
     swings = []
     for i in range(left, len(bars) - right):
+        span = bars[i - left : i + right + 1]
+        # A swing is only confirmed over registered-consecutive candles: a gap
+        # (missing interval) in the confirmation window disqualifies it, so an
+        # observed position never substitutes for a registered neighbour.
+        if any(not bars_are_consecutive(span[k], span[k + 1]) for k in range(len(span) - 1)):
+            continue
         pivot = bars[i]
         window = bars[i - left : i] + bars[i + 1 : i + 1 + right]
         if all(pivot.high > b.high for b in window):
@@ -133,6 +151,8 @@ def sequence_feature(bars):
         prev = last_by_kind.get(s.kind)
         if prev is None:
             label = "first_high" if s.kind == "high" else "first_low"
+        elif s.price == prev.price:
+            label = "equal_high" if s.kind == "high" else "equal_low"
         elif s.kind == "high":
             label = "higher_high" if s.price > prev.price else "lower_high"
         else:
@@ -175,6 +195,18 @@ def atr_feature(bars, period=ATR_PERIOD):
 
 def _current_atr(bars, period=ATR_PERIOD):
     true_ranges = _true_ranges(bars)
+    if not true_ranges:
+        return None
+    return _atr_at(true_ranges, len(true_ranges) - 1, period)
+
+
+def atr_at_index(bars, index, period=ATR_PERIOD):
+    """ATR evaluated using only bars up to and including ``index`` (contemporaneous).
+
+    Historical event qualification (e.g. an FVG's displacement threshold) must use
+    the ATR as it stood when the event formed, so appending later bars never
+    changes a past fact."""
+    true_ranges = _true_ranges(bars[: index + 1])
     if not true_ranges:
         return None
     return _atr_at(true_ranges, len(true_ranges) - 1, period)
