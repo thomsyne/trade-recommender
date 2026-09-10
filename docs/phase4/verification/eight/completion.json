@@ -1,0 +1,17 @@
+{
+  "owned_scratch": "/tmp/phase4-eight.UDqTP2",
+  "private_cluster_stopped": true,
+  "scratch_removed": true,
+  "cleanup_scope": "Only task-owned private cluster, roles/databases, archives and logs under this directory; retained evidence copied first.",
+  "branch": "phase4/deterministic-market-state",
+  "starting_head": "0188ee51f1d4c44664db195ed005aca9243d9800",
+  "main": "a3fbe6ce7fc08895c5696a2a25744f46e5d6e284",
+  "origin_main": "a3fbe6ce7fc08895c5696a2a25744f46e5d6e284",
+  "merge_base": "a3fbe6ce7fc08895c5696a2a25744f46e5d6e284",
+  "live_remote_main": "a3fbe6ce7fc08895c5696a2a25744f46e5d6e284",
+  "remote_phase4_branch_present": false,
+  "push_pr_deployment_activation": false,
+  "existing_db_writes": false,
+  "acceptance": "superseded pending fresh independent re-review",
+  "worktree_note": "Only this correction pending local commit at inventory time; post-commit worktree checked separately."
+}

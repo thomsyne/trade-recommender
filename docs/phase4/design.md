@@ -2,7 +2,7 @@
 
 **Acceptance is superseded and pending independent review.** This document
 contains requirements and historical design notes, not a certification of their
-implementation. The correction contract in §17 and the current handoff supersede
+implementation. The correction contracts in §17–18 and the current handoff supersede
 the earlier completion claims in §16.5–16.6.
 
 Status: **living design record** (mandatory preliminary artifact, authored before
@@ -704,3 +704,65 @@ rule, and no acceptance or activation follows from these engineering corrections
 Limitations requiring independent review remain explicit in [handoff.md](handoff.md).
 Production memory, WAL, throughput and retention capacity are not established by
 the local measurements in [verification](verification/README.md).
+
+## 18. Eight-finding correction contract, descriptor 0.10.0
+
+This section supersedes conflicting 0.9.0 implementation notes. It responds to
+[the independent review](https://ampcode.com/threads/T-01a08985-818d-7698-aa9c-f843744479db),
+not to a new acceptance decision. Migration 0035 is forward-only engineering
+work; 0034 and historical records remain unchanged.
+
+1. Event candidate discovery applies both observation and retrieval cutoff
+   eligibility. At each consumed context cutoff, the latest eligible vintage is
+   selected before window filtering. An out-of-window suppressor and its latest
+   eligible in-window witness remain evidence. No known releases is unavailable
+   coverage, never an attested-empty calendar: this store has no coverage attestation.
+2. Pair currencies and pip sizing derive from validated `Instrument.Code`'s
+   canonical `BASE_QUOTE` identity, never mutable currency columns. Python
+   validation, read-only integrity, and a prospective database trigger reject or
+   report contradictory metadata.
+3. Migration 0035 pins descriptor 0.10.0 and the research scalar digest encoding.
+   Ordinary INSERT checks each canonical research content hash and ordered FK
+   lineage. It independently selects the latest eligible candle/revision inside
+   the registered search horizon, checks the manifest's final candle for every
+   consumed granularity, and checks the requested payload's latest-candle claim.
+   Full market-formula replay remains Python's responsibility.
+4. Frozen research contains immutable scalar facts and immutable nested relations,
+   not ORM instances. Evidence is the union consumed at snapshot and historical
+   feature cutoffs: latest/prior rate periods plus necessary event suppressors.
+   Source policy identity consumes id/source/jurisdiction/currency; source identity
+   consumes its id; series consumes id/policy/code/indicator/unit/transformation.
+   Retrieval and observation/event records retain full immutable content hashes.
+   Editorial notes are irrelevant. Consumed policy/series semantic updates are
+   rejected once research references exist. Computation after freezing performs
+   no queries. Historical unsupported definitions remain diagnostic, not certified.
+5. ORB `failed_at` and `retest_at` represent knowledge availability; separate
+   `failed_formed_at`/`retest_formed_at` retain physical candle completion.
+   Availability includes range/ATR prerequisites, breakout and preceding lifecycle
+   evidence through the triggering candle. Failure remains terminal. Integrity
+   checks range ≤ breakout ≤ downstream availability and cutoff/timezone validity.
+6. Zone availability uses the union of each member's L/R confirmation window and
+   confirmation-time ATR14 inputs (including the previous close). Unrelated early
+   prefix observation delays cannot delay a zone or erase its subsequent tests.
+7. Prior day/week mean the immediately preceding completed registered candle,
+   independent of what rows happen to exist. Weekly opens use the existing Friday
+   17:00 New York contract. Missing exact periods return `missing_exact_prior_period`
+   with expected UTC boundaries. Prior month means the preceding NY calendar month,
+   not an older complete month. Session windows remain exact registered windows.
+   Available prior-period facts disclose source interval identities and availability.
+8. `compression-expansion-v1` is a causal transition, not two regime flags.
+   Compression is ATR14 percentile <20; its population contains at least 20 and
+   at most 100 prior ATR14 values, using the strictly-smaller fraction without
+   rounded comparisons. The latest compression starts a pending window of 20
+   registered successors. The first subsequent percentile >80 with nonzero
+   directional body ≥1.5 times the immediately preceding ATR completes the fact.
+   Percentile equality does not qualify; body and 20-successor equality do.
+   A gap resets pending state; expiry without expansion is unavailable, not false.
+   Completed transitions retain compression/expansion formation and availability,
+   direction, body/ATR magnitude, successor count and exact dependency identities.
+   Future suffixes do not rewrite completed facts within the descriptor lookback.
+   Pending/unavailable states are explicit. This policy selects no trades.
+
+The earlier FVG minima, registered succession, monthly completeness, session
+coverage, preview read-only behavior, task cutoff/concurrency, M15 parity without
+repair, schedule isolation, and prohibition on forecast consumption remain intact.

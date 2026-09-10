@@ -1,5 +1,10 @@
 # Phase 4 — acceptance superseded
 
+Descriptor 0.10.0 and migration 0035 are the engineering response to the
+[eight-finding independent review](https://ampcode.com/threads/T-01a08985-818d-7698-aa9c-f843744479db).
+They are **not self-accepted**. Fresh independent re-review of the committed
+changes and retained evidence is required before any acceptance decision.
+
 **Not accepted. Independent re-review is required.** Earlier acceptance and
 re-acceptance records are superseded by the independent review in
 [the Phase 4 review thread](https://ampcode.com/threads/T-01a088f4-0bb2-7228-b71a-8fcb7760f7d2).

@@ -1,0 +1,34 @@
+{
+  "historical": {
+    "axis": "semantic_integrity",
+    "checked": 1,
+    "has_more": false,
+    "next_after_id": null,
+    "violation_count": 1,
+    "violations": [
+      {
+        "snapshot_id": 1,
+        "code": "unsupported_definition"
+      }
+    ]
+  },
+  "malformed_metadata": {
+    "axis": "semantic_integrity",
+    "checked": 1,
+    "has_more": false,
+    "next_after_id": null,
+    "violation_count": 2,
+    "violations": [
+      {
+        "snapshot_id": 1,
+        "code": "instrument_currency_contradiction"
+      },
+      {
+        "snapshot_id": 1,
+        "code": "unsupported_definition"
+      }
+    ]
+  },
+  "python_rejected": true,
+  "sql_rejected": true
+}

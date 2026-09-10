@@ -29,6 +29,7 @@ EQUILIBRIUM_V = "equilibrium-v1"
 PERSISTENCE_V = "persistence-v1"
 BOS_V = "bos-v1"
 CHOCH_V = "choch-v1"
+COMPRESSION_EXPANSION_V = "compression-expansion-v1"
 
 # --- fixed parameters ---------------------------------------------------------
 SWING_LEFT = 2
@@ -39,6 +40,8 @@ VOL_MIN_POPULATION = 20
 COMPRESSION_PCTL = Decimal("20")
 EXPANSION_PCTL = Decimal("80")
 PERSISTENCE_WINDOW = 20
+TRANSITION_WINDOW = 20
+TRANSITION_BODY_ATR = Decimal("1.5")
 
 
 class Bar(NamedTuple):
@@ -289,6 +292,95 @@ def volatility_regime_feature(bars):
     return {"state": "available", "version": VOL_REGIME_V, "regime": regime}
 
 
+def compression_before_expansion(bars):
+    """First directional expansion within 20 successors of a compression fact.
+
+    A compression is ATR percentile <20; expansion is >80 and body >=1.5
+    preceding ATR. Percentile populations and ATR inputs are strictly causal.
+    Closed transitions retain their original dependencies under future suffixes.
+    """
+    transitions = []
+    pending = None
+    sufficient = False
+    atrs = [atr_at_index(bars, j) for j in range(len(bars))]
+    for i in range(ATR_PERIOD + VOL_MIN_POPULATION, len(bars)):
+        start = max(0, i - ATR_PERIOD - VOL_POPULATION)
+        window = bars[start : i + 1]
+        if not contiguous(window):
+            pending = None
+            continue
+        current = atrs[i]
+        prior = atrs[max(ATR_PERIOD, i - VOL_POPULATION) : i]
+        if not current or len(prior) < VOL_MIN_POPULATION or any(a is None for a in prior):
+            continue
+        sufficient = True
+        percentile = Decimal(sum(a < current for a in prior)) * 100 / len(prior)
+        if pending is not None and i - pending[0] > TRANSITION_WINDOW:
+            pending = None
+        if percentile < COMPRESSION_PCTL:
+            pending = (i, start, percentile)
+            continue
+        if pending is None or percentile <= EXPANSION_PCTL:
+            continue
+        body = bars[i].close - bars[i].open
+        magnitude = abs(body) / prior[-1] if prior[-1] else Decimal(0)
+        if magnitude < TRANSITION_BODY_ATR or body == 0:
+            continue
+        compressed, dependency_start, compressed_percentile = pending
+        dependencies = bars[min(start, dependency_start) : i + 1]
+        transitions.append(
+            {
+                "compression_at": _iso(bars[compressed].end or bars[compressed].timestamp),
+                "compression_available_at": _iso(
+                    max(b.available_at for b in bars[dependency_start : compressed + 1])
+                ),
+                "compression_percentile": format_decimal(compressed_percentile),
+                "expansion_percentile": format_decimal(percentile),
+                "successor_count": i - compressed,
+                "formed_at": _iso(bars[i].end or bars[i].timestamp),
+                "available_at": _iso(max(b.available_at for b in dependencies)),
+                "direction": "up" if body > 0 else "down",
+                "body_atr": format_decimal(magnitude),
+                "source_intervals": [
+                    {
+                        "granularity": b.granularity,
+                        "timestamp": _iso(b.timestamp),
+                        "revision": b.revision,
+                        "content_sha256": b.content_sha256,
+                    }
+                    for b in dependencies
+                ],
+            }
+        )
+        pending = None
+    if not sufficient:
+        return _unavailable(
+            COMPRESSION_EXPANSION_V,
+            "missing_registered_interval"
+            if bars and not contiguous(bars)
+            else "insufficient_history",
+        )
+    return {
+        "state": "available" if transitions else "pending" if pending else "unavailable",
+        "version": COMPRESSION_EXPANSION_V,
+        "reason_code": "transition_confirmed"
+        if transitions
+        else "awaiting_expansion"
+        if pending
+        else "no_causal_transition",
+        "window_intervals": TRANSITION_WINDOW,
+        "pending_compression": None
+        if pending is None
+        else {
+            "formed_at": _iso(bars[pending[0]].end or bars[pending[0]].timestamp),
+            "available_at": _iso(max(b.available_at for b in bars[pending[1] : pending[0] + 1])),
+            "elapsed_successors": len(bars) - 1 - pending[0],
+            "percentile": format_decimal(pending[2]),
+        },
+        "transitions": transitions,
+    }
+
+
 # --- range / equilibrium / persistence ----------------------------------------
 def equilibrium_feature(bars):
     swings = confirmed_swings(bars)
@@ -425,6 +517,7 @@ def higher_timeframe_context(bars):
         "atr": atr_feature(bars),
         "volatility_percentile": volatility_percentile_feature(bars),
         "volatility_regime": volatility_regime_feature(bars),
+        "compression_before_expansion": compression_before_expansion(bars),
         "equilibrium": equilibrium_feature(bars),
         "persistence": persistence_feature(bars),
         "break_of_structure": break_of_structure_feature(bars),

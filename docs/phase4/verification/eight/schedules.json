@@ -1,0 +1,19 @@
+{
+  "scheduled_granularities": [
+    "D",
+    "H1",
+    "H4",
+    "W"
+  ],
+  "intervals": {
+    "H1": 3600,
+    "H4": 14400,
+    "D": 86400,
+    "W": 604800
+  },
+  "inventories": {
+    "p4base": [],
+    "p4test": [],
+    "p4final2": []
+  }
+}

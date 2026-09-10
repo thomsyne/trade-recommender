@@ -23,7 +23,7 @@ records, and none calls a provider.
 | `market/state/integrity.py` | Read-only semantic-integrity verification |
 | `market/state/tasks.py` | Durable per-instrument calculation task (unscheduled) |
 
-The current descriptor definition is `market-state-descriptor@0.9.0`
+The current descriptor definition is `market-state-descriptor@0.10.0`
 (`compute.DESCRIPTOR_DEFINITION`); the version is bumped whenever the feature set,
 a threshold or a lookback changes, so every snapshot binds the exact algorithm
 versions. Bounded per-granularity lookbacks (`compute.LOOKBACKS`) are pinned in
@@ -188,3 +188,37 @@ the supported definition, canonical identities, candle eligibility/revisions,
 basic prerequisites and research existence/availability. Full formula replay is
 an application/integrity check, not a duplicate SQL implementation. The existing
 superuser trigger-bypass caveat remains; no new production privilege is required.
+
+## Eight-finding correction verification (0035)
+
+Design §18 governs the 0.10.0 changes. New evidence lives in
+[`verification/eight`](verification/eight/README.md); earlier measurements above
+remain historical. Acceptance is superseded pending a fresh independent review.
+
+Use only a newly initialized private UTF-8 PostgreSQL cluster, a unique Unix
+socket/port and `env -i` with explicit `POSTGRES_HOST`, `POSTGRES_PORT`,
+`POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_CONN_MAX_AGE=0`, PATH and HOME. Never
+source `.env.local` or let an unset variable select a default database. The
+documented bootstrap accommodation remains: normally migrate market 0026,
+fake only the data-dependent 0027, then normally migrate the remaining graph.
+
+Run `test_phase4_eight_findings` along with the existing Phase4/M15 modules.
+Run the exact historical sequence separately:
+`test_zzzzzzzz_live_observation_migration` then
+`test_observation_lineage.SqlPythonParityTests`, without setup SQL repair.
+Run the broader market/operations/forecasts suites on equivalently bootstrapped
+exact-base and final databases and compare failure identities and causes.
+
+For disposable migration verification, populate with the exact starting
+implementation, fingerprint every application table, then migrate
+`0034 → 0035 → 0034 → 0035`, comparing rows after each step. Reversing only 0035
+removes its prospective guards and reinstalls 0034's frozen definition validators;
+it does not rewrite/delete snapshots or research. This downgrade must be paired
+with compatible code and does not certify historical 0.10.0 rows under 0.9.0.
+It is not authorization for an operational rollback, nor for reversing 0032's
+state tables. Never edit 0034 or use a runtime SQL repair as a migration test.
+
+Consumed policy/series semantic edits now reject once referenced. Editorial
+quality notes remain editable and do not change historical 0.10.0 replay.
+Instrument code/currency contradictions reject prospectively. Investigate
+historical contradictions read-only; do not repair immutable evidence in place.

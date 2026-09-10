@@ -35,6 +35,17 @@ def _term(name, description, *, formation, availability, expiry, invalidation, l
 #: term version -> contract. Keys must match the ``*_V`` version strings emitted
 #: in snapshot payloads.
 REGISTRY = {
+    "compression-expansion-v1": _term(
+        "compression before expansion",
+        "ATR14 percentile <20 followed within 20 registered successors by percentile >80 "
+        "and directional body >=1.5 preceding ATR14; percentiles use up to 100 prior ATRs, "
+        "minimum 20; percentile equality does not qualify, body and window equality do.",
+        formation="expansion interval completion after the latest pending compression",
+        availability="maximum observation/completion of all compression and expansion ATR/population inputs",
+        expiry="pending compression expires after 20 successors; completed facts retained in descriptor lookback",
+        invalidation="missing registered interval resets pending state",
+        limitations="bounded descriptive transition, not independent regime flags or a trading rule",
+    ),
     "swing-v1": _term(
         "confirmed swing",
         "A pivot high/low confirmed by L=2 left and R=2 right strictly-lower/higher"

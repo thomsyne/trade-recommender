@@ -1,5 +1,44 @@
 # Phase 4 — correction handoff, not acceptance
 
+## Current: eight-finding response, descriptor 0.10.0
+
+**Acceptance remains superseded pending fresh independent re-review.** The
+following engineering dispositions replace the historical 0.9.0 residuals below.
+The starting checkout was clean `phase4/deterministic-market-state` at
+[`0188ee5`](https://github.com/thomsyne/trade-recommender/commit/0188ee51f1d4c44664db195ed005aca9243d9800),
+including correction
+[`160681b`](https://github.com/thomsyne/trade-recommender/commit/160681bf280c5e82fabfe9ac4ac3520cf17be774).
+Local main, merge base and cached origin/main remained
+[`a3fbe6c`](https://github.com/thomsyne/trade-recommender/commit/a3fbe6ce7fc08895c5696a2a25744f46e5d6e284).
+
+| Review finding | Engineering disposition (not independent closure) |
+|---|---|
+| 1 Event candidate cutoff | Candidate discovery applies observation/retrieval eligibility; latest eligible suppressor precedes display filtering. Unknown coverage stays unavailable. |
+| 2 Instrument metadata identity | Macro currencies and pip sizing use validated canonical code; Python/integrity/DB reject or report contradictory columns. |
+| 3 SQL semantic forgeries | Forward 0035 validates research content digests, ordered FK lineage, and actual latest eligible manifest/payload candle/revision. Non-superuser probes reject both original forgeries and accept valid evidence. |
+| 4 Consumed-only research | Immutable scalar bundle; identity includes consumed rate periods and event witnesses/suppressors across context cutoffs. Editorial notes do not invalidate replay; consumed policy/series semantic edits reject. Frozen builds issue zero queries. |
+| 5 ORB availability | Failure/retest knowledge times propagate opening/ATR/breakout/lifecycle availability; physical completion remains separately disclosed. Both sessions and integrity chronology are tested. |
+| 6 Zone availability | Availability uses actual member confirmation and ATR inputs, not the full earlier prefix. Unrelated delay preserves the zone and tests; late confirmation delays it. |
+| 7 Exact prior periods | Exact preceding registered day/week/month/session, disclosed source periods and interval identities; no fallback to older available evidence. Friday weekly registration and weekend daily succession remain unchanged. |
+| 8 Compression before expansion | Bounded causal transition with strict percentile thresholds, inclusive normalized body/window minima, source identities, formation/availability, pending/unavailable states and future-suffix invariance. Policy is pinned in design §18 and the descriptor. |
+
+Reproduction, focused/affected checks, migration preservation, exact historical
+parity, broad differential identities/causes, source fingerprints and performance
+plans are retained in [`verification/eight`](verification/eight/README.md).
+All ten new regression tests failed against the starting implementation for the
+reported defects before passing the corrected implementation. The original
+reproduction log is retained, including both session subcases.
+
+Limitations: no production capacity, PostgreSQL 17, exceptional-holiday calendar,
+isolated feature RSS or WAL certification. SQL does not duplicate market formulas;
+Python integrity independently replays them. Unsupported historical definitions
+are reported safely, never rewritten or certified under the new version. These
+changes authorize no forecast consumption, push, PR, deployment or activation.
+The private resources and final branch/worktree checks are recorded with the new
+evidence; unrelated databases, source configuration and services were not used.
+
+## Historical 0.9.0 handoff (superseded where it conflicts above)
+
 **Not ready for acceptance.** This replaces the stale accepted/clean handoff.
 The correction preserves the interrupted implementation and adds adversarial
 checks, migration isolation and retained evidence. All thirteen findings remain

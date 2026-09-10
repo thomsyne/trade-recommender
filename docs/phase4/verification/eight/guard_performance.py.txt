@@ -1,0 +1,35 @@
+"""Run only in the disposable DB seeded by the retained performance probes."""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.getcwd())
+import django
+django.setup()
+from django.db import connection
+from market.models import MarketStateSnapshot
+
+snapshot = MarketStateSnapshot.objects.exclude(evidence_manifest={"events": [], "macro": {}}).latest("pk")
+plans = {}
+with connection.cursor() as cursor:
+    cursor.execute("SELECT version()")
+    plans["postgres"] = cursor.fetchone()[0]
+    cursor.execute("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) SELECT id FROM market_candleobservation "
+                   "WHERE instrument_id=%s AND granularity='H1' AND complete "
+                   "AND observed_at<=%s AND interval_end<=%s AND timestamp<%s "
+                   "AND timestamp >= %s - interval '914 hours' AND content_sha256<>'' "
+                   "ORDER BY timestamp DESC,revision DESC LIMIT 1",
+                   [snapshot.instrument_id, snapshot.information_cutoff, snapshot.information_cutoff,
+                    snapshot.information_cutoff, snapshot.information_cutoff])
+    plans["latest_eligible"] = cursor.fetchone()[0]
+    cursor.execute("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) INSERT INTO market_marketstatesnapshot "
+                   "(instrument_id,definition_id,information_cutoff,created_at,input_manifest,"
+                   "input_manifest_sha256,evidence_manifest,output_payload,output_sha256,"
+                   "data_quality_status,idempotency_key) SELECT instrument_id,definition_id,"
+                   "information_cutoff,created_at,input_manifest,input_manifest_sha256,evidence_manifest,"
+                   "output_payload,output_sha256,data_quality_status,idempotency_key "
+                   "FROM market_marketstatesnapshot WHERE id=%s ON CONFLICT DO NOTHING", [snapshot.pk])
+    plans["validated_insert_no_duplicate"] = cursor.fetchone()[0]
+    cursor.execute("SELECT pg_get_functiondef('market_state_evidence_insert_v2()'::regprocedure)")
+    plans["installed_guard"] = cursor.fetchone()[0]
+print(json.dumps(plans, indent=2))

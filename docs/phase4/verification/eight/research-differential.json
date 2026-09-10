@@ -1,0 +1,244 @@
+{
+  "base": {
+    "failures": [
+      {
+        "cause_sha256": "102685356af1dd43314c48f634eba4f167e098c091bc540ff2fadbd422b01aa7",
+        "identity": "ERROR: setUpClass (research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_cad_conversion_uses_latest_sealed_completion_strictly_before_entry (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_cad_conversion_uses_latest_sealed_completion_strictly_before_entry)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_contract_resolves_only_through_explicit_registration_lineage (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_contract_resolves_only_through_explicit_registration_lineage)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_development_range_is_inventory_backed (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_development_range_is_inventory_backed)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_incomplete_v2_inventory_rejects_s0_validation (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_incomplete_v2_inventory_rejects_s0_validation)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_injected_rewrite_failure_rolls_back_data_and_trigger_removal (research.tests.test_migrations.Phase2ADataMigrationTests.test_injected_rewrite_failure_rolls_back_data_and_trigger_removal)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_last_n_history_is_selected_from_observed_inventory (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_last_n_history_is_selected_from_observed_inventory)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_missing_entry_fails_closed_and_sealed_weekend_entry_traverses (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_missing_entry_fails_closed_and_sealed_weekend_entry_traverses)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_missing_entry_timestamp_fails_without_shifting (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_missing_entry_timestamp_fails_without_shifting)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_multi_book_rewrite_is_reversible_and_preserves_protection (research.tests.test_migrations.Phase2ADataMigrationTests.test_multi_book_rewrite_is_reversible_and_preserves_protection)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_no_provider_or_persistent_database_involved (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_no_provider_or_persistent_database_involved)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_preflight_rejects_entry_pending_and_mismatched_job_lineage (research.tests.test_migrations.Phase2ADataMigrationTests.test_preflight_rejects_entry_pending_and_mismatched_job_lineage)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_resolver_rejects_incomplete_or_conflicting_v2_lineage (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_resolver_rejects_incomplete_or_conflicting_v2_lineage)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "fc79b3242869b1b056f27fc78bd14c452b28e3fc089c2c8ed275b1cb9930ca02",
+        "identity": "ERROR: test_return_blind_allowlist_and_s1_execution_authority_remains_closed (research.tests.test_failed_break_v2_s0.V2S0GovernanceTests.test_return_blind_allowlist_and_s1_execution_authority_remains_closed)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_sealed_bounds_and_membership_helpers (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_sealed_bounds_and_membership_helpers)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_signal_count_output_accepts_v2_coverage_and_v1_unchanged (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_signal_count_output_accepts_v2_coverage_and_v1_unchanged)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_unregistered_v2_dataset_fails_closed (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_unregistered_v2_dataset_fails_closed)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_v2_analysis_membership_comes_from_inventory_not_calendar (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_v2_analysis_membership_comes_from_inventory_not_calendar)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_v2_completion_rule_is_one_to_one_across_dst (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_v2_completion_rule_is_one_to_one_across_dst)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_v2_identity_is_never_inferred_implicitly (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_v2_identity_is_never_inferred_implicitly)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_v2_s0_and_detector_execute_against_the_sealed_inventory (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_v2_s0_and_detector_execute_against_the_sealed_inventory)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_window_validation_uses_inventory_membership (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_window_validation_uses_inventory_membership)",
+        "occurrences": 1
+      }
+    ],
+    "raw_log_sha256": "1f0e5ab4fec25e257c7a718e0c1c2023668ccd33c93cc4aa1bd1788c7c121fa0",
+    "seconds": 135.215,
+    "tests": 348
+  },
+  "causes": {
+    "102685356af1dd43314c48f634eba4f167e098c091bc540ff2fadbd422b01aa7": "django.db.utils.ProgrammingError: discovery plan conflicts with canonical contract",
+    "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3": "django.db.migrations.exceptions.IrreversibleError: Operation <RunSQL \"\\n-- Mirrors paper._entry_fill's inclusive, execution-side entry predicate.\\nCREATE FUNCTION phase3_observable_activation(rec_id bigint, available_at timestamptz) RETURNS boolean AS $$\\n SELECT EXISTS(\\n SELECT 1 FROM forecasts_recommendation rec\\n JOIN forecasts_targetoccurrence t ON t.id=rec.target_occurrence_id\\n JOIN market_candle reference ON reference.id=t.reference_candle_id\\n JOIN market_candle c ON c.instrument_id=rec.instrument_id\\n JOIN market_ingestionrun run ON run.id=c.ingestion_run_id\\n WHERE rec.id=rec_id AND c.granularity='H1' AND c.complete\\n AND c.timestamp>=rec.generated_at AND c.timestamp+interval '1 hour'<=available_at\\n AND c.timestamp+interval '1 hour'<=((phase3_endpoint(reference.timestamp,t.horizon_sessions)\\n AT TIME ZONE 'America/New_York')+interval '1 day') AT TIME ZONE 'America/New_York'\\n AND run.status='succeeded' AND run.finished_at<=available_at\\n AND CASE WHEN rec.entry_condition='at_or_below'\\n THEN (CASE WHEN rec.action='buy' THEN c.ask_low ELSE c.bid_low END)<=rec.entry_level\\n ELSE (CASE WHEN rec.action='buy' THEN c.ask_high ELSE c.bid_high END)>=rec.entry_level END);\\n$$ LANGUAGE sql STABLE;\\n\\nCREATE FUNCTION phase3_nonactivation_observation() RETURNS trigger AS $$\\nDECLARE rec forecasts_recommendation%ROWTYPE; cutoff timestamptz;\\nBEGIN\\n SELECT * INTO STRICT rec FROM forecasts_recommendation WHERE id=NEW.recommendation_id;\\n IF rec.contract_version<>4 THEN RETURN NEW; END IF;\\n IF TG_TABLE_NAME='forecasts_papertraderesult' THEN\\n  IF NEW.outcome<>'not_activated' THEN RETURN NEW; END IF;\\n  cutoff:=NEW.resolved_at;\\n ELSE\\n  IF NEW.state<>'expired_not_activated' THEN RETURN NEW; END IF;\\n  SELECT resolved_at INTO cutoff FROM forecasts_papertraderesult\\n  WHERE id=NEW.source_id AND recommendation_id=rec.id AND outcome='not_activated';\\n END IF;\\n IF phase3_observable_activation(rec.id,cutoff)\\n THEN RAISE EXCEPTION 'nonactivation_contradicts_entry_evidence'; END IF;\\n RETURN NEW;\\nEND; $$ LANGUAGE plpgsql;\\nCREATE TRIGGER phase3_nonactivation_observation BEFORE INSERT ON forecasts_papertraderesult\\nFOR EACH ROW EXECUTE FUNCTION phase3_nonactivation_observation();\\nCREATE TRIGGER phase3_nonactivation_observation BEFORE INSERT ON forecasts_recommendationlifecycleevent\\nFOR EACH ROW EXECUTE FUNCTION phase3_nonactivation_observation();\\n\\nCREATE FUNCTION phase3_missing_observation() RETURNS trigger AS $$\\nBEGIN\\n IF NEW.outcome='missing' AND EXISTS(\\n SELECT 1 FROM forecasts_targetoccurrence t\\n JOIN market_candle reference ON reference.id=t.reference_candle_id\\n JOIN market_candle c ON c.instrument_id=t.instrument_id\\n JOIN market_ingestionrun run ON run.id=c.ingestion_run_id\\n WHERE t.id=NEW.target_id AND c.granularity='D' AND c.complete\\n AND c.timestamp=phase3_endpoint(reference.timestamp,t.horizon_sessions)\\n AND ((c.timestamp AT TIME ZONE 'America/New_York')+interval '1 day') AT TIME ZONE 'America/New_York'<=NEW.resolved_at\\n AND run.status='succeeded' AND run.finished_at<=NEW.resolved_at)\\n THEN RAISE EXCEPTION 'available_endpoint_marked_missing'; END IF;\\n RETURN NEW;\\nEND; $$ LANGUAGE plpgsql;\\nCREATE TRIGGER phase3_z_missing_observation BEFORE INSERT ON forecasts_targetresolution\\nFOR EACH ROW EXECUTE FUNCTION phase3_missing_observation();\\n\"> in forecasts.0031_phase3_observable_evidence is not reversible",
+    "fc79b3242869b1b056f27fc78bd14c452b28e3fc089c2c8ed275b1cb9930ca02": "research.failed_break_v2_s1_governance.V2S1GovernanceRefusal: direct v2 S1 execution is disabled; use the governed management command"
+  },
+  "final": {
+    "failures": [
+      {
+        "cause_sha256": "102685356af1dd43314c48f634eba4f167e098c091bc540ff2fadbd422b01aa7",
+        "identity": "ERROR: setUpClass (research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_cad_conversion_uses_latest_sealed_completion_strictly_before_entry (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_cad_conversion_uses_latest_sealed_completion_strictly_before_entry)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_contract_resolves_only_through_explicit_registration_lineage (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_contract_resolves_only_through_explicit_registration_lineage)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_development_range_is_inventory_backed (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_development_range_is_inventory_backed)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_incomplete_v2_inventory_rejects_s0_validation (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_incomplete_v2_inventory_rejects_s0_validation)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_injected_rewrite_failure_rolls_back_data_and_trigger_removal (research.tests.test_migrations.Phase2ADataMigrationTests.test_injected_rewrite_failure_rolls_back_data_and_trigger_removal)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_last_n_history_is_selected_from_observed_inventory (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_last_n_history_is_selected_from_observed_inventory)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_missing_entry_fails_closed_and_sealed_weekend_entry_traverses (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_missing_entry_fails_closed_and_sealed_weekend_entry_traverses)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_missing_entry_timestamp_fails_without_shifting (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_missing_entry_timestamp_fails_without_shifting)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_multi_book_rewrite_is_reversible_and_preserves_protection (research.tests.test_migrations.Phase2ADataMigrationTests.test_multi_book_rewrite_is_reversible_and_preserves_protection)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_no_provider_or_persistent_database_involved (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_no_provider_or_persistent_database_involved)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_preflight_rejects_entry_pending_and_mismatched_job_lineage (research.tests.test_migrations.Phase2ADataMigrationTests.test_preflight_rejects_entry_pending_and_mismatched_job_lineage)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_resolver_rejects_incomplete_or_conflicting_v2_lineage (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_resolver_rejects_incomplete_or_conflicting_v2_lineage)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "fc79b3242869b1b056f27fc78bd14c452b28e3fc089c2c8ed275b1cb9930ca02",
+        "identity": "ERROR: test_return_blind_allowlist_and_s1_execution_authority_remains_closed (research.tests.test_failed_break_v2_s0.V2S0GovernanceTests.test_return_blind_allowlist_and_s1_execution_authority_remains_closed)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_sealed_bounds_and_membership_helpers (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_sealed_bounds_and_membership_helpers)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_signal_count_output_accepts_v2_coverage_and_v1_unchanged (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_signal_count_output_accepts_v2_coverage_and_v1_unchanged)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_unregistered_v2_dataset_fails_closed (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_unregistered_v2_dataset_fails_closed)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_v2_analysis_membership_comes_from_inventory_not_calendar (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_v2_analysis_membership_comes_from_inventory_not_calendar)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_v2_completion_rule_is_one_to_one_across_dst (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_v2_completion_rule_is_one_to_one_across_dst)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_v2_identity_is_never_inferred_implicitly (research.tests.test_signal_count_v2.SignalCountV2MembershipTests.test_v2_identity_is_never_inferred_implicitly)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_v2_s0_and_detector_execute_against_the_sealed_inventory (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_v2_s0_and_detector_execute_against_the_sealed_inventory)",
+        "occurrences": 1
+      },
+      {
+        "cause_sha256": "6704e6c518d407d9e6f893d520beb7fb193c86f287a6eba13b0757e2b05619f3",
+        "identity": "ERROR: test_window_validation_uses_inventory_membership (research.tests.test_provider_observed_s1.ProviderObservedRunTests.test_window_validation_uses_inventory_membership)",
+        "occurrences": 1
+      }
+    ],
+    "raw_log_sha256": "05046c40db5dcdea2bae3d932396d3dc6c77ad428ff219c1f599714957cee155",
+    "seconds": 94.946,
+    "tests": 348
+  },
+  "introduced": [],
+  "normalization": "Only hexadecimal memory addresses are normalized; terminal exception text is otherwise exact.",
+  "removed": []
+}

@@ -14,6 +14,7 @@ from decimal import Decimal
 from market.state.canonical import format_decimal, identity_digest
 from market.state.features import (
     ATR_PERIOD,
+    SWING_LEFT,
     SWING_RIGHT,
     _iso,
     atr_at_index,
@@ -113,7 +114,15 @@ def support_resistance_zones(bars, atr, instrument_code, timeframe, cluster=ZONE
         earliest = min(m.index for m in cluster_members)
         age = (len(bars) - 1) - earliest
         confirmed = max(m.index for m in cluster_members) + SWING_RIGHT
-        available_at = max(b.available_at for b in bars[: confirmed + 1])
+        dependencies = {
+            i
+            for m in cluster_members
+            for i in range(
+                max(0, min(m.index - SWING_LEFT, m.index + SWING_RIGHT - ATR_PERIOD)),
+                m.index + SWING_RIGHT + 1,
+            )
+        }
+        available_at = max(bars[i].available_at for i in dependencies)
         since_formation = [
             b
             for b in bars[confirmed + 1 : earliest + ZONE_EXPIRY_INTERVALS + 1]

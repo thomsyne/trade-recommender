@@ -1,0 +1,173 @@
+{
+  "postgres": "PostgreSQL 15.5 on aarch64-apple-darwin21.6.0, compiled by Apple clang version 14.0.0 (clang-1400.0.29.102), 64-bit",
+  "latest_eligible": [
+    {
+      "Plan": {
+        "Node Type": "Limit",
+        "Parallel Aware": false,
+        "Async Capable": false,
+        "Startup Cost": 0.28,
+        "Total Cost": 0.7,
+        "Plan Rows": 1,
+        "Plan Width": 20,
+        "Actual Startup Time": 0.053,
+        "Actual Total Time": 0.053,
+        "Actual Rows": 1,
+        "Actual Loops": 1,
+        "Shared Hit Blocks": 6,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0,
+        "Plans": [
+          {
+            "Node Type": "Index Scan",
+            "Parent Relationship": "Outer",
+            "Parallel Aware": false,
+            "Async Capable": false,
+            "Scan Direction": "Forward",
+            "Index Name": "candle_obs_series_rev_idx",
+            "Relation Name": "market_candleobservation",
+            "Alias": "market_candleobservation",
+            "Startup Cost": 0.28,
+            "Total Cost": 272.19,
+            "Plan Rows": 649,
+            "Plan Width": 20,
+            "Actual Startup Time": 0.052,
+            "Actual Total Time": 0.052,
+            "Actual Rows": 1,
+            "Actual Loops": 1,
+            "Index Cond": "((instrument_id = 1) AND ((granularity)::text = 'H1'::text) AND (\"timestamp\" < '2025-07-29 04:00:01+00'::timestamp with time zone) AND (\"timestamp\" >= ('2025-07-29 04:00:01+00'::timestamp with time zone - '914:00:00'::interval)))",
+            "Rows Removed by Index Recheck": 0,
+            "Filter": "(complete AND (observed_at <= '2025-07-29 04:00:01+00'::timestamp with time zone) AND (interval_end <= '2025-07-29 04:00:01+00'::timestamp with time zone) AND ((content_sha256)::text <> ''::text))",
+            "Rows Removed by Filter": 0,
+            "Shared Hit Blocks": 6,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        ]
+      },
+      "Planning": {
+        "Shared Hit Blocks": 232,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      },
+      "Planning Time": 1.199,
+      "Triggers": [],
+      "Execution Time": 0.071
+    }
+  ],
+  "validated_insert_no_duplicate": [
+    {
+      "Plan": {
+        "Node Type": "ModifyTable",
+        "Operation": "Insert",
+        "Parallel Aware": false,
+        "Async Capable": false,
+        "Relation Name": "market_marketstatesnapshot",
+        "Alias": "market_marketstatesnapshot",
+        "Startup Cost": 0.14,
+        "Total Cost": 8.16,
+        "Plan Rows": 0,
+        "Plan Width": 0,
+        "Actual Startup Time": 298.88,
+        "Actual Total Time": 298.88,
+        "Actual Rows": 0,
+        "Actual Loops": 1,
+        "Conflict Resolution": "NOTHING",
+        "Tuples Inserted": 0,
+        "Conflicting Tuples": 1,
+        "Shared Hit Blocks": 9445,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 5,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0,
+        "Plans": [
+          {
+            "Node Type": "Index Scan",
+            "Parent Relationship": "Outer",
+            "Parallel Aware": false,
+            "Async Capable": false,
+            "Scan Direction": "Forward",
+            "Index Name": "market_marketstatesnapshot_pkey",
+            "Relation Name": "market_marketstatesnapshot",
+            "Alias": "market_marketstatesnapshot_1",
+            "Startup Cost": 0.14,
+            "Total Cost": 8.16,
+            "Plan Rows": 1,
+            "Plan Width": 624,
+            "Actual Startup Time": 0.089,
+            "Actual Total Time": 0.089,
+            "Actual Rows": 1,
+            "Actual Loops": 1,
+            "Index Cond": "(id = 3)",
+            "Rows Removed by Index Recheck": 0,
+            "Shared Hit Blocks": 12,
+            "Shared Read Blocks": 0,
+            "Shared Dirtied Blocks": 1,
+            "Shared Written Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Dirtied Blocks": 0,
+            "Local Written Blocks": 0,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0
+          }
+        ]
+      },
+      "Planning": {
+        "Shared Hit Blocks": 4,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      },
+      "Planning Time": 0.106,
+      "Triggers": [
+        {
+          "Trigger Name": "market_state_snapshot_semantics",
+          "Relation": "market_marketstatesnapshot",
+          "Time": 189.861,
+          "Calls": 1
+        },
+        {
+          "Trigger Name": "market_state_z_evidence",
+          "Relation": "market_marketstatesnapshot",
+          "Time": 106.916,
+          "Calls": 1
+        }
+      ],
+      "Execution Time": 298.914
+    }
+  ],
+  "installed_guard": "CREATE OR REPLACE FUNCTION public.market_state_evidence_insert_v2()\n RETURNS trigger\n LANGUAGE plpgsql\n SET search_path TO 'pg_catalog', 'public', 'pg_temp'\nAS $function$\nDECLARE grp jsonb; item jsonb; g text; latest market_candleobservation%ROWTYPE; claimed jsonb;\n  retrieval_id bigint; series_id bigint; policy_id bigint; source_id bigint; series_policy bigint;\n  models text[]; ids bigint[]; i integer; horizon interval; lookback integer;\nBEGIN\n  FOR grp IN SELECT value FROM jsonb_array_elements(NEW.evidence_manifest->'events')\n    UNION ALL SELECT value FROM jsonb_each(NEW.evidence_manifest->'macro') LOOP\n    FOR item IN SELECT value FROM jsonb_array_elements(grp) LOOP\n      IF item->>'content_sha256' IS DISTINCT FROM market_state_record_digest_v2(item->>'model',(item->>'id')::bigint) THEN\n        RAISE EXCEPTION 'market_state_research_content_mismatch' USING ERRCODE='23514';\n      END IF;\n    END LOOP;\n    -- The entire ordered lineage must follow the immutable record's actual FKs.\n    IF grp->0->>'model' NOT IN ('research.macroobservation','research.economicevent') THEN\n      RAISE EXCEPTION 'market_state_research_lineage_mismatch' USING ERRCODE='23514';\n    END IF;\n    IF grp->0->>'model'='research.macroobservation' THEN\n      SELECT m.retrieval_id,m.series_id INTO retrieval_id,series_id FROM research_macroobservation m WHERE m.id=(grp->0->>'id')::bigint;\n    ELSE\n      SELECT e.retrieval_id,e.series_id INTO retrieval_id,series_id FROM research_economicevent e WHERE e.id=(grp->0->>'id')::bigint;\n    END IF;\n    SELECT r.source_policy_id,p.source_id INTO policy_id,source_id FROM research_rawretrieval r\n      JOIN research_sourcepolicy p ON p.id=r.source_policy_id WHERE r.id=retrieval_id;\n    models := ARRAY[grp->0->>'model','research.rawretrieval','research.sourcepolicy','market.sourceregistry'];\n    ids := ARRAY[(grp->0->>'id')::bigint,retrieval_id,policy_id,source_id];\n    IF series_id IS NOT NULL THEN\n      models := models || ARRAY['research.macroseries']; ids := ids || series_id;\n      SELECT s.source_policy_id INTO series_policy FROM research_macroseries s WHERE s.id=series_id;\n      IF series_policy<>policy_id THEN\n        SELECT p.source_id INTO source_id FROM research_sourcepolicy p WHERE p.id=series_policy;\n        models := models || ARRAY['research.sourcepolicy','market.sourceregistry'];\n        ids := ids || ARRAY[series_policy,source_id];\n      END IF;\n    END IF;\n    IF jsonb_array_length(grp)<>cardinality(ids) THEN\n      RAISE EXCEPTION 'market_state_research_lineage_mismatch' USING ERRCODE='23514';\n    END IF;\n    FOR i IN 1..cardinality(ids) LOOP\n      IF grp->(i-1)->>'model' IS DISTINCT FROM models[i] OR (grp->(i-1)->>'id')::bigint IS DISTINCT FROM ids[i] THEN\n        RAISE EXCEPTION 'market_state_research_lineage_mismatch' USING ERRCODE='23514';\n      END IF;\n    END LOOP;\n  END LOOP;\n  FOR g IN SELECT value FROM jsonb_array_elements_text(NEW.output_payload->'requested_granularities')\n    UNION SELECT unnest(ARRAY['M15','D','W']) LOOP\n    lookback := CASE g WHEN 'M15' THEN 500 WHEN 'D' THEN 400 ELSE 300 END;\n    horizon := CASE g WHEN 'M15' THEN interval '15 minutes' WHEN 'H1' THEN interval '1 hour'\n      WHEN 'H4' THEN interval '4 hours' WHEN 'D' THEN interval '24 hours' ELSE interval '168 hours' END;\n    SELECT * INTO latest FROM market_candleobservation c\n      WHERE c.instrument_id=NEW.instrument_id AND c.granularity=g AND c.complete\n        AND c.observed_at<=NEW.information_cutoff AND c.interval_end<=NEW.information_cutoff\n        AND c.timestamp<NEW.information_cutoff AND c.content_sha256<>''\n        AND c.timestamp>=NEW.information_cutoff-horizon*(3*lookback+14)\n      ORDER BY c.timestamp DESC,c.revision DESC LIMIT 1;\n    SELECT value INTO claimed FROM jsonb_array_elements(NEW.input_manifest)\n      WHERE value->>'granularity'=g ORDER BY value->>'timestamp' DESC LIMIT 1;\n    IF latest.id IS NOT NULL AND (\n       (claimed->>'timestamp')::timestamptz IS DISTINCT FROM latest.timestamp\n       OR (claimed->>'revision')::int IS DISTINCT FROM latest.revision) THEN\n      RAISE EXCEPTION 'market_state_not_latest_manifest_candle' USING ERRCODE='23514';\n    END IF;\n    IF NOT (NEW.output_payload->'granularities') ? g THEN CONTINUE; END IF;\n    claimed := NEW.output_payload->'granularities'->g->'latest_eligible_candle';\n    IF latest.id IS NOT NULL AND (\n       (claimed->>'timestamp')::timestamptz IS DISTINCT FROM latest.timestamp\n       OR (claimed->>'revision')::int IS DISTINCT FROM latest.revision) THEN\n      RAISE EXCEPTION 'market_state_not_latest_eligible_candle' USING ERRCODE='23514';\n    END IF;\n  END LOOP;\n  RETURN NEW;\nEND;\n$function$\n"
+}

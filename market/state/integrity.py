@@ -126,6 +126,12 @@ def verify_snapshots(snapshots):
 
 
 def _verify_payload(snapshot, definition, flag):
+    from django.core.exceptions import ValidationError
+
+    try:
+        snapshot.instrument.clean()
+    except ValidationError:
+        flag(snapshot.pk, "instrument_currency_contradiction")
     payload = snapshot.output_payload
     if not isinstance(payload, dict):
         flag(snapshot.pk, "malformed_payload_schema")
@@ -161,6 +167,34 @@ def _verify_payload(snapshot, definition, flag):
                 flag(snapshot.pk, "unsupported_granularity", granularity)
     for code in terminology_violations(payload):
         flag(snapshot.pk, code)
+    opening = payload.get("opening_range")
+    if isinstance(opening, dict):
+        for block in opening.values():
+            if not isinstance(block, dict) or block.get("state") != "available":
+                continue
+            try:
+                available = datetime.fromisoformat(block["available_at"])
+                breakout = datetime.fromisoformat(
+                    block.get("breakout_available_at", block["available_at"])
+                )
+                times = [
+                    datetime.fromisoformat(block[field])
+                    for field in ("available_at", "breakout_available_at", "failed_at", "retest_at")
+                    if field in block
+                ]
+                if any(not timezone.is_aware(at) for at in times):
+                    raise ValueError("naive ORB availability")
+                if any(at > snapshot.information_cutoff for at in times):
+                    flag(snapshot.pk, "orb_availability_chronology")
+                if breakout < available:
+                    flag(snapshot.pk, "orb_availability_chronology")
+                for field in ("failed_at", "retest_at"):
+                    if field in block and datetime.fromisoformat(block[field]) < max(
+                        available, breakout
+                    ):
+                        flag(snapshot.pk, "orb_availability_chronology")
+            except (KeyError, ValueError, TypeError):
+                flag(snapshot.pk, "malformed_orb_chronology")
 
 
 def _verify_manifest(snapshot, flag):

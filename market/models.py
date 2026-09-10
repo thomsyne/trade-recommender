@@ -99,6 +99,15 @@ class Instrument(models.Model):
     class Meta:
         ordering = ("display_order",)
 
+    def clean(self):
+        super().clean()
+        try:
+            base, quote = self.Code(self.code).value.split("_")
+        except ValueError as error:
+            raise ValidationError("unsupported instrument code") from error
+        if (self.base_currency, self.quote_currency) != (base, quote):
+            raise ValidationError("instrument currencies contradict canonical code")
+
     def __str__(self):
         return self.get_code_display()
 

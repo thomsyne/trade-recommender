@@ -11,6 +11,7 @@ severity field, so severity is reported unavailable rather than invented. Spread
 is the observed bid/ask at the candle close — never backfilled (design §10).
 """
 
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import MappingProxyType
@@ -32,10 +33,41 @@ MACRO_LOOKBACK_DAYS = 730  # latest two published periods within two calendar ye
 MAX_RESEARCH_ROWS = 2048
 
 
+@dataclass(frozen=True)
+class FrozenResearch:
+    facts: object
+    identity: tuple
+
+    def __getattr__(self, name):
+        try:
+            return self.facts[name]
+        except KeyError as error:
+            raise AttributeError(name) from error
+
+
+def freeze_record(record):
+    if isinstance(record, FrozenResearch):
+        return record
+    facts = {f.attname: getattr(record, f.attname) for f in record._meta.concrete_fields}
+    # Only consumed scalar facts/relations cross the computation boundary.
+    facts = {k: v for k, v in facts.items() if not isinstance(v, (list, dict, memoryview, bytes))}
+    facts["pk"] = record.pk
+    for relation in ("retrieval", "series", "source_policy", "source"):
+        if getattr(record, relation + "_id", None):
+            facts[relation] = freeze_record(getattr(record, relation))
+    return FrozenResearch(MappingProxyType(facts), tuple(record_identity(record).items()))
+
+
+def pair_currencies(instrument):
+    from market.models import Instrument
+
+    return tuple(Instrument.Code(instrument.code).value.split("_"))
+
+
 def freeze_research(instrument, earliest, information_cutoff):
     """Materialize bounded vintages before price computation, including reschedules.
 
-    These private model instances have all consumed relations eagerly loaded.
+    Eagerly loaded records are converted to immutable scalar relation bundles.
     Callers receive tuple collections and never query them again. Overflow fails
     closed rather than silently classifying a truncated research history.
     """
@@ -46,6 +78,8 @@ def freeze_research(instrument, earliest, information_cutoff):
         return MappingProxyType({"events": (), "rates": ()})
     candidates = EconomicEvent.objects.filter(
         country__in=countries,
+        first_observed_at__lte=information_cutoff,
+        retrieval__fetched_at__lte=information_cutoff,
         event_at__gte=earliest - timedelta(days=EVENT_LOOKBACK_DAYS),
         event_at__lte=information_cutoff + timedelta(days=EVENT_HORIZON_DAYS),
     ).values("provider_event_key")
@@ -90,15 +124,36 @@ def freeze_research(instrument, earliest, information_cutoff):
     )
     if max(len(events), len(rates), len(series)) > MAX_RESEARCH_ROWS:
         raise ValueError("research_history_limit_exceeded")
-    return MappingProxyType({"events": events, "rates": rates})
+    return MappingProxyType(
+        {
+            "events": tuple(freeze_record(e) for e in events),
+            "rates": tuple(freeze_record(r) for r in rates),
+        }
+    )
 
 
 def record_identity(record):
     """Bind exact stored content without embedding provider bodies in a snapshot."""
     import hashlib
 
+    if isinstance(record, FrozenResearch):
+        return dict(record.identity)
+    semantic_fields = {
+        "research.sourcepolicy": {"id", "source_id", "jurisdiction", "currency"},
+        "market.sourceregistry": {"id"},
+        "research.macroseries": {
+            "id",
+            "source_policy_id",
+            "code",
+            "indicator",
+            "unit",
+            "transformation",
+        },
+    }.get(record._meta.label_lower)
     values = {}
     for field in record._meta.concrete_fields:
+        if semantic_fields is not None and field.attname not in semantic_fields:
+            continue
         value = getattr(record, field.attname)
         if isinstance(value, datetime):
             value = _iso(value)
@@ -135,10 +190,7 @@ def _unavailable(version, reason):
 
 def _pair_countries(instrument):
     try:
-        return {
-            CURRENCY_COUNTRY[instrument.base_currency],
-            CURRENCY_COUNTRY[instrument.quote_currency],
-        }
+        return {CURRENCY_COUNTRY[currency] for currency in pair_currencies(instrument)}
     except KeyError:
         return None
 
@@ -371,7 +423,7 @@ def macro_regime(instrument, information_cutoff, *, frozen=None):
     if countries is None:
         return _unavailable(MACRO_REGIME_V, "provenance_unavailable")
     per_currency = {}
-    for currency in (instrument.base_currency, instrument.quote_currency):
+    for currency in pair_currencies(instrument):
         per_currency[currency] = _policy_rate_regime(
             CURRENCY_COUNTRY[currency], information_cutoff, frozen=frozen
         )

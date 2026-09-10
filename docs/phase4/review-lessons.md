@@ -1,5 +1,34 @@
 # Phase 4 — review lessons and remaining review boundaries
 
+## Eight-finding follow-up
+
+The subsequent [independent review](https://ampcode.com/threads/T-01a08985-818d-7698-aa9c-f843744479db)
+still rejected the implementation. Descriptor 0.10.0 responds to its eight concrete
+findings; acceptance remains superseded. Design §18 and the current handoff govern
+the new behavior. The older lessons below describe the preceding correction.
+
+- Cutoff eligibility applies to discovery queries as well as final selection.
+  Test a future reschedule that changes only identity, not the displayed payload.
+- Freezing ORM collections is not freezing facts. Freeze scalar relations too;
+  separate semantic policy fields from editorial notes, and test historical replay
+  after editing the latter. Test deletion/addition of unused evidence independently
+  from a necessary predecessor or suppressor.
+- A syntactically valid content digest proves nothing about the cited row. Test
+  raw non-superuser INSERT with recomputed enclosing hashes, wrong content and
+  valid-but-unrelated lineage. Independently select the actual latest candle.
+- Lifecycle availability inherits prerequisites. Delay the opening candle beyond
+  both breakout and failure; vary retest/failure timing before, at and after it.
+  Zone dependency windows must exclude unrelated earlier observations.
+- “Last available” is not “immediately preceding registered.” Missing an exact
+  period must disclose its expected boundaries instead of returning a stale row.
+- Independent compression and expansion flags do not establish a transition.
+  Pin ordering, window, normalization and equality; preserve the completed fact's
+  source identities and times under future suffixes.
+- Keep exact-base/final failure identities and raw logs. Retain reproduction
+  evidence before fixes; distinguish engineering results from independent closure.
+
+## Earlier correction lessons (historical)
+
 Earlier acceptance claims are superseded. The latest independent review found
 thirteen open findings after earlier reviews had reported acceptance. This
 correction is an engineering response, **not an independent re-acceptance**.

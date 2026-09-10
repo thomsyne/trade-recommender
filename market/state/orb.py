@@ -51,11 +51,11 @@ def opening_range(opening_bar, session_bars, atr, spread, *, session_name, local
         result["range_spread"] = format_decimal(range_size / spread)
     else:
         result["range_spread"] = {"state": "unavailable", "reason_code": "spread_unavailable"}
-    result.update(_breakout_state(orh, orl, session_bars))
+    result.update(_breakout_state(orh, orl, session_bars, opening_bar.available_at))
     return result
 
 
-def _breakout_state(orh, orl, session_bars):
+def _breakout_state(orh, orl, session_bars, prerequisite_at=None):
     breakout = None
     breakout_bar = None
     breakout_index = None
@@ -74,7 +74,11 @@ def _breakout_state(orh, orl, session_bars):
         # breakout_at is the breakout candle's completion (formation time), not its
         # start, so the historical event fact is stamped at the right instant.
         state["breakout_at"] = _iso(breakout_bar.end or breakout_bar.timestamp)
-        state["breakout_available_at"] = _iso(breakout_bar.available_at)
+        available_at = max(
+            prerequisite_at or breakout_bar.available_at,
+            *(b.available_at for b in session_bars[: breakout_index + 1]),
+        )
+        state["breakout_available_at"] = _iso(available_at)
         state["breakout_spread"] = (
             {"state": "available", "value": format_decimal(breakout_bar.spread)}
             if breakout_bar.spread is not None and breakout_bar.spread > 0
@@ -84,16 +88,20 @@ def _breakout_state(orh, orl, session_bars):
         failed = False
         retest = False
         for bar in after:
+            available_at = max(available_at, bar.available_at)
             if (breakout == "up" and bar.close <= orh) or (breakout == "down" and bar.close >= orl):
                 failed = True
-                state["failed_at"] = _iso(bar.available_at)
+                state["failed_formed_at"] = _iso(bar.end or bar.timestamp)
+                state["failed_at"] = _iso(available_at)
                 break  # terminal for this breakout; no implicit renewed breakout
             elif breakout == "up" and bar.low <= boundary and bar.close > orh:
                 retest = True  # returned to the broken boundary but held beyond it
-                state.setdefault("retest_at", _iso(bar.available_at))
+                state.setdefault("retest_formed_at", _iso(bar.end or bar.timestamp))
+                state.setdefault("retest_at", _iso(available_at))
             elif breakout == "down" and bar.high >= boundary and bar.close < orl:
                 retest = True
-                state.setdefault("retest_at", _iso(bar.available_at))
+                state.setdefault("retest_formed_at", _iso(bar.end or bar.timestamp))
+                state.setdefault("retest_at", _iso(available_at))
         state["failed"] = failed
         state["retest"] = retest
     return state

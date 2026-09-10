@@ -47,8 +47,8 @@ class SemanticBoundaryTests(TestCase):
 
         from market.state.compute import DESCRIPTOR_DEFINITION
 
-        migration = import_module("market.migrations.0034_market_state_semantic_guards")
-        self.assertEqual(migration.DESCRIPTOR_090_SHA256, identity_digest(DESCRIPTOR_DEFINITION))
+        migration = import_module("market.migrations.0035_market_state_evidence_guards")
+        self.assertEqual(migration.DESCRIPTOR_0100_SHA256, identity_digest(DESCRIPTOR_DEFINITION))
 
     def setUp(self):
         self.instrument, _ = make_market()
@@ -172,14 +172,14 @@ class SemanticBoundaryTests(TestCase):
         from market.tests.test_live_observations import ingest
         from market.tests.test_market_state_context import event, policy
 
+        # Historical contradiction: valid at insertion, then backdated evidence
+        # appended to the disposable ledger. New SQL inserts reject the omission.
+        self.insert(self.payload)
         _, source = make_market()
         earlier = self.cutoff - timedelta(hours=2)
         with patch("market.services.timezone.now", return_value=earlier):
             ingest(source, self.instrument, [candle(earlier - timedelta(hours=1))], "omitted")
         event(policy("US", "USD"), "US", self.cutoff, earlier)
-        # The empty payload and its hashes agree with one another, but no longer
-        # agree with the eligible ledger. Raw SQL does not replay full selection.
-        self.insert(self.payload)
         codes = {
             v["code"] for v in verify_snapshots(MarketStateSnapshot.objects.all())["violations"]
         }

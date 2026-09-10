@@ -24,7 +24,7 @@ from market.state.snapshots import persist_snapshot
 from market.state.terminology import REGISTRY
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.9.0"
+DESCRIPTOR_VERSION = "0.10.0"
 
 FVG_GRANULARITIES = frozenset({"M15", "H1", "H4"})
 ORB_SESSION_WINDOW_HOURS = 12
@@ -64,7 +64,7 @@ DESCRIPTOR_DEFINITION = {
         "structure": "structure-context-v1",
         "monthly_context": "monthly-context-v1",
         "evidence_manifest": "vintage-evidence-v1",
-        "corrections": "registered-chronology-v3",
+        "corrections": "consumed-evidence-chronology-v4",
     },
     "features": [
         "eligible_candle_count",
@@ -75,6 +75,7 @@ DESCRIPTOR_DEFINITION = {
         features.ATR_V,
         features.VOLATILITY_V,
         features.VOL_REGIME_V,
+        features.COMPRESSION_EXPANSION_V,
         features.EQUILIBRIUM_V,
         features.PERSISTENCE_V,
         features.BOS_V,
@@ -131,6 +132,7 @@ DESCRIPTOR_DEFINITION = {
         for name, data in sessions.SESSIONS.items()
     },
     "context_policy": {
+        "canonical_pair": "validated-Instrument.Code/base_quote-v1",
         "currency_country": context.CURRENCY_COUNTRY,
         "event_lookback_days": context.EVENT_LOOKBACK_DAYS,
         "event_horizon_days": context.EVENT_HORIZON_DAYS,
@@ -154,7 +156,7 @@ def _midpoint(bid, ask):
 
 
 def _pip_size(instrument):
-    return Decimal("0.01") if instrument.quote_currency == "JPY" else Decimal("0.0001")
+    return Decimal("0.01") if context.pair_currencies(instrument)[1] == "JPY" else Decimal("0.0001")
 
 
 def _bars_from_observations(rows):
@@ -245,10 +247,11 @@ def _orb_block(instrument, information_cutoff, rows):
                 b.available_at for b in bars[max(0, index - features.ATR_PERIOD) : index + 1]
             )
             out[name]["available_at"] = _iso(available_at)
-            if "breakout_available_at" in out[name]:
-                out[name]["breakout_available_at"] = _iso(
-                    max(available_at, datetime.fromisoformat(out[name]["breakout_available_at"]))
-                )
+            for field in ("breakout_available_at", "retest_at", "failed_at"):
+                if field in out[name]:
+                    out[name][field] = _iso(
+                        max(available_at, datetime.fromisoformat(out[name][field]))
+                    )
     return out
 
 
@@ -277,6 +280,8 @@ def _overnight_extreme(instrument, information_cutoff, rows):
             "state": "unavailable",
             "version": structure.PRIOR_EXTREME_V,
             "reason_code": "incomplete_period",
+            "utc_start": _iso(overnight_start),
+            "utc_end": _iso(london_open),
         }
     result = structure.prior_period_extreme(_bars_from_observations(window))
     result.update(
@@ -284,18 +289,40 @@ def _overnight_extreme(instrument, information_cutoff, rows):
         utc_end=_iso(london_open),
         timezone="America/New_York",
         session_date=start_local.date().isoformat(),
+        available_at=_iso(max(max(r.observed_at, r.interval_end) for r in window)),
+        source_intervals=manifest_from_rows({"M15": window})[0],
     )
     return result
 
 
-def _prior_extreme(rows):
-    if not rows:
+def _prior_extreme(rows, information_cutoff, granularity):
+    from market.live_acquisition import canonical_live_start, complete_live_intervals
+    from market.services import live_candle_completion
+
+    opens = complete_live_intervals(
+        canonical_live_start(information_cutoff - timedelta(days=21), granularity),
+        information_cutoff,
+        granularity,
+    )
+    expected = max(opens)
+    source = {
+        "utc_start": _iso(expected),
+        "utc_end": _iso(live_candle_completion(expected, granularity)),
+    }
+    selected = [r for r in rows if r.timestamp == expected]
+    if not selected:
         return {
             "state": "unavailable",
             "version": structure.PRIOR_EXTREME_V,
-            "reason_code": "insufficient_history",
+            "reason_code": "missing_exact_prior_period",
+            **source,
         }
-    return structure.prior_period_extreme(_bars_from_observations(rows[-1:]))
+    return {
+        **structure.prior_period_extreme(_bars_from_observations(selected)),
+        **source,
+        "available_at": _iso(max(r.observed_at for r in selected)),
+        "source_intervals": manifest_from_rows({granularity: selected})[0],
+    }
 
 
 def _prior_session_extreme(information_cutoff, rows, name):
@@ -329,7 +356,12 @@ def _prior_session_extreme(information_cutoff, rows, name):
             "reason_code": "incomplete_period",
             **boundaries,
         }
-    return {**structure.prior_period_extreme(_bars_from_observations(window)), **boundaries}
+    return {
+        **structure.prior_period_extreme(_bars_from_observations(window)),
+        **boundaries,
+        "available_at": _iso(max(max(r.observed_at, r.interval_end) for r in window)),
+        "source_intervals": manifest_from_rows({"M15": window})[0],
+    }
 
 
 def _expected_daily_opens(year, month):
@@ -386,16 +418,30 @@ def _completed_months(instrument, information_cutoff, rows=None):
 
 
 def _prior_completed_month(instrument, information_cutoff, rows=None):
+    if rows is None:
+        rows = eligible_observations(
+            instrument, "D", information_cutoff, lookback=PRIOR_MONTH_LOOKBACK
+        )
     completed = _completed_months(instrument, information_cutoff, rows)
+    local = information_cutoff.astimezone(NEW_YORK)
+    previous = local.replace(day=1) - timedelta(days=1)
+    expected = f"{previous.year:04d}-{previous.month:02d}"
+    completed = [(label, bar) for label, bar in completed if label == expected]
     if not completed:
         return {
             "state": "unavailable",
             "version": structure.PRIOR_EXTREME_V,
             "reason_code": "incomplete_period",
+            "month": expected,
         }
     label, monthly = completed[-1]
     result = structure.prior_period_extreme([monthly])
     result["month"] = label
+    result["available_at"] = _iso(monthly.available_at)
+    expected_opens = _expected_daily_opens(previous.year, previous.month)
+    result["source_intervals"] = manifest_from_rows(
+        {"D": [r for r in rows if r.timestamp in expected_opens]}
+    )[0]
     return result
 
 
@@ -480,6 +526,9 @@ def build_market_state(
         research = context.freeze_research(instrument, earliest, information_cutoff)
     else:
         frozen_rows, research = frozen_inputs
+    research = MappingProxyType(
+        {key: tuple(context.freeze_record(r) for r in values) for key, values in research.items()}
+    )
     frozen_rows = MappingProxyType(
         {g: tuple(FrozenObservation.from_row(r) for r in rows) for g, rows in frozen_rows.items()}
     )
@@ -490,10 +539,6 @@ def build_market_state(
         granularity: _granularity_descriptor(instrument, granularity, frozen_rows[granularity])
         for granularity in scope
     }
-    evidence_manifest = {
-        "events": [context.research_lineage(e) for e in research["events"]],
-        "macro": {str(r.pk): context.research_lineage(r) for r in research["rates"]},
-    }
     output_payload = {
         "schema": "market-state/descriptor-v0",
         "definition": [definition.key, definition.version],
@@ -502,8 +547,8 @@ def build_market_state(
         "requested_granularities": scope,
         "granularities": per_granularity,
         "prior_extremes": {
-            "prior_day": _prior_extreme(frozen_rows["D"]),
-            "prior_week": _prior_extreme(frozen_rows["W"]),
+            "prior_day": _prior_extreme(frozen_rows["D"], information_cutoff, "D"),
+            "prior_week": _prior_extreme(frozen_rows["W"], information_cutoff, "W"),
             "prior_completed_month": _prior_completed_month(
                 instrument, information_cutoff, frozen_rows["D"]
             ),
@@ -525,6 +570,8 @@ def build_market_state(
 
     # Attach historical context only from the already frozen vintage collection.
     # No feature can requery research after the candle bundle has been computed.
+    context_cutoffs = {information_cutoff}
+
     def attach(value):
         if isinstance(value, dict):
             for child in tuple(value.values()):
@@ -532,6 +579,7 @@ def build_market_state(
             for field in ("available_at", "breakout_available_at"):
                 if field in value:
                     at = datetime.fromisoformat(value[field])
+                    context_cutoffs.add(at)
                     value[field + "_context"] = {
                         "event_state": context.event_state(instrument, at, frozen=research),
                         "macro_regime": context.macro_regime(instrument, at, frozen=research),
@@ -546,6 +594,57 @@ def build_market_state(
             attach(block["fvg"])
         if "liquidity" in block:
             attach(block["liquidity"])
+    consumed_rates = set()
+
+    def collect(value):
+        if isinstance(value, dict):
+            if value.get("model") == "research.macroobservation":
+                consumed_rates.add(value["id"])
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(output_payload)
+    consumed_events = set()
+    for at in context_cutoffs:
+        eligible = [
+            e for e in research["events"] if max(e.first_observed_at, e.retrieval.fetched_at) <= at
+        ]
+        candidates = {
+            e.provider_event_key
+            for e in eligible
+            if at - timedelta(days=context.EVENT_LOOKBACK_DAYS)
+            <= e.event_at
+            <= at + timedelta(days=context.EVENT_HORIZON_DAYS)
+        }
+        for key in candidates:
+            vintages = [e for e in eligible if e.provider_event_key == key]
+            latest = max(vintages, key=lambda e: (e.first_observed_at, e.payload_fingerprint))
+            consumed_events.add(latest.pk)
+            # An in-window witness is necessary to explain an out-of-window suppressor.
+            witness = max(
+                (
+                    e
+                    for e in vintages
+                    if at - timedelta(days=context.EVENT_LOOKBACK_DAYS)
+                    <= e.event_at
+                    <= at + timedelta(days=context.EVENT_HORIZON_DAYS)
+                ),
+                key=lambda e: (e.first_observed_at, e.payload_fingerprint),
+            )
+            consumed_events.add(witness.pk)
+    evidence_manifest = {
+        "events": [
+            context.research_lineage(e) for e in research["events"] if e.pk in consumed_events
+        ],
+        "macro": {
+            str(r.pk): context.research_lineage(r)
+            for r in research["rates"]
+            if r.pk in consumed_rates
+        },
+    }
     from market.state import terminology
 
     bad_terms = terminology.terminology_violations(output_payload)
