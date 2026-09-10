@@ -16,11 +16,39 @@ only these candles, which is what makes a snapshot causal and reproducible:
 """
 
 from datetime import UTC
+from typing import NamedTuple
 
 from django.utils import timezone
 
 from market.models import CandleObservation
+from market.quality import REGISTERED_STEPS
 from market.state.canonical import identity_digest
+
+SEARCH_INTERVAL_MULTIPLIER = 3
+SEARCH_PADDING_INTERVALS = 14
+
+
+class FrozenObservation(NamedTuple):
+    """Scalar evidence only: no lazy ORM relationships or mutable model state."""
+
+    granularity: str
+    timestamp: object
+    interval_end: object
+    observed_at: object
+    revision: int
+    content_sha256: str
+    bid_open: object
+    bid_high: object
+    bid_low: object
+    bid_close: object
+    ask_open: object
+    ask_high: object
+    ask_low: object
+    ask_close: object
+
+    @classmethod
+    def from_row(cls, row):
+        return cls(*(getattr(row, field) for field in cls._fields))
 
 
 def _iso(value):
@@ -38,10 +66,20 @@ def eligible_observations(instrument, granularity, information_cutoff, *, lookba
     eligible = CandleObservation.objects.filter(
         instrument=instrument,
         granularity=granularity,
+        timestamp__lt=information_cutoff,
         complete=True,
         interval_end__lte=information_cutoff,
         observed_at__lte=information_cutoff,
     ).exclude(content_sha256="")
+    if lookback is not None:
+        # A finite elapsed-time search horizon is distinct from a row LIMIT.
+        # Three nominal intervals per wanted bar accommodates FX weekends/DST;
+        # absent older data remains unavailable rather than scanning all history.
+        eligible = eligible.filter(
+            timestamp__gte=information_cutoff
+            - REGISTERED_STEPS[granularity]
+            * (SEARCH_INTERVAL_MULTIPLIER * lookback + SEARCH_PADDING_INTERVALS)
+        )
     # DISTINCT ON (timestamp) over eligible revisions ordered by (timestamp desc,
     # revision desc) yields exactly one row per candle — its highest *eligible*
     # revision — newest first. A ``lookback`` then LIMITs the distinct candles in
@@ -62,11 +100,20 @@ def build_input_manifest(instrument, granularities, information_cutoff, *, lookb
     ``{granularity, timestamp, revision, content_sha256}`` entries.
     """
     lookbacks = lookbacks or {}
-    entries = []
-    for granularity in sorted(granularities):
-        for row in eligible_observations(
+    rows = {
+        granularity: eligible_observations(
             instrument, granularity, information_cutoff, lookback=lookbacks.get(granularity)
-        ):
+        )
+        for granularity in sorted(granularities)
+    }
+    return manifest_from_rows(rows)
+
+
+def manifest_from_rows(rows):
+    """Serialize already selected evidence; never perform a second database read."""
+    entries = []
+    for granularity in sorted(rows):
+        for row in rows[granularity]:
             entries.append(
                 {
                     "granularity": granularity,

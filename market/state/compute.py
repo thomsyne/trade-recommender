@@ -10,31 +10,48 @@ here selects a trade — these are descriptive facts (docs/phase4/design.md §7.
 """
 
 from collections import defaultdict
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import MappingProxyType
 
 from market.quality import NEW_YORK
 from market.state import context, features, fvg, liquidity, orb, sessions, structure
+from market.state import manifest as input_policy
 from market.state.canonical import format_decimal
 from market.state.definitions import register_definition
-from market.state.manifest import _iso, build_input_manifest, eligible_observations
+from market.state.manifest import FrozenObservation, _iso, eligible_observations, manifest_from_rows
 from market.state.snapshots import persist_snapshot
+from market.state.terminology import REGISTRY
 
 DESCRIPTOR_KEY = "market-state-descriptor"
-DESCRIPTOR_VERSION = "0.8.0"
+DESCRIPTOR_VERSION = "0.9.0"
 
 FVG_GRANULARITIES = frozenset({"M15", "H1", "H4"})
 ORB_SESSION_WINDOW_HOURS = 12
+PRIOR_SESSION_HOURS = 8
 
 #: Explicit bounded lookback (candles) per granularity. Every eligible-candle
 #: fetch and the input manifest use these, so a snapshot never scans or embeds
 #: unbounded history (design §14). The windows comfortably cover the deepest
 #: feature (volatility percentile: ~14 + 100 prior ATRs ≈ 214 bars).
 LOOKBACKS = {"M15": 500, "H1": 300, "H4": 300, "D": 400, "W": 300}
-#: Daily candles retained for the prior-completed-month aggregation (~3 months).
-PRIOR_MONTH_LOOKBACK = 70
+#: Bounded daily history permits approximately eighteen complete calendar months.
+PRIOR_MONTH_LOOKBACK = 400
 #: Most recent candle(s) needed for a prior-period extreme.
 PRIOR_EXTREME_LOOKBACK = 2
+
+
+def _runtime_parameters():
+    """Every scalar algorithm constant is part of this single supported contract."""
+    return {
+        module.__name__: {
+            key: str(value) if isinstance(value, Decimal) else value
+            for key, value in vars(module).items()
+            if key.isupper() and isinstance(value, (str, int, Decimal))
+        }
+        for module in (features, structure, liquidity, fvg, orb, sessions, context, input_policy)
+    }
+
 
 #: The canonical body of the descriptor definition. Observable facts only; the
 #: feature list and thresholds are pinned so a snapshot binds the exact
@@ -47,6 +64,7 @@ DESCRIPTOR_DEFINITION = {
         "structure": "structure-context-v1",
         "monthly_context": "monthly-context-v1",
         "evidence_manifest": "vintage-evidence-v1",
+        "corrections": "registered-chronology-v3",
     },
     "features": [
         "eligible_candle_count",
@@ -75,6 +93,7 @@ DESCRIPTOR_DEFINITION = {
         context.EVENT_STATE_V,
         context.MACRO_REGIME_V,
     ],
+    "runtime_parameters": _runtime_parameters(),
     "price_basis": "midpoint",
     "rounding": {"quantum": "0.000001", "mode": "ROUND_HALF_EVEN"},
     "calendar_policy": "ny-fx-week-v1",
@@ -99,6 +118,28 @@ DESCRIPTOR_DEFINITION = {
         "reclaim_window": liquidity.RECLAIM_WINDOW,
         "fvg_displacement_atr": str(fvg.FVG_DISPLACEMENT_ATR),
         "orb_minutes": sessions.ORB_MINUTES,
+        "zone_expiry_intervals": structure.ZONE_EXPIRY_INTERVALS,
+        "fvg_expiry_bars": fvg.FVG_EXPIRY_BARS,
+        "fvg_min_raw": str(fvg.FVG_MIN_RAW),
+        "fvg_min_atr": str(fvg.FVG_MIN_ATR),
+        "fvg_min_pips": str(fvg.FVG_MIN_PIPS),
+        "fvg_min_spread": str(fvg.FVG_MIN_SPREAD),
+    },
+    "terminology": REGISTRY,
+    "session_policy": {
+        name: {"timezone": data["timezone"], "open": data["open"].isoformat()}
+        for name, data in sessions.SESSIONS.items()
+    },
+    "context_policy": {
+        "currency_country": context.CURRENCY_COUNTRY,
+        "event_lookback_days": context.EVENT_LOOKBACK_DAYS,
+        "event_horizon_days": context.EVENT_HORIZON_DAYS,
+        "orb_window_hours": ORB_SESSION_WINDOW_HOURS,
+        "prior_session_hours": PRIOR_SESSION_HOURS,
+        "monthly_daily_lookback": PRIOR_MONTH_LOOKBACK,
+        "pip_size": {"JPY": "0.01", "default": "0.0001"},
+        "macro": "policy-rate/latest-two-periods/raw-percent/difference-sign/code-order-v1",
+        "missing_side": "explicit-unavailable-not-neutral",
     },
 }
 
@@ -126,15 +167,16 @@ def _bars_from_observations(rows):
             close=_midpoint(row.bid_close, row.ask_close),
             end=row.interval_end,
             spread=row.ask_close - row.bid_close,
+            granularity=row.granularity,
+            observed_at=row.observed_at,
+            revision=row.revision,
+            content_sha256=row.content_sha256,
         )
         for row in rows
     ]
 
 
-def _granularity_descriptor(instrument, granularity, information_cutoff):
-    rows = eligible_observations(
-        instrument, granularity, information_cutoff, lookback=LOOKBACKS.get(granularity)
-    )
+def _granularity_descriptor(instrument, granularity, rows):
     if not rows:
         return {"state": "unavailable", "reason_code": "insufficient_history"}
     latest = rows[-1]
@@ -162,8 +204,7 @@ def _granularity_descriptor(instrument, granularity, information_cutoff):
     }
 
 
-def _orb_block(instrument, information_cutoff):
-    rows = eligible_observations(instrument, "M15", information_cutoff, lookback=LOOKBACKS["M15"])
+def _orb_block(instrument, information_cutoff, rows):
     out = {}
     if not rows:
         for name in sessions.SESSIONS:
@@ -184,7 +225,7 @@ def _orb_block(instrument, information_cutoff):
         opening_bar = bar_by_ts[utc_open]
         window_end = utc_open + timedelta(hours=ORB_SESSION_WINDOW_HOURS)
         session_bars = [
-            bar_by_ts[row.timestamp] for row in rows if utc_open < row.timestamp <= window_end
+            bar_by_ts[row.timestamp] for row in rows if utc_open < row.timestamp < window_end
         ]
         # ATR contemporaneous with the opening interval, spread from the opening
         # candle itself — the ORB facts must not be requalified by later bars.
@@ -198,10 +239,20 @@ def _orb_block(instrument, information_cutoff):
             local_open=local_open,
             tzinfo=tz,
         )
+        if out[name]["state"] == "available":
+            index = index_by_ts[utc_open]
+            available_at = max(
+                b.available_at for b in bars[max(0, index - features.ATR_PERIOD) : index + 1]
+            )
+            out[name]["available_at"] = _iso(available_at)
+            if "breakout_available_at" in out[name]:
+                out[name]["breakout_available_at"] = _iso(
+                    max(available_at, datetime.fromisoformat(out[name]["breakout_available_at"]))
+                )
     return out
 
 
-def _overnight_extreme(instrument, information_cutoff):
+def _overnight_extreme(instrument, information_cutoff, rows):
     """High/low of the most recent completed overnight window: the previous New
     York 17:00 session open through the London 08:00 open (design §7.4)."""
     found = sessions.most_recent_completed_orb_open(information_cutoff, "london")
@@ -217,21 +268,27 @@ def _overnight_extreme(instrument, information_cutoff):
     if start_local >= ny:
         start_local -= timedelta(days=1)
     overnight_start = start_local.astimezone(UTC)
-    rows = eligible_observations(instrument, "M15", information_cutoff, lookback=LOOKBACKS["M15"])
     window = [r for r in rows if overnight_start <= r.timestamp < london_open]
-    if not window:
+    from market.live_acquisition import complete_live_intervals
+
+    expected = complete_live_intervals(overnight_start, london_open, "M15")
+    if not expected or {r.timestamp for r in window} != set(expected):
         return {
             "state": "unavailable",
             "version": structure.PRIOR_EXTREME_V,
-            "reason_code": "insufficient_history",
+            "reason_code": "incomplete_period",
         }
-    return structure.prior_period_extreme(_bars_from_observations(window))
-
-
-def _prior_extreme(instrument, granularity, information_cutoff):
-    rows = eligible_observations(
-        instrument, granularity, information_cutoff, lookback=PRIOR_EXTREME_LOOKBACK
+    result = structure.prior_period_extreme(_bars_from_observations(window))
+    result.update(
+        utc_start=_iso(overnight_start),
+        utc_end=_iso(london_open),
+        timezone="America/New_York",
+        session_date=start_local.date().isoformat(),
     )
+    return result
+
+
+def _prior_extreme(rows):
     if not rows:
         return {
             "state": "unavailable",
@@ -239,6 +296,40 @@ def _prior_extreme(instrument, granularity, information_cutoff):
             "reason_code": "insufficient_history",
         }
     return structure.prior_period_extreme(_bars_from_observations(rows[-1:]))
+
+
+def _prior_session_extreme(information_cutoff, rows, name):
+    from market.live_acquisition import complete_live_intervals
+
+    found = sessions.most_recent_completed_orb_open(
+        information_cutoff - timedelta(hours=PRIOR_SESSION_HOURS, minutes=-sessions.ORB_MINUTES),
+        name,
+    )
+    if found is None:
+        return {
+            "state": "unavailable",
+            "version": structure.PRIOR_EXTREME_V,
+            "reason_code": "session_market_closed",
+        }
+    start, local, tz = found
+    end = start + timedelta(hours=PRIOR_SESSION_HOURS)
+    window = [r for r in rows if start <= r.timestamp < end]
+    expected = complete_live_intervals(start, end, "M15")
+    boundaries = {
+        "utc_start": _iso(start),
+        "utc_end": _iso(end),
+        "timezone": str(tz),
+        "session_date": local.date().isoformat(),
+        "local_start": local.isoformat(),
+    }
+    if not expected or {r.timestamp for r in window} != set(expected):
+        return {
+            "state": "unavailable",
+            "version": structure.PRIOR_EXTREME_V,
+            "reason_code": "incomplete_period",
+            **boundaries,
+        }
+    return {**structure.prior_period_extreme(_bars_from_observations(window)), **boundaries}
 
 
 def _expected_daily_opens(year, month):
@@ -258,11 +349,14 @@ def _expected_daily_opens(year, month):
     return opens
 
 
-def _completed_months(instrument, information_cutoff):
+def _completed_months(instrument, information_cutoff, rows=None):
     """Ordered ``[(‘YYYY-MM’, monthly_Bar)]`` for every fully-past NY month whose
     registered daily sessions are all present. A partial current month, or a past
     month missing any registered daily session, is excluded (never completed)."""
-    rows = eligible_observations(instrument, "D", information_cutoff, lookback=PRIOR_MONTH_LOOKBACK)
+    if rows is None:
+        rows = eligible_observations(
+            instrument, "D", information_cutoff, lookback=PRIOR_MONTH_LOOKBACK
+        )
     if not rows:
         return []
     cutoff_local = information_cutoff.astimezone(NEW_YORK)
@@ -283,13 +377,16 @@ def _completed_months(instrument, information_cutoff):
             high=max(b.high for b in ordered),
             low=min(b.low for b in ordered),
             close=ordered[-1].close,
+            end=ordered[-1].end,
+            observed_at=max(b.available_at for b in ordered),
+            granularity="M",
         )
         completed.append((f"{key[0]:04d}-{key[1]:02d}", monthly))
     return completed
 
 
-def _prior_completed_month(instrument, information_cutoff):
-    completed = _completed_months(instrument, information_cutoff)
+def _prior_completed_month(instrument, information_cutoff, rows=None):
+    completed = _completed_months(instrument, information_cutoff, rows)
     if not completed:
         return {
             "state": "unavailable",
@@ -302,9 +399,9 @@ def _prior_completed_month(instrument, information_cutoff):
     return result
 
 
-def _monthly_context(instrument, information_cutoff):
+def _monthly_context(instrument, information_cutoff, rows=None):
     """Monthly trend over completed NY-session months (aggregated daily candles)."""
-    completed = _completed_months(instrument, information_cutoff)
+    completed = _completed_months(instrument, information_cutoff, rows)
     if not completed:
         return {
             "state": "unavailable",
@@ -332,14 +429,26 @@ def _require_governing_definition(definition):
     from market.state.canonical import identity_digest
     from market.state.definitions import DefinitionError
 
-    if identity_digest(definition.definition) != identity_digest(DESCRIPTOR_DEFINITION):
+    digest = identity_digest(definition.definition)
+    if (
+        (definition.key, definition.version) != (DESCRIPTOR_KEY, DESCRIPTOR_VERSION)
+        or definition.definition_sha256 != digest
+        or digest != identity_digest(DESCRIPTOR_DEFINITION)
+        or definition.definition.get("runtime_parameters") != _runtime_parameters()
+        or definition.definition["lookbacks"] != LOOKBACKS
+        or definition.definition["context_policy"]["monthly_daily_lookback"] != PRIOR_MONTH_LOOKBACK
+        or definition.definition["context_policy"]["orb_window_hours"] != ORB_SESSION_WINDOW_HOURS
+        or definition.definition["context_policy"]["prior_session_hours"] != PRIOR_SESSION_HOURS
+    ):
         raise DefinitionError(
             f"definition {definition.key}@{definition.version} does not match the "
             "descriptor contract this implementation computes"
         )
 
 
-def build_market_state(instrument, definition, information_cutoff, granularities):
+def build_market_state(
+    instrument, definition, information_cutoff, granularities, *, frozen_inputs=None
+):
     """Build the canonical payload, input manifest and evidence manifest without
     persisting. Returns ``(payload, scope, manifest, manifest_sha256,
     evidence_manifest, evidence_sha256, data_quality_status)``."""
@@ -347,17 +456,44 @@ def build_market_state(instrument, definition, information_cutoff, granularities
 
     _require_governing_definition(definition)
     scope = sorted(set(granularities))
+    if not scope or not set(scope) <= set(LOOKBACKS):
+        raise ValueError("unsupported_granularity")
     consumed = sorted(set(scope) | AUXILIARY_GRANULARITIES)
-    manifest, manifest_sha256 = build_input_manifest(
-        instrument, consumed, information_cutoff, lookbacks=LOOKBACKS
+    # Materialize once; manifests and every price feature share these exact rows.
+    if frozen_inputs is None:
+        frozen_rows = {
+            g: tuple(
+                FrozenObservation.from_row(row)
+                for row in eligible_observations(
+                    instrument,
+                    g,
+                    information_cutoff,
+                    lookback=definition.definition["lookbacks"][g],
+                )
+            )
+            for g in consumed
+        }
+        earliest = min(
+            (r.observed_at for g in scope + ["M15"] for r in frozen_rows[g]),
+            default=information_cutoff,
+        )
+        research = context.freeze_research(instrument, earliest, information_cutoff)
+    else:
+        frozen_rows, research = frozen_inputs
+    frozen_rows = MappingProxyType(
+        {g: tuple(FrozenObservation.from_row(r) for r in rows) for g, rows in frozen_rows.items()}
     )
+    manifest, manifest_sha256 = manifest_from_rows(frozen_rows)
+    event_block = context.event_state(instrument, information_cutoff, frozen=research)
+    macro_block = context.macro_regime(instrument, information_cutoff, frozen=research)
     per_granularity = {
-        granularity: _granularity_descriptor(instrument, granularity, information_cutoff)
+        granularity: _granularity_descriptor(instrument, granularity, frozen_rows[granularity])
         for granularity in scope
     }
-    event_block = context.event_state(instrument, information_cutoff)
-    macro_block = context.macro_regime(instrument, information_cutoff)
-    evidence_manifest = context.evidence_manifest(event_block, macro_block)
+    evidence_manifest = {
+        "events": [context.research_lineage(e) for e in research["events"]],
+        "macro": {str(r.pk): context.research_lineage(r) for r in research["rates"]},
+    }
     output_payload = {
         "schema": "market-state/descriptor-v0",
         "definition": [definition.key, definition.version],
@@ -366,16 +502,50 @@ def build_market_state(instrument, definition, information_cutoff, granularities
         "requested_granularities": scope,
         "granularities": per_granularity,
         "prior_extremes": {
-            "prior_day": _prior_extreme(instrument, "D", information_cutoff),
-            "prior_week": _prior_extreme(instrument, "W", information_cutoff),
-            "prior_completed_month": _prior_completed_month(instrument, information_cutoff),
-            "overnight_session": _overnight_extreme(instrument, information_cutoff),
+            "prior_day": _prior_extreme(frozen_rows["D"]),
+            "prior_week": _prior_extreme(frozen_rows["W"]),
+            "prior_completed_month": _prior_completed_month(
+                instrument, information_cutoff, frozen_rows["D"]
+            ),
+            "overnight_session": _overnight_extreme(
+                instrument, information_cutoff, frozen_rows["M15"]
+            ),
+            "prior_london_session": _prior_session_extreme(
+                information_cutoff, frozen_rows["M15"], "london"
+            ),
+            "prior_new_york_session": _prior_session_extreme(
+                information_cutoff, frozen_rows["M15"], "new_york"
+            ),
         },
-        "monthly_context": _monthly_context(instrument, information_cutoff),
-        "opening_range": _orb_block(instrument, information_cutoff),
+        "monthly_context": _monthly_context(instrument, information_cutoff, frozen_rows["D"]),
+        "opening_range": _orb_block(instrument, information_cutoff, frozen_rows["M15"]),
         "event_state": event_block,
         "macro_regime": macro_block,
     }
+
+    # Attach historical context only from the already frozen vintage collection.
+    # No feature can requery research after the candle bundle has been computed.
+    def attach(value):
+        if isinstance(value, dict):
+            for child in tuple(value.values()):
+                attach(child)
+            for field in ("available_at", "breakout_available_at"):
+                if field in value:
+                    at = datetime.fromisoformat(value[field])
+                    value[field + "_context"] = {
+                        "event_state": context.event_state(instrument, at, frozen=research),
+                        "macro_regime": context.macro_regime(instrument, at, frozen=research),
+                    }
+        elif isinstance(value, list):
+            for child in value:
+                attach(child)
+
+    attach(output_payload["opening_range"])
+    for block in per_granularity.values():
+        if "fvg" in block:
+            attach(block["fvg"])
+        if "liquidity" in block:
+            attach(block["liquidity"])
     from market.state import terminology
 
     bad_terms = terminology.terminology_violations(output_payload)

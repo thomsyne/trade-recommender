@@ -6,7 +6,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from django.core.management import call_command
-from django.db import connection
+from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
 
 from market.models import MarketStateDefinition, MarketStateSnapshot
@@ -119,7 +119,7 @@ class IntegrityAndTaskTests(TestCase):
                 "content_sha256": "deadbeef",  # no such observation
             }
         ]
-        with connection.cursor() as cursor:
+        with self.assertRaises(IntegrityError), transaction.atomic(), connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO market_marketstatesnapshot "
                 "(instrument_id, definition_id, information_cutoff, created_at, input_manifest, "
@@ -139,7 +139,25 @@ class IntegrityAndTaskTests(TestCase):
                     "1" * 64,
                 ],
             )
-        report = verify_snapshots(MarketStateSnapshot.objects.all())
+        # Historical contradictions remain inspectable without bypassing the new
+        # prospective guard or weakening the original diagnostic assertions.
+        report = verify_snapshots(
+            [
+                MarketStateSnapshot(
+                    pk=1,
+                    instrument=self.instrument,
+                    definition=definition,
+                    information_cutoff=MON_0800,
+                    input_manifest=manifest,
+                    input_manifest_sha256="0" * 64,
+                    evidence_manifest={},
+                    output_payload={"definition": ["wrong", "9.9.9"]},
+                    output_sha256="0" * 64,
+                    data_quality_status="complete",
+                    idempotency_key="1" * 64,
+                )
+            ]
+        )
         codes = {v["code"] for v in report["violations"]}
         self.assertIn("output_hash_mismatch", codes)
         self.assertIn("input_manifest_hash_mismatch", codes)
@@ -154,7 +172,7 @@ class IntegrityAndTaskTests(TestCase):
         call_command("market_state_integrity", stdout=StringIO())  # clean -> exit 0
         # Forge a row, then the CLI must exit nonzero.
         definition = ensure_descriptor_definition()
-        with connection.cursor() as cursor:
+        with self.assertRaises(IntegrityError), transaction.atomic(), connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO market_marketstatesnapshot "
                 "(instrument_id, definition_id, information_cutoff, created_at, input_manifest, "
@@ -174,8 +192,22 @@ class IntegrityAndTaskTests(TestCase):
                     "2" * 64,
                 ],
             )
-        with self.assertRaises(SystemExit):
-            call_command("market_state_integrity", stdout=StringIO())
+        historical = MarketStateSnapshot(
+            pk=1,
+            instrument=self.instrument,
+            definition=definition,
+            information_cutoff=MON_0800,
+            input_manifest=[],
+            input_manifest_sha256="0" * 64,
+            evidence_manifest={},
+            output_payload={},
+            output_sha256="0" * 64,
+            data_quality_status="complete",
+            idempotency_key="2" * 64,
+        )
+        with patch.object(MarketStateSnapshot.objects, "all", return_value=[historical]):
+            with self.assertRaises(SystemExit):
+                call_command("market_state_integrity", stdout=StringIO())
 
 
 class DryRunCliTests(TestCase):

@@ -3,6 +3,7 @@
 from datetime import UTC
 
 from django.db import connection, transaction
+from django.utils import timezone
 
 from market.models import MarketStateSnapshot
 from market.state.canonical import identity_digest
@@ -61,6 +62,12 @@ def persist_snapshot(
     exists but its output hash differs, that is a determinism violation and
     fails closed rather than forking the record.
     """
+    if not timezone.is_aware(information_cutoff):
+        raise ValueError("naive_information_cutoff")
+    if input_manifest_sha256 != identity_digest(
+        input_manifest
+    ) or evidence_sha256 != identity_digest(evidence_manifest):
+        raise ValueError("input_identity_mismatch")
     key = snapshot_idempotency_key(
         definition.definition_sha256,
         instrument.code,
@@ -81,7 +88,7 @@ def persist_snapshot(
                 f"snapshot {key} already exists with a different canonical output"
             )
         return existing, False
-    snapshot = MarketStateSnapshot.objects.create(
+    snapshot = MarketStateSnapshot(
         instrument=instrument,
         definition=definition,
         information_cutoff=information_cutoff,
@@ -93,4 +100,9 @@ def persist_snapshot(
         data_quality_status=data_quality_status,
         idempotency_key=key,
     )
+    from market.state.integrity import verify_snapshots
+
+    if verify_snapshots([snapshot])["violation_count"]:
+        raise ValueError("invalid_snapshot_semantics")
+    snapshot.save()
     return snapshot, True

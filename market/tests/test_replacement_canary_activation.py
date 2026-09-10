@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.db import DatabaseError, close_old_connections, connection, transaction
-from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
 from market.historical_acquisition import INSTRUMENTS
@@ -47,6 +46,7 @@ from market.models import (
 )
 from market.oanda import OandaError
 from market.services import DatasetQualityError
+from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 
 CANARY_START = datetime(2009, 12, 31, 15, tzinfo=UTC)
 MIGRATION_0015 = [("market", "0015_provider_observed_canary_activation")]

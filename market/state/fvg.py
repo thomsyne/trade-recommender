@@ -16,11 +16,22 @@ the candle-3 spread when available, else is reported unavailable (design §7.4).
 from decimal import Decimal
 
 from market.state.canonical import format_decimal
-from market.state.features import atr_at_index, bars_are_consecutive, confirmed_swings
+from market.state.features import (
+    ATR_PERIOD,
+    SWING_RIGHT,
+    atr_at_index,
+    bars_are_consecutive,
+    confirmed_swings,
+    contiguous,
+)
 
 FVG_V = "fvg-v1"
 FVG_DISPLACEMENT_ATR = Decimal("1.0")  # g: middle-candle body threshold
 FVG_EXPIRY_BARS = 50  # candles after creation within which a fill avoids expiry
+FVG_MIN_RAW = Decimal("0.000001")
+FVG_MIN_ATR = Decimal("0.1")
+FVG_MIN_PIPS = Decimal("1")
+FVG_MIN_SPREAD = Decimal("1")
 
 
 def _iso(value):
@@ -43,6 +54,7 @@ def find_fvgs(bars, pip_size, *, atr_override=None, displacement=FVG_DISPLACEMEN
     if len(bars) < 3:
         return _unavailable("insufficient_history")
     gaps = []
+    unavailable = None
     for i in range(len(bars) - 2):
         c1, c2, c3 = bars[i], bars[i + 1], bars[i + 2]
         if not (bars_are_consecutive(c1, c2) and bars_are_consecutive(c2, c3)):
@@ -57,24 +69,50 @@ def find_fvgs(bars, pip_size, *, atr_override=None, displacement=FVG_DISPLACEMEN
             continue  # equality or overlap = no gap
         atr = atr_override if atr_override is not None else atr_at_index(bars, i + 2)
         if atr is None or atr == 0:
+            unavailable = "atr_unavailable"
             continue  # no contemporaneous ATR to qualify displacement against
         body = abs(c2.close - c2.open)
         if not displaced or body < displacement * atr:
             continue
         raw_gap = gap_high - gap_low
+        if (
+            raw_gap < FVG_MIN_RAW
+            or raw_gap / atr < FVG_MIN_ATR
+            or raw_gap / pip_size < FVG_MIN_PIPS
+        ):
+            continue
+        spread = c3.spread
+        qualification = {"state": "available"}
+        if spread is None or spread <= 0:
+            unavailable = "spread_unavailable"
+            qualification = {"state": "unavailable", "reason_code": unavailable}
+        elif raw_gap / spread < FVG_MIN_SPREAD:
+            continue
         following = bars[i + 3 :]
+        lifecycle = (
+            {"lifecycle": {"state": "unavailable", "reason_code": "missing_registered_interval"}}
+            if following and not bars_are_consecutive(c3, following[0])
+            else _fill_state(direction, gap_low, gap_high, raw_gap, following)
+        )
         gap = {
             "direction": direction,
+            "formation_start": _iso(c1.timestamp),
             "created_at": _iso(c3.end or c3.timestamp),
+            "available_at": _iso(
+                max(b.available_at for b in bars[max(0, i + 2 - ATR_PERIOD) : i + 3])
+            ),
+            "qualification": qualification,
             "gap_low": format_decimal(gap_low),
             "gap_high": format_decimal(gap_high),
             "raw_gap": format_decimal(raw_gap),
             "gap_atr": format_decimal(raw_gap / atr),
             "gap_pips": format_decimal(raw_gap / pip_size, Decimal("0.1")),
             "spread_normalized": _spread_normalized(raw_gap, c3.spread),
-            **_fill_state(direction, gap_low, gap_high, raw_gap, following),
+            **lifecycle,
         }
         gaps.append(gap)
+    if unavailable:
+        return {**_unavailable(unavailable), "fvgs": gaps}
     return {"state": "available", "version": FVG_V, "fvgs": gaps}
 
 
@@ -102,6 +140,8 @@ def _fill_state(direction, gap_low, gap_high, raw_gap, following):
             "invalidated": False,
             "expired": False,
         }
+    if not contiguous(following):
+        return {"lifecycle": {"state": "unavailable", "reason_code": "missing_registered_interval"}}
     if direction == "bullish":
         deepest = min(bar.low for bar in following)
         penetrated = gap_high - max(min(deepest, gap_high), gap_low)
@@ -129,13 +169,15 @@ def _internal_swing_break(direction, following):
     if direction == "bullish":
         for swing in (s for s in swings if s.kind == "low"):
             if any(
-                following[j].close < swing.price for j in range(swing.index + 1, len(following))
+                following[j].close < swing.price
+                for j in range(swing.index + SWING_RIGHT + 1, len(following))
             ):
                 return True
     else:
         for swing in (s for s in swings if s.kind == "high"):
             if any(
-                following[j].close > swing.price for j in range(swing.index + 1, len(following))
+                following[j].close > swing.price
+                for j in range(swing.index + SWING_RIGHT + 1, len(following))
             ):
                 return True
     return False

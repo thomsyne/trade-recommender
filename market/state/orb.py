@@ -9,6 +9,7 @@ state. No output selects a trade.
 """
 
 from market.state.canonical import format_decimal
+from market.state.features import contiguous
 
 ORB_V = "orb-v1"
 
@@ -22,6 +23,8 @@ def _iso(value):
 def opening_range(opening_bar, session_bars, atr, spread, *, session_name, local_open, tzinfo):
     """Build the ORB feature. ``opening_bar`` is the completed first M15 candle;
     ``session_bars`` are the later completed M15 candles of the same session."""
+    if not contiguous([opening_bar, *session_bars]):
+        return orb_unavailable("missing_registered_interval", session_name=session_name)
     orh, orl = opening_bar.high, opening_bar.low
     range_size = orh - orl
     result = {
@@ -32,6 +35,10 @@ def opening_range(opening_bar, session_bars, atr, spread, *, session_name, local
         "timezone": str(tzinfo),
         "dst_offset": local_open.strftime("%z") or "+0000",
         "opening_candle": _iso(opening_bar.timestamp),
+        "formed_at": _iso(opening_bar.end or opening_bar.timestamp),
+        "available_at": _iso(opening_bar.available_at),
+        "utc_start": _iso(opening_bar.timestamp),
+        "utc_end": _iso(opening_bar.end or opening_bar.timestamp),
         "orh": format_decimal(orh),
         "orl": format_decimal(orl),
         "range_size": format_decimal(range_size),
@@ -67,16 +74,26 @@ def _breakout_state(orh, orl, session_bars):
         # breakout_at is the breakout candle's completion (formation time), not its
         # start, so the historical event fact is stamped at the right instant.
         state["breakout_at"] = _iso(breakout_bar.end or breakout_bar.timestamp)
+        state["breakout_available_at"] = _iso(breakout_bar.available_at)
+        state["breakout_spread"] = (
+            {"state": "available", "value": format_decimal(breakout_bar.spread)}
+            if breakout_bar.spread is not None and breakout_bar.spread > 0
+            else {"state": "unavailable", "reason_code": "spread_unavailable"}
+        )
         after = session_bars[breakout_index + 1 :]
         failed = False
         retest = False
         for bar in after:
-            if orl <= bar.close <= orh:
-                failed = True  # closed back inside the range
+            if (breakout == "up" and bar.close <= orh) or (breakout == "down" and bar.close >= orl):
+                failed = True
+                state["failed_at"] = _iso(bar.available_at)
+                break  # terminal for this breakout; no implicit renewed breakout
             elif breakout == "up" and bar.low <= boundary and bar.close > orh:
                 retest = True  # returned to the broken boundary but held beyond it
+                state.setdefault("retest_at", _iso(bar.available_at))
             elif breakout == "down" and bar.high >= boundary and bar.close < orl:
                 retest = True
+                state.setdefault("retest_at", _iso(bar.available_at))
         state["failed"] = failed
         state["retest"] = retest
     return state

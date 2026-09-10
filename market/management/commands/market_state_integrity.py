@@ -18,9 +18,12 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--instrument", default=None)
+        parser.add_argument("--after-id", type=int, default=0)
 
     def handle(self, *args, **options):
         snapshots = MarketStateSnapshot.objects.all()
+        if options["after_id"]:
+            snapshots = snapshots.filter(pk__gt=options["after_id"])
         if options["instrument"]:
             snapshots = snapshots.filter(instrument__code=options["instrument"])
         report = verify_snapshots(snapshots)

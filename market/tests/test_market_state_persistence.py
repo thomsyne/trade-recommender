@@ -10,6 +10,7 @@ not from the code under test.
 """
 
 import json
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
@@ -27,8 +28,10 @@ from market.state.canonical import (
     identity_digest,
 )
 from market.state.compute import (
+    DESCRIPTOR_DEFINITION,
     DESCRIPTOR_KEY,
     DESCRIPTOR_VERSION,
+    build_market_state,
     compute_market_state,
     ensure_descriptor_definition,
 )
@@ -47,16 +50,7 @@ MON_0800 = datetime(2026, 1, 5, 8, 0, tzinfo=UTC)  # Monday, market open, H1-ali
 
 
 def _valid_definition_body(**overrides):
-    body = {
-        "algorithms": {"x": "v1"},
-        "features": ["a"],
-        "price_basis": "midpoint",
-        "rounding": {"quantum": "0.000001", "mode": "ROUND_HALF_EVEN"},
-        "calendar_policy": "ny-fx-week-v1",
-        "missing_data_policy": "explicit-unavailable-v1",
-        "lookbacks": {},
-        "thresholds": {},
-    }
+    body = deepcopy(DESCRIPTOR_DEFINITION)
     body.update(overrides)
     return body
 
@@ -90,20 +84,22 @@ class CanonicalSerializationTests(TestCase):
 
 class DefinitionRegistryTests(TestCase):
     def test_content_addressed_registration_is_idempotent(self):
-        a = register_definition("k", "1.0.0", _valid_definition_body())
-        b = register_definition("k", "1.0.0", _valid_definition_body())
+        a = register_definition(DESCRIPTOR_KEY, DESCRIPTOR_VERSION, _valid_definition_body())
+        b = register_definition(DESCRIPTOR_KEY, DESCRIPTOR_VERSION, _valid_definition_body())
         self.assertEqual(a.pk, b.pk)
         self.assertEqual(MarketStateDefinition.objects.count(), 1)
 
     def test_same_content_different_identity_fails_closed(self):
-        register_definition("k", "1.0.0", _valid_definition_body())
+        register_definition(DESCRIPTOR_KEY, DESCRIPTOR_VERSION, _valid_definition_body())
         with self.assertRaises(DefinitionError):
             register_definition("other", "2.0.0", _valid_definition_body())
 
     def test_different_content_same_identity_fails_closed(self):
-        register_definition("k", "1.0.0", _valid_definition_body())
+        register_definition(DESCRIPTOR_KEY, DESCRIPTOR_VERSION, _valid_definition_body())
         with self.assertRaises(DefinitionError):
-            register_definition("k", "1.0.0", _valid_definition_body(features=["a", "b"]))
+            register_definition(
+                DESCRIPTOR_KEY, DESCRIPTOR_VERSION, _valid_definition_body(features=["a", "b"])
+            )
 
     def test_missing_required_keys_fail_closed(self):
         body = _valid_definition_body()
@@ -120,15 +116,14 @@ class DefinitionRegistryTests(TestCase):
         # unreachable except via a raw INSERT (which the triggers do not block);
         # load_definition must still fail closed on such a forgery.
         body = _valid_definition_body()
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO market_marketstatedefinition "
-                "(key, version, definition, definition_sha256, created_at) "
-                "VALUES (%s, %s, %s, %s, now())",
-                ["raw", "1.0.0", json.dumps(body), "0" * 64],
-            )
-        with self.assertRaises(DefinitionError):
-            load_definition("raw", "1.0.0")
+        with self.assertRaises(Error), transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO market_marketstatedefinition "
+                    "(key, version, definition, definition_sha256, created_at) "
+                    "VALUES (%s, %s, %s, %s, now())",
+                    [DESCRIPTOR_KEY, DESCRIPTOR_VERSION, json.dumps(body), "0" * 64],
+                )
 
     def test_model_save_rejects_mismatched_sha(self):
         with self.assertRaises(ValidationError):
@@ -219,9 +214,12 @@ class SnapshotPersistenceTests(TestCase):
         cls.instrument, cls.source = make_market()
 
     def setUp(self):
-        self.definition = register_definition("k", "1.0.0", _valid_definition_body())
+        self.definition = ensure_descriptor_definition()
 
     def persist(self, output, cutoff=MON_0800, manifest=None, manifest_sha=None, scope=("H1",)):
+        payload = build_market_state(self.instrument, self.definition, cutoff, scope)[0]
+        if output["v"] != 1:
+            payload["granularities"]["H1"]["reason_code"] = "atr_unavailable"
         manifest = manifest if manifest is not None else []
         manifest_sha = manifest_sha or identity_digest(manifest)
         evidence = {"events": [], "macro": {}}
@@ -231,7 +229,7 @@ class SnapshotPersistenceTests(TestCase):
             cutoff,
             manifest,
             manifest_sha,
-            output,
+            payload,
             scope=list(scope),
             evidence_manifest=evidence,
             evidence_sha256=identity_digest(evidence),

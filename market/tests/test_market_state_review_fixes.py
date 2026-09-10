@@ -173,9 +173,8 @@ class DefinitionGovernanceTests(TestCase):
         cls.instrument, cls.source = make_market()
 
     def test_computing_under_a_nonmatching_definition_fails_closed(self):
-        bogus = register_definition("undefined", "0.0.0", _valid_other_body())
         with self.assertRaises(DefinitionError):
-            compute_market_state(self.instrument, bogus, MON, ["H1"])
+            register_definition("undefined", "0.0.0", _valid_other_body())
 
 
 class TerminologyTests(TestCase):
@@ -204,7 +203,7 @@ class IntegritySemanticTests(TestCase):
             "granularities": {"M1": {"note": "A+ setup"}},  # unsupported + banned
         }
         manifest = []
-        with connection.cursor() as cursor:
+        with self.assertRaises(IntegrityError), transaction.atomic(), connection.cursor() as cursor:
             cursor.execute(
                 "INSERT INTO market_marketstatesnapshot "
                 "(instrument_id, definition_id, information_cutoff, created_at, input_manifest, "
@@ -224,7 +223,24 @@ class IntegritySemanticTests(TestCase):
                 ],
             )
         codes = {
-            v["code"] for v in verify_snapshots(MarketStateSnapshot.objects.all())["violations"]
+            v["code"]
+            for v in verify_snapshots(
+                [
+                    MarketStateSnapshot(
+                        pk=1,
+                        instrument=self.instrument,
+                        definition=definition,
+                        information_cutoff=MON,
+                        input_manifest=manifest,
+                        input_manifest_sha256=identity_digest(manifest),
+                        evidence_manifest={},
+                        output_payload=payload,
+                        output_sha256=identity_digest(payload),
+                        data_quality_status="complete",
+                        idempotency_key="a" * 64,
+                    )
+                ]
+            )["violations"]
         }
         self.assertIn("payload_instrument_mismatch", codes)
         self.assertIn("unsupported_granularity", codes)

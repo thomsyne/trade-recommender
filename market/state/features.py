@@ -53,12 +53,32 @@ class Bar(NamedTuple):
     # later one's ``timestamp``. ``spread`` is ask-bid at the candle close.
     end: object = None
     spread: Decimal = None
+    granularity: str = ""
+    observed_at: object = None
+    revision: int = 1
+    content_sha256: str = ""
+
+    @property
+    def available_at(self):
+        return max(self.end or self.timestamp, self.observed_at or self.timestamp)
 
 
 def bars_are_consecutive(earlier, later):
-    """Registered consecutiveness. Unknown (``end`` unset) is treated as
-    consecutive so pure-geometry unit tests still exercise the shape."""
+    """Use registered succession, including the closed FX weekend."""
+    if earlier.granularity and earlier.granularity == later.granularity:
+        from market.quality import registered_successor
+
+        if earlier.granularity == "M":
+            from market.quality import NEW_YORK
+
+            a, b = earlier.timestamp.astimezone(NEW_YORK), later.timestamp.astimezone(NEW_YORK)
+            return b.year * 12 + b.month == a.year * 12 + a.month + 1
+        return registered_successor(earlier.timestamp, earlier.granularity) == later.timestamp
     return earlier.end is None or earlier.end == later.timestamp
+
+
+def contiguous(bars):
+    return all(bars_are_consecutive(a, b) for a, b in zip(bars, bars[1:]))
 
 
 class Swing(NamedTuple):
@@ -111,7 +131,18 @@ def swing_feature(bars):
         "left": SWING_LEFT,
         "right": SWING_RIGHT,
         "swings": [
-            {"timestamp": _iso(s.timestamp), "kind": s.kind, "price": format_decimal(s.price)}
+            {
+                "timestamp": _iso(s.timestamp),
+                "kind": s.kind,
+                "price": format_decimal(s.price),
+                "formed_at": _iso(bars[s.index].end or s.timestamp),
+                "available_at": _iso(
+                    max(
+                        b.available_at
+                        for b in bars[s.index - SWING_LEFT : s.index + SWING_RIGHT + 1]
+                    )
+                ),
+            }
             for s in swings
         ],
     }
@@ -123,6 +154,8 @@ def _by_kind(swings, kind):
 
 
 def trend_feature(bars):
+    if not contiguous(bars):
+        return _unavailable(TREND_V, "missing_registered_interval")
     swings = confirmed_swings(bars)
     highs = _by_kind(swings, "high")
     lows = _by_kind(swings, "low")
@@ -166,6 +199,9 @@ def sequence_feature(bars):
 def _true_ranges(bars):
     ranges = []
     for i in range(1, len(bars)):
+        if not bars_are_consecutive(bars[i - 1], bars[i]):
+            ranges.append(None)
+            continue
         prev_close = bars[i - 1].close
         high, low = bars[i].high, bars[i].low
         ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
@@ -177,6 +213,8 @@ def _atr_at(true_ranges, end_index, period):
     if end_index + 1 < period:
         return None
     window = true_ranges[end_index - period + 1 : end_index + 1]
+    if any(value is None for value in window):
+        return None
     return sum(window) / period
 
 
@@ -206,7 +244,7 @@ def atr_at_index(bars, index, period=ATR_PERIOD):
     Historical event qualification (e.g. an FVG's displacement threshold) must use
     the ATR as it stood when the event formed, so appending later bars never
     changes a past fact."""
-    true_ranges = _true_ranges(bars[: index + 1])
+    true_ranges = _true_ranges(bars[max(0, index - period) : index + 1])
     if not true_ranges:
         return None
     return _atr_at(true_ranges, len(true_ranges) - 1, period)
@@ -285,6 +323,8 @@ def persistence_feature(bars, window=PERSISTENCE_WINDOW):
         return _unavailable(PERSISTENCE_V, equilibrium["reason_code"])
     midpoint = Decimal(equilibrium["midpoint"])
     recent = bars[-window:]
+    if not contiguous(recent):
+        return _unavailable(PERSISTENCE_V, "missing_registered_interval")
     count = 0
     side = None
     for bar in reversed(recent):

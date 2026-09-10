@@ -16,6 +16,7 @@ from django.test import TransactionTestCase
 
 from market.models import Candle, CandleObservation, IngestionRun
 from market.services import _candle_payload, _json_hash, live_candle_completion
+from market.tests.historical_database import HistoricalDatabaseMixin
 from market.tests.timeline import POLL_DELAY
 
 BEFORE = [("market", "0027_gate8i_final_dataset_acceptance")]
@@ -53,8 +54,9 @@ def instrument_at_0028(**values):
 
 
 def restore_head():
-    executor = MigrationExecutor(connection)
-    executor.migrate(executor.loader.graph.leaf_nodes())
+    # Only this class's isolated historical graph. The mixin restores the
+    # untouched normal database, including its installed M15 functions.
+    MigrationExecutor(connection).migrate(AFTER)
 
 
 def trigger_names():
@@ -74,15 +76,16 @@ def column_names(table):
         return {row[0] for row in cursor.fetchall()}
 
 
-class LiveObservationMigrationTests(TransactionTestCase):
+class LiveObservationMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
+    historical_market_migration = "0028_"
+
     def setUp(self):
         super().setUp()
         MigrationExecutor(connection).migrate(AFTER)
 
     def tearDown(self):
-        # Restore the head state, not the 0028 state this class migrates back
-        # to: leaving the shared database behind head would silently run every
-        # later test without the 0029 lineage protections.
+        # Reset this isolated historical schema only. The mixin reconnects the
+        # untouched head database after the class and removes its temporary DB.
         restore_head()
         super().tearDown()
 
@@ -306,7 +309,7 @@ class LiveObservationMigrationTests(TransactionTestCase):
             return {row[0] for row in cursor.fetchall()}
 
 
-class LineageRenumberMigrationTests(TransactionTestCase):
+class LineageRenumberMigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
     """0029 must apply over a realistic 0028 ledger without pending-trigger events.
 
     The pre-fix migration failed with ``cannot ALTER TABLE ... because it has
@@ -316,14 +319,16 @@ class LineageRenumberMigrationTests(TransactionTestCase):
     and asserts the migration renumbers them dense per candle.
     """
 
+    historical_market_migration = "0028_"
+
     def setUp(self):
         super().setUp()
         MigrationExecutor(connection).migrate(AFTER)
 
     def tearDown(self):
         # 0029 is forward-only while observations exist: empty the ledger (and
-        # its protected parents) first, then restore the full head schema so
-        # the shared test database is left as the normal head state.
+        # its protected parents) created in this isolated historical database
+        # before resetting it to 0028. The normal database is never migrated back.
         with connection.cursor() as cursor:
             cursor.execute("ALTER TABLE market_candleobservation DISABLE TRIGGER USER")
             cursor.execute("ALTER TABLE market_candle DISABLE TRIGGER USER")

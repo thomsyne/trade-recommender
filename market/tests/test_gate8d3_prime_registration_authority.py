@@ -13,7 +13,6 @@ import importlib
 
 from django.contrib.auth import get_user_model
 from django.db import DatabaseError, connection, transaction
-from django.db.migrations.executor import MigrationExecutor
 from django.test import SimpleTestCase, TransactionTestCase
 
 from market.historical_discovery import (
@@ -37,6 +36,7 @@ from market.provider_observed_outcome import (
 )
 from market.provider_observed_successor import build_successor_discovery_plan
 from market.services import DatasetQualityError
+from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_gate8b_prime_successor_activation import (
     record_attempt,
     successor_first_h1,

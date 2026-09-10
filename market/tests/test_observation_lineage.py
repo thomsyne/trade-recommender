@@ -508,20 +508,6 @@ class SqlPythonParityTests(TransactionTestCase):
     magnitudes, the column's precision bounds and microsecond timestamps).
     """
 
-    def setUp(self):
-        super().setUp()
-        # A preceding historical-migration test may have reversed the market graph
-        # (restoring the pre-M15 SQL mirrors) and been unable to re-apply forward
-        # through the documented migration-0027 guard. Re-install the current M15
-        # mirrors directly so this parity check always compares against the schema
-        # under test, without weakening any assertion.
-        import importlib
-
-        module = importlib.import_module("market.migrations.0031_m15_live_granularity")
-        with connection.cursor() as cursor:
-            cursor.execute(module.ALIGNMENT_WITH_M15)
-            cursor.execute(module.COMPLETION_WITH_M15)
-
     def sql(self, statement, params):
         with connection.cursor() as cursor:
             cursor.execute(statement, params)

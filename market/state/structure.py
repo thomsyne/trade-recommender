@@ -12,7 +12,14 @@ are fixed in docs/phase4/design.md §7.2; no threshold here selects a trade.
 from decimal import Decimal
 
 from market.state.canonical import format_decimal, identity_digest
-from market.state.features import confirmed_swings
+from market.state.features import (
+    ATR_PERIOD,
+    SWING_RIGHT,
+    _iso,
+    atr_at_index,
+    confirmed_swings,
+    contiguous,
+)
 
 ZONE_V = "zone-v1"
 EQUAL_LEVELS_V = "equal-levels-v1"
@@ -21,7 +28,7 @@ CONSOLIDATION_V = "consolidation-v1"
 PRIOR_EXTREME_V = "prior-extreme-v1"
 
 ZONE_CLUSTER_ATR = Decimal("0.25")  # c: swing merge distance / test-exit margin
-ZONE_EXPIRY_INTERVALS = 500  # A: zone age (intervals) after which it expires
+ZONE_EXPIRY_INTERVALS = 200  # reachable within every registered descriptor lookback
 EQUAL_LEVEL_ATR = Decimal("0.1")  # e: equal/clustered level distance
 DISPLACEMENT_ATR = Decimal("1.5")  # d: displacement body threshold
 CONSOLIDATION_ATR = Decimal("1.5")  # r: consolidation range ceiling
@@ -73,31 +80,76 @@ def _zone_test_count(bars, low, high, margin):
 
 
 def support_resistance_zones(bars, atr, instrument_code, timeframe, cluster=ZONE_CLUSTER_ATR):
-    if atr is None or atr == 0:
-        return _unavailable(ZONE_V, "atr_unavailable")
+    if not contiguous(bars):
+        return _unavailable(ZONE_V, "missing_registered_interval")
     swings = confirmed_swings(bars)
     if not swings:
         return _unavailable(ZONE_V, "insufficient_history")
-    margin = cluster * atr
+    # Each edge uses both pivots' confirmation-time ATRs. Later volatility cannot
+    # merge old pivots into a new band without any new structural evidence.
+    margins = {}
+    for swing in swings:
+        at_confirmation = atr if atr is not None else atr_at_index(bars, swing.index + SWING_RIGHT)
+        if at_confirmation:
+            margins[swing] = cluster * at_confirmation
+    if not margins:
+        return _unavailable(ZONE_V, "atr_unavailable")
+    clusters = []
+    for swing in sorted(margins, key=lambda s: (s.kind, s.price, s.index)):
+        previous = clusters[-1][-1] if clusters else None
+        if (
+            previous is not None
+            and previous.kind == swing.kind
+            and swing.price - previous.price <= min(margins[swing], margins[previous])
+        ):
+            clusters[-1].append(swing)
+        else:
+            clusters.append([swing])
     zones = []
-    for cluster_members in _single_linkage(swings, lambda s: s.price, margin):
+    for cluster_members in clusters:
+        margin = min(margins[m] for m in cluster_members)
         prices = [m.price for m in cluster_members]
         low, high = min(prices), max(prices)
         earliest = min(m.index for m in cluster_members)
         age = (len(bars) - 1) - earliest
-        # Only bars at or after the zone formed can test or invalidate it.
-        since_formation = bars[earliest:]
-        invalidated = any(
-            bar.close >= high + margin or bar.close <= low - margin for bar in bars[earliest + 1 :]
+        confirmed = max(m.index for m in cluster_members) + SWING_RIGHT
+        available_at = max(b.available_at for b in bars[: confirmed + 1])
+        since_formation = [
+            b
+            for b in bars[confirmed + 1 : earliest + ZONE_EXPIRY_INTERVALS + 1]
+            if b.timestamp >= available_at
+        ]
+        kinds = {m.kind for m in cluster_members}
+        invalidation_index = next(
+            (
+                i
+                for i, bar in enumerate(since_formation)
+                if ("high" in kinds and bar.close >= high + margin)
+                or ("low" in kinds and bar.close <= low - margin)
+            ),
+            None,
         )
+        invalidated = invalidation_index is not None
+        tested = since_formation[:invalidation_index] if invalidated else since_formation
         zones.append(
             {
-                "zone_id": _zone_id(low, high, instrument_code, timeframe),
+                "zone_id": identity_digest(
+                    [
+                        _zone_id(low, high, instrument_code, timeframe),
+                        [
+                            [_iso(m.timestamp), m.kind, bars[m.index].content_sha256]
+                            for m in sorted(cluster_members)
+                        ],
+                    ]
+                ),
                 "range_low": format_decimal(low),
                 "range_high": format_decimal(high),
                 "member_count": len(cluster_members),
+                "margin_price": format_decimal(margin),
+                "formed_at": _iso(bars[earliest].end or bars[earliest].timestamp),
+                "available_at": _iso(available_at),
                 "age_intervals": age,
-                "distinct_tests": _zone_test_count(since_formation, low, high, margin),
+                "distinct_tests": _zone_test_count(tested, low, high, margin),
                 "invalidated": invalidated,
                 "expired": age > ZONE_EXPIRY_INTERVALS,
             }
@@ -124,6 +176,8 @@ def equal_levels(bars, atr, tolerance=EQUAL_LEVEL_ATR):
         return _unavailable(EQUAL_LEVELS_V, "atr_unavailable")
     if len(bars) < 3:
         return _unavailable(EQUAL_LEVELS_V, "insufficient_history")
+    if not contiguous(bars):
+        return _unavailable(EQUAL_LEVELS_V, "missing_registered_interval")
     margin = tolerance * atr
     result = {"state": "available", "version": EQUAL_LEVELS_V}
     for kind, name in (("high", "equal_highs"), ("low", "equal_lows")):
@@ -143,16 +197,19 @@ def equal_levels(bars, atr, tolerance=EQUAL_LEVEL_ATR):
     return result
 
 
-def displacement_candidates(bars, atr, threshold=DISPLACEMENT_ATR):
+def displacement_candidates(bars, atr=None, threshold=DISPLACEMENT_ATR):
     """Origin candle bodies of displacement legs, as named supply/demand proxy
     candidates (bearish displacement -> supply candidate; bullish -> demand)."""
-    if atr is None or atr == 0:
-        return _unavailable(SD_CANDIDATE_V, "atr_unavailable")
     candidates = []
+    has_history = False
     for i in range(len(bars) - 1):
         bar = bars[i]
+        event_atr = atr if atr is not None else atr_at_index(bars, i)
+        if not event_atr or not contiguous(bars[i : i + 2]):
+            continue
+        has_history = True
         body = abs(bar.close - bar.open)
-        if body < threshold * atr:
+        if body < threshold * event_atr:
             continue
         following = bars[i + 1]
         if bar.close > bar.open and following.close > bar.close:
@@ -168,10 +225,16 @@ def displacement_candidates(bars, atr, threshold=DISPLACEMENT_ATR):
                 "kind": kind,
                 "origin_low": format_decimal(origin_low),
                 "origin_high": format_decimal(origin_high),
-                "body_atr": format_decimal(body / atr),
+                "body_atr": format_decimal(body / event_atr),
                 "timestamp": bar.timestamp.astimezone(_utc()).isoformat(timespec="microseconds"),
+                "formed_at": _iso(bar.end or bar.timestamp),
+                "available_at": _iso(
+                    max(b.available_at for b in bars[max(0, i - ATR_PERIOD) : i + 2])
+                ),
             }
         )
+    if not has_history:
+        return _unavailable(SD_CANDIDATE_V, "atr_unavailable")
     return {"state": "available", "version": SD_CANDIDATE_V, "candidates": candidates}
 
 
@@ -201,6 +264,8 @@ def consolidation_state(
         return _unavailable(CONSOLIDATION_V, "insufficient_history")
     base = bars[-(window + tail_len) : -tail_len]
     tail = bars[-tail_len:]
+    if not contiguous(base + tail):
+        return _unavailable(CONSOLIDATION_V, "missing_registered_interval")
     high = max(b.high for b in base)
     low = min(b.low for b in base)
     if high - low > ceiling * atr:
@@ -228,14 +293,19 @@ def consolidation_state(
         failed = False
         retest = False
         for bar in after:
-            if low <= bar.close <= high:
-                # Closed back inside the range: a failed breakout, not a retest.
+            if (breakout == "up" and bar.close <= high) or (
+                breakout == "down" and bar.close >= low
+            ):
                 failed = True
+                result["failed_at"] = _iso(bar.available_at)
+                break
             elif breakout == "up" and bar.low <= boundary and bar.close > high:
                 # Touched the broken boundary from above but held beyond it.
                 retest = True
+                result.setdefault("retest_at", _iso(bar.available_at))
             elif breakout == "down" and bar.high >= boundary and bar.close < low:
                 retest = True
+                result.setdefault("retest_at", _iso(bar.available_at))
         result["failed"] = failed
         result["retest"] = retest
     return result
@@ -256,8 +326,10 @@ def prior_period_extreme(period_bars):
 def structure_context(bars, atr, instrument_code, timeframe):
     """Assemble the structure block for one granularity."""
     return {
-        "support_resistance_zones": support_resistance_zones(bars, atr, instrument_code, timeframe),
+        "support_resistance_zones": support_resistance_zones(
+            bars, None, instrument_code, timeframe
+        ),
         "equal_levels": equal_levels(bars, atr),
-        "displacement_candidates": displacement_candidates(bars, atr),
+        "displacement_candidates": displacement_candidates(bars),
         "consolidation": consolidation_state(bars, atr),
     }

@@ -42,6 +42,10 @@ def validate_definition_body(body):
         canonical_json(body)  # rejects float/Decimal/non-string keys
     except NonCanonicalValue as exc:
         raise DefinitionError(str(exc)) from exc
+    from market.state.compute import DESCRIPTOR_DEFINITION
+
+    if body != DESCRIPTOR_DEFINITION:
+        raise DefinitionError("unsupported_definition_contract")
 
 
 def register_definition(key, version, body):
@@ -52,6 +56,10 @@ def register_definition(key, version, body):
     different body under an existing ``(key, version)`` — fails closed.
     """
     validate_definition_body(body)
+    from market.state.compute import DESCRIPTOR_KEY, DESCRIPTOR_VERSION
+
+    if (key, version) != (DESCRIPTOR_KEY, DESCRIPTOR_VERSION):
+        raise DefinitionError("unsupported_definition_identity")
     digest = identity_digest(body)
     existing = MarketStateDefinition.objects.filter(definition_sha256=digest).first()
     if existing is not None:
@@ -92,4 +100,7 @@ def load_definition(key, version):
         raise DefinitionError(f"unknown market-state definition {key}@{version}") from exc
     if identity_digest(definition.definition) != definition.definition_sha256:
         raise DefinitionError(f"definition hash mismatch for {key}@{version}; refusing to use")
+    from market.state.compute import _require_governing_definition
+
+    _require_governing_definition(definition)
     return definition

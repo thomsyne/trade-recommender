@@ -80,8 +80,13 @@ class AcceptanceTests(TestCase):
 
 class LiquidityContextTests(TestCase):
     def test_sweep_of_the_nearest_swing_high(self):
-        # Swing high forms at 10 (index 2); a later bar wicks above and reclaims.
-        bars = flat([8, 9, 10, 9, 8]) + [ohlc(5, 9, D("10.5"), 9, 9), ohlc(6, 9, 9, 9, 9)]
+        # Warm-up supplies actual contemporaneous ATR; the latest swing at index
+        # 22 is confirmed before the wick at 25. No injected current ATR may
+        # substitute for missing historical qualification evidence.
+        bars = flat([7] * 20 + [8, 9, 10, 9, 8]) + [
+            ohlc(25, 9, D("10.5"), 9, 9),
+            ohlc(26, 9, 9, 9, 9),
+        ]
         result = liquidity_context(bars, ATR1, "EUR_USD", "H1")
         self.assertEqual(result["state"], "available")
         self.assertEqual(result["resistance_level"], "10.000000")

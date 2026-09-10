@@ -3,9 +3,9 @@ import json
 from importlib import import_module
 
 from django.db import connection
-from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
+from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_replacement_canary_activation import (
     MIGRATION_0015,
     MIGRATION_0016,

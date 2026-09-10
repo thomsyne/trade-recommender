@@ -16,6 +16,10 @@ def _term(name, description, *, formation, availability, expiry, invalidation, l
     return {
         "name": name,
         "description": description,
+        "inputs": "completed midpoint OHLC with registered start, completion and observation availability",
+        "formula": description,
+        "timeframe": ["M15", "H1", "H4", "D", "W", "M"],
+        "causal_test": "market.tests.test_phase4_corrections",
         "formation": formation,
         "availability": availability,
         "expiry": expiry,
@@ -124,12 +128,12 @@ REGISTRY = {
     ),
     "zone-v1": _term(
         "support/resistance zone",
-        "single-linkage cluster of confirmed swings within 0.25*ATR; a proxy level band.",
+        "same-kind swing clusters within both confirmation-time 0.25*ATR margins; a proxy band.",
         formation="at the earliest member swing",
         availability="with the member swings",
-        expiry="age > 500 intervals",
+        expiry="age > 200 intervals",
         invalidation="a completed close beyond the band by >= 0.25*ATR",
-        limitations="identity binds instrument/timeframe/boundaries only",
+        limitations="identity binds instrument/timeframe/boundaries and member candle content; new members create a new identity",
     ),
     "equal-levels-v1": _term(
         "equal/clustered levels",
@@ -189,7 +193,7 @@ REGISTRY = {
         "three-candle imbalance (FVG) proxy",
         "a gap between candle 1 and candle 3 of three registered-consecutive candles.",
         formation="at candle 3 completion",
-        availability="at candle 3 completion",
+        availability="after all three candles and contemporaneous ATR inputs complete and become observed",
         expiry="unfilled after 50 candles",
         invalidation="full fill or internal-swing break",
         limitations="a proxy, not proof of institutional imbalance",
@@ -252,6 +256,48 @@ REGISTRY = {
 
 REGISTERED_TERMS = frozenset(REGISTRY)
 
+REGISTRY["fvg-v1"]["timeframe"] = ["M15", "H1", "H4"]
+REGISTRY["fvg-v1"]["formula"] = (
+    "strict three-bar gap; directional middle body >= 1 ATR14; gap >= 0.000001 price, "
+    ">= 0.1 ATR14, >= 1 pip, >= 1 candle-3 spread; equality at a minimum qualifies; "
+    "absent ATR/spread leaves qualification unavailable"
+)
+REGISTRY["orb-v1"]["timeframe"] = ["M15"]
+REGISTRY["monthly-context-v1"]["timeframe"] = ["D", "M"]
+REGISTRY["event-state-v1"]["inputs"] = (
+    "EconomicEvent vintage, RawRetrieval, SourcePolicy, source and optional series"
+)
+REGISTRY["event-state-v1"]["timeframe"] = ["point-in-time"]
+REGISTRY["macro-regime-v1"]["inputs"] = (
+    "latest and predecessor policy-rate MacroObservation periods, retrievals, source, policy and series"
+)
+REGISTRY["macro-regime-v1"]["timeframe"] = ["point-in-time"]
+REGISTRY["spread-v1"]["inputs"] = "exact candle observation bid/ask close and contemporaneous ATR14"
+REGISTRY["session-v1"]["inputs"] = "explicit cutoff and IANA London/New York calendar"
+
+# These fields are authoritative classifications, never provider free text.
+CLASSIFICATIONS = {
+    "classification": frozenset({"uptrend", "downtrend", "range"}),
+    "regime": frozenset({"compression", "normal", "expansion"}),
+    "label": frozenset(
+        {
+            "first_high",
+            "first_low",
+            "equal_high",
+            "equal_low",
+            "higher_high",
+            "higher_low",
+            "lower_high",
+            "lower_low",
+        }
+    ),
+    "kind": frozenset({"high", "low", "demand_candidate", "supply_candidate"}),
+    "direction": frozenset(
+        {"up", "down", "bullish", "bearish", "tightening", "easing", "steady", "unknown"}
+    ),
+    "side": frozenset({"above", "below", "at"}),
+}
+
 #: Undefined labels the brief forbids from persisted snapshots and reports.
 BANNED_VOCABULARY = (
     "A+ setup",
@@ -269,8 +315,15 @@ def _walk_values(value):
     """Yield every scalar and every ``version`` value in a nested structure."""
     if isinstance(value, dict):
         for key, item in value.items():
-            if key == "version" and isinstance(item, str):
-                yield ("version", item)
+            if key in CLASSIFICATIONS and (
+                not isinstance(item, str) or item not in CLASSIFICATIONS[key]
+            ):
+                yield ("invalid_classification", "")
+            if key == "version":
+                if isinstance(item, str):
+                    yield ("version", item)
+                else:
+                    yield ("invalid_classification", "")
             yield from _walk_values(item)
     elif isinstance(value, list):
         for item in value:
@@ -284,6 +337,8 @@ def terminology_violations(payload):
     vocabulary in ``payload``. Empty means canonical."""
     violations = set()
     for kind, value in _walk_values(payload):
+        if kind == "invalid_classification":
+            violations.add("noncanonical_terminology")
         if kind == "version" and value not in REGISTERED_TERMS:
             violations.add("noncanonical_terminology")
         if kind == "scalar" and value in BANNED_VOCABULARY:

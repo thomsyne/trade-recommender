@@ -16,7 +16,6 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.db import DatabaseError, IntegrityError, connection, transaction
-from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
 
 from market.historical_discovery import (
@@ -51,6 +50,7 @@ from market.provider_observed_successor import (
     successor_stage,
 )
 from market.services import DatasetQualityError
+from market.tests.historical_database import PreservingMigrationExecutor as MigrationExecutor
 from market.tests.test_replacement_canary_activation import migrate_to, seed_governed_market
 
 MIGRATION_0022 = [("market", "0022_provider_observed_registration_validator_correction")]
