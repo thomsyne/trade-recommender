@@ -48,7 +48,10 @@ def candidate(
 ):
     available_at = max(signal.available_at, available_at or signal.available_at)
     entry = registered_successor(signal.timestamp, signal.granularity)
+    expiry = registered_successor(entry, signal.granularity)
     if available_at > entry:
+        entry = expiry
+    if available_at > expiry:
         return Unavailable(strategy, "confirmation_too_late_for_next_interval")
     end = entry
     for _ in range(periods):
@@ -69,7 +72,7 @@ def candidate(
         stop,
         target,
         entry,
-        entry,
+        expiry,
         exit_at or end,
         tuple(evidence) + (signal.content_sha256,),
     )
@@ -104,6 +107,7 @@ def fast_mean_reversion(inputs):
             signal.close - direction * D("1.5") * volatility,
             target=equilibrium,
             periods=6,
+            available_at=max(b.available_at for b in hours[-15:]),
             evidence=tuple(b.content_sha256 for b in daily)
             + ("high_vol_half" if current / prior > D("1.5") else "normal_vol",),
         )

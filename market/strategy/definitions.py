@@ -1,7 +1,38 @@
 """Return-blind constants. Export fresh canonical objects, never mutable aliases."""
 
+import hashlib
+from pathlib import Path
+
 from market.state.canonical import identity_digest
 from market.strategy.contracts import PHASE4_DIGEST
+
+IMPLEMENTATION_FILES = (
+    "contracts.py",
+    "costs.py",
+    "evaluate.py",
+    "orb.py",
+    "risk.py",
+    "setups.py",
+    "simulation.py",
+    "structure.py",
+    "trend.py",
+    "persistence.py",
+    "reports.py",
+)
+IMPLEMENTATION_SHA256 = "554b925a6c67adc8f1cccdd7fdc086d49a0392678d63b8adaa304815a47d4591"
+
+
+def verify_implementation():
+    root = Path(__file__).resolve().parent
+    actual = identity_digest(
+        {
+            name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+            for name in IMPLEMENTATION_FILES
+        }
+    )
+    if actual != IMPLEMENTATION_SHA256:
+        raise ValueError("strategy_implementation_version_drift")
+
 
 SPEEDS = (
     (2, 8, "10.6"),
@@ -73,7 +104,8 @@ def definition(strategy):
     return {
         "strategy": strategy,
         "phase4_sha256": PHASE4_DIGEST,
-        "specification_sha256": "5764175678e1f45af803f5aed4bed881da711059a687639f23f74d0c06cad9e2",
+        "specification_sha256": "d4e1f0e635f8faf800feddf5a61ec6ce88932fcdae6642930766ce31c61d3c64",
+        "implementation_sha256": IMPLEMENTATION_SHA256,
         "schema": "phase5/definition-v1",
         "arithmetic": "decimal34_half_even_6dp",
         "speeds": SPEEDS,

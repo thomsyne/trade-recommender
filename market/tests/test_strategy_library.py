@@ -1,11 +1,15 @@
 """Independent asymmetric pure-contract and formula fixtures."""
 
+import json
 from decimal import Decimal as D
 
 from django.test import SimpleTestCase
 
 from market.strategy.contracts import ContinuousForecast, RiskOverlay, decimal, encoded
 from market.strategy.definitions import STRATEGIES, definition, definition_digest
+from market.strategy.evaluate import cost_from_payload
+from market.strategy.trend import ewmac
+from market.tests.test_strategy_library_trend import NOW, bars, cost
 
 
 class ContractTests(SimpleTestCase):
@@ -30,3 +34,22 @@ class ContractTests(SimpleTestCase):
         for value in (True, 0.2, "NaN", "Infinity"):
             with self.assertRaises(ValueError):
                 decimal(value)
+
+    def test_exact_cost_evidence_cannot_round_across_affordability_boundary(self):
+        original = cost("ewmac-2-8", "0.1000004")
+        body = json.loads(encoded(original, exact=True))
+        self.assertEqual(body["spread"], "0.1000004")
+        restored = cost_from_payload(body)
+        self.assertEqual(restored, original)
+        for evidence in (original, restored):
+            result = ewmac(bars(97), costs={evidence.component: evidence}, cutoff=NOW)
+            self.assertEqual(result.components[0].exclusion, "unaffordable")
+        # Demonstrate the competing lossy interpretation would change the decision.
+        rounded = cost_from_payload(json.loads(encoded(original)))
+        self.assertIsNone(
+            ewmac(bars(97), costs={rounded.component: rounded}, cutoff=NOW).components[0].exclusion
+        )
+        for value, expected in (("0.1234565", "0.123456"), ("0.1234575", "0.123458")):
+            self.assertEqual(
+                json.loads(encoded(RiskOverlay("x", D(value), "fixture")))["multiplier"], expected
+            )

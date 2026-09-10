@@ -80,3 +80,49 @@ class StructureTests(SimpleTestCase):
         path = root / "docs/strategy/failed-break/v2/failed-break-v2-final-research-binder.md"
         expected = path.with_suffix(".md.sha256").read_text().split()[0]
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), expected)
+
+    def test_h1_sweep_and_acceptance_require_later_m15_bos(self):
+        bars = tuple(
+            bar(START + timedelta(minutes=15 * i), open="100", high="101", low="99", close="100")
+            for i in range(15)
+        )
+        hourly = (
+            bar(START - timedelta(hours=1), low="97")._replace(
+                end=START, observed_at=START, granularity="H1"
+            ),
+        )
+        event = {
+            "status": "confirmed",
+            "confirmation_available_at": START.isoformat(),
+            "breach_at": START.isoformat(),
+            "confirmation_at": START.isoformat(),
+            "level": "99",
+            "level_id": "established-h1-level",
+        }
+        liquidity = {
+            "state": "available",
+            "version": "sweep-v2",
+            "sweep_below": event,
+            "acceptance_above": event,
+        }
+        bos = {"state": "available", "version": "bos-v1", "broken": True, "direction": "up"}
+        inputs = SimpleNamespace(
+            series=lambda g: bars if g == "M15" else hourly,
+            payload={
+                "granularities": {
+                    "H1": {"liquidity": liquidity},
+                    "M15": {"higher_timeframe": {"break_of_structure": bos}},
+                }
+            },
+        )
+        reversal = failed_break(inputs)
+        continuation = failed_break(inputs, continuation=True)
+        self.assertEqual(reversal.stop, D("96.5"))
+        self.assertEqual(continuation.stop, D("98.5"))
+        self.assertNotEqual(reversal.strategy, continuation.strategy)
+        event["status"] = "invalidated"
+        self.assertEqual(failed_break(inputs).reason, "no_unique_confirmed_failed_break")
+        hourly = ()
+        self.assertEqual(
+            failed_break(inputs).reason, "h1_level_not_available_before_m15_confirmation"
+        )

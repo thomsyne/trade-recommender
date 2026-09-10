@@ -7,7 +7,9 @@ these parameters. A change to any rule, cost policy or boundary needs a new ID.
 
 ## 1. Shared arithmetic, evidence and evaluation
 
-Decimal precision 34, half-even; compare before rounding, serialize six decimals.
+Decimal precision 34, half-even; compare before rounding, serialize outputs to
+six decimals. Input costs, financing and conversion evidence retain exact decimal
+strings, without quantization, so replay cannot move an affordability boundary.
 Prices are midpoint quote currency/base unit. EUR/GBP/CAD/USD pairs use 0.0001
 pip (JPY 0.01 if separately admitted; no eligibility expansion). No implied
 executable quote. Registered consecutive completed observations only. Missing
@@ -24,6 +26,9 @@ screen, not annual turnover or proven net value. Forecast components with absent
 cost evidence remain raw descriptive calculations but excluded from combination.
 Costs used in a decision must be known by its cutoff. Outcome-period financing
 and conversion require separately cited outcome evidence; never feed them back.
+An emitted setup's entry must be at or after its governing snapshot cutoff;
+a late snapshot cannot authorize a historical fill. A missed entry is unavailable,
+not silently backdated or resimulated with later feature information.
 
 Preregistration era `phase5-prospective-2026-09-11-v1`: exploratory material ends
 2026-09-11T00:00Z; development [2026-09-11,2027-01-01); untouched holdout
@@ -92,8 +97,11 @@ including an unavailable geometry result. Stop beyond opposite OR edge by
 max(0.25×opening ATR,2×confirmation spread); target=entry reference+direction×2R,
 reference=confirmation close. Target/stop freeze then; next-interval entry gap
 does not improve target or widen stop. Earliest entry is first registered M15
-opening ≥actual information availability; expire if later than the immediate
-successor of confirmation. No same-interval fill; exit by session open+8h.
+opening ≥actual information availability; allow at most one additional registered
+interval after the opening at confirmation completion. This accounts for actual
+recording delay without backdating a fill. The same bound applies to H1/M15
+candidates below: expiry is the second registered successor of the signal start.
+No same-interval fill; exit by session open+8h.
 No M1 inference, tick acquisition, breakeven rule or recent-performance sizing.
 
 ## 6. Pullback, range and failed-break
@@ -112,8 +120,8 @@ range by 0.25ATR, exit frozen center, one-successor entry expiry, eight M15 time
 stop. Known expansion/breakout disables; unknown event coverage cannot establish
 trading readiness. No opposite-boundary discretionary exit.
 
-Failed-break reversal: active confirmed M15 `sweep-v2`, direction opposite breach,
-and subsequent same-direction M15 `bos-v1`; continuation: active M15
+Failed-break reversal: active confirmed H1 `sweep-v2`, direction opposite breach,
+and subsequent lower-timeframe M15 `bos-v1`; continuation: active H1
 `acceptance-v2`, same breach direction and subsequent same-direction BOS. Level,
 breach, reclaim/confirmation and BOS availability ≤cutoff. Stop beyond maximum
 excursion (reversal) or established level (continuation) by 0.25ATR; target2R,
@@ -130,7 +138,11 @@ Target gap receives target (no favorable price improvement). Entry beyond target
 or stop is unavailable. Missing required intervals/quotes/financing/conversion
 leaves net unavailable, never zero-cost. Financing in quote currency per unit
 for each crossed rollover; conversion at exit from exact PIT evidence, not current
-FX rates. Gross price P&L and all modeled costs reported separately.
+FX rates. Rollover coverage includes entry and exit equality. Costs are signed
+(negative means credit). A rollover exactly at entry or at/after the exit bar's
+start charges max(cost,0): ambiguous ordering cannot award an unearned credit.
+Rollovers strictly between entry and the exit bar's start retain their documented
+signed amounts. Gross price P&L and modeled costs stay separate.
 
 Macro `macro-risk-v1`: risk only. Named central-bank decisions and CPI/employment/
 GDP exact-time vintages; latest known wins before filtering, cancellations and

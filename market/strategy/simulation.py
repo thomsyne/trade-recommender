@@ -58,6 +58,8 @@ def simulate(setup, bars, *, cost, calendar, profile, terms):
         for bar in selected:
             if bar.timestamp != expected or bar.granularity != setup.granularity:
                 return Unavailable(strategy, "outcome_interval_gap")
+            if bar.end is None or bar.end > cost.valid_through:
+                return Unavailable(strategy, "cost_horizon_unavailable")
             if (
                 interval_readiness(
                     bar.timestamp,
@@ -103,7 +105,7 @@ def simulate(setup, bars, *, cost, calendar, profile, terms):
             )
             required = []
             while day <= exited_at.astimezone(NEW_YORK):
-                if setup.entry_at < day <= exited_at:
+                if setup.entry_at <= day <= exited_at:
                     required.append(day)
                 day += timedelta(days=1)
             rates = dict(terms.rollovers)
@@ -111,17 +113,25 @@ def simulate(setup, bars, *, cost, calendar, profile, terms):
                 t not in rates or not rates[t].is_finite() for t in required
             ):
                 return Unavailable(strategy, "rollover_evidence_missing")
-            financing = sum((rates[t] for t in required), D(0))
+            # At entry or within the exit interval, rollover ordering is unknown:
+            # charge adverse fees, but never award a possibly unearned credit.
+            financing = sum(
+                (
+                    rates[t] if setup.entry_at < t < bar.timestamp else max(D(0), rates[t])
+                    for t in required
+                ),
+                D(0),
+            )
             gross = direction * (exit_price - entry)
             costs = (
                 cost.spread + 2 * (cost.slippage_per_side + cost.commission_per_side) + financing
             )
             net = gross - costs
             intent = ExecutionIntent(
-                identity_digest(json.loads(encoded(setup))),
+                identity_digest(json.loads(encoded(setup, exact=True))),
                 identity_digest(simulator_definition()),
-                identity_digest(json.loads(encoded(cost))),
-                identity_digest(json.loads(encoded(calendar))),
+                identity_digest(json.loads(encoded(cost, exact=True))),
+                identity_digest(json.loads(encoded(calendar, exact=True))),
             )
             return ExecutionResult(
                 identity_digest(json.loads(encoded(intent))),

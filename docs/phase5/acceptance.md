@@ -3,7 +3,9 @@
 Owner of implementation/tests: Phase5 engineer. Owner of hypothesis acceptance,
 holdout release, combination and rollout: project owner after independent review.
 No row is self-accepted. Evidence must distinguish synthetic engineering checks
-from economic validation. `pending` means incomplete, not waived.
+from economic validation. The matrix below records the initial preregistration
+state: its `pending` markers are historical, not waivers. The disposition register
+following it records the engineering handoff and remaining external gates.
 
 Initial checkout: clean `main`; local HEAD, fetched `origin/main` and required base
 all `131a2fc1cd6d2d849cb13a94ce5b937cf0fe8a44`. Read-only fetch completed; safe
@@ -38,3 +40,33 @@ and exact command results will be retained in `verification.md`.
 | G3 | Engineer: operations | Explicit bounded offline preview/report/integrity; idempotent task callable, unregistered | SELECT-only report, retry, overflow, no schedules/import consumers | pending | Four/eight eligibility and dormant M15 preserved |
 | G4 | Engineer: verification | Focused then combined; exact base/final failures, unchanged six Phase4.5 exclusions; PG15.14/17.6 | Persistence/concurrency/migration on both; make check/offline CI | pending | No fake accepted restore or hidden exclusions |
 | G5 | Engineer: handoff | Local A–G commits, fingerprints, clean owned resources/worktree, remote recheck | Diff/source hashes/ref evidence | pending | No self-accept, push, PR, merge, deploy or activation |
+
+## Disposition register
+
+All test references below are under `market/tests/`; `library_*` abbreviates
+`test_strategy_library_*`. [Verification](verification.md) records executed
+commands, failures and limits. [Runbook](runbook.md) gives the operational gates.
+“Implemented” means delivered for independent review, never owner acceptance.
+
+| IDs | Engineering disposition and exact evidence owner | Remaining gate / non-goal |
+|---|---|---|
+| A1, A3 | Implemented distinct frozen schemas and pure dispatch. `test_strategy_library.ContractTests`, `library_boundaries.FormulaBoundaryTests`, SELECT-only persistence checks; engineer owns replay. | No output adapter, scheduling or production consumer. |
+| A2 | Implemented exact 0.12.0 manifest loader, source pin and immutable cutoff dependency. `library_provenance.ProvenanceTests.test_exact_old_revision_survives_later_candle_spread_revision`, `library_persistence.PersistenceTests`; inherited Phase4 suffix/vintage tests remain authoritative for upstream features. | No uncited revisions, current candles or new descriptor output. |
+| A4 | Implemented frozen definition/population/holdout hashes and SQL pins; `ContractTests.test_definitions_are_fresh_and_distinct`, `PersistenceTests.test_definition_holdout_and_raw_mutations_are_refused`. | Owner controls holdout release; historical data never becomes untouched by relabeling. |
+| B1 | Implemented independent EWMAC components, frozen scalars, EMA variance, cap, cost screen, FDM and buffer. `library_trend.TrendTests` covers asymmetric EMA, variance versus sample standard deviation, affordability equality, warmup and buffer boundaries. | EWMAC64/256 unavailable under D400; no profitability claim. |
+| B2 | Implemented separately attributed completed-range breakout with quarter-ceil EMA. `TrendTests.test_breakout_completed_high_low_and_quarter_warmup`. | Breakout320 unavailable under D400; no EWMAC pooling. |
+| C1 | Implemented prior-D equilibrium, H1 alignment and separate high-vol reduction. `FormulaBoundaryTests.test_prior_daily_equilibrium_and_h1_alignment`, `library_structure.StructureTests.test_unavailable_is_not_sideways_or_safe`. | No limit-order fills or intrabar path claim. |
+| C2 | Implemented adverse next-interval model. `library_simulation.SimulationTests` covers dual hits, delayed entry, missing costs, directional gaps, exact rollover equality, weekend reopening and PIT conversion. | Net unavailable without complete documented assumptions; synthetic checks are not broker evidence. |
+| D1, D2 | Implemented six session/variant IDs with terminal first attempt; `library_orb.OrbTests`, `FormulaBoundaryTests.test_fvg_qualification_and_equality_use_real_phase4_geometry`, `library_simulation_storage.SimulationStorageTests`. | Approved M15-close assumptions only; M1 separate. FVG retention awaits untouched paired net evidence. |
+| E1 | Implemented independently versioned M15/H1 qualified pullback. `StructureTests.test_qualified_zone_and_continuation_both_required`. | Requires available pre-rejection HTF evidence and non-invalidated qualified zone. |
+| E2 | Implemented range edge/center formula and unavailable event-clearance contract. `FormulaBoundaryTests.test_range_is_edge_only_with_frozen_center_exit`, `StructureTests.test_unavailable_is_not_sideways_or_safe`. | Data-readiness blocked on attested event/expansion clearance; never infer safe. |
+| E3 | Implemented separate H1 sweep reversal and acceptance continuation with subsequent M15 BOS. `StructureTests.test_h1_sweep_and_acceptance_require_later_m15_bos`, `test_prior_negative_evidence_remains_a_terminal_binder`. | All old negative evidence preserved; new prospective era and untouched holdout required. |
+| F1 | Tested unavailable readiness contract in `library_risk.RiskTests.test_policy_rates_are_not_carry_and_empty_is_not_safe`. | Genuine PIT forwards/financing/rollover/ranking missing; trend+carry remains blocked. |
+| F2 | Implemented risk-only named-window pause and spread protection; missing consensus/coverage unavailable. `RiskTests.test_named_vintage_endpoint_and_late_knowledge`, inherited Phase4 event revision/suppressor tests. | No directional surprise or production effect; absent events are not attested empty coverage. |
+| F3 | Implemented separate fixed/EWMA/GARCH challengers. `RiskTests.test_risk_cannot_exceed_baseline_or_hide_solver_failure`, `FormulaBoundaryTests.test_garch_convergence_failure_is_not_an_ewma_fallback`; actual pinned solver repetition recorded in verification. | No exposure above baseline; absent/wrong solver or failed fit unavailable. |
+| F4 | Explicitly deferred/rejected in design/runbook and absent from the exact 19-ID SQL-pinned registry. Engineer inventories; owner alone may authorize future versions. | No implementation or silent priority for any excluded family. |
+| G1 | Implemented strict strategy/era/population attribution, duplicate refusal and cross-currency overlapping-week groups. `library_reports.AttributionTests`. | Reports are diagnostics, not automatic economic acceptance; no cross-family pooling. |
+| G2 | Implemented append-only definitions/evaluations/simulations; `PersistenceTests`, `ConcurrencyTests`, `library_migrations.MigrationTests`, `SimulationStorageTests`. SQL protects identity; Python rejects semantically forged hash-consistent results. | Forward migrations only. Populated reversal refused; shared migration requires separate approval. |
+| G3 | Implemented bounded SELECT-only CLI, integrity pagination and manual idempotent API. `PersistenceTests.test_reports_preview_and_integrity_are_select_only`, `test_all_definitions_are_sql_pinned_and_retries_are_exact`, `ProvenanceTests.test_dormant_consumers_and_readonly_definitions`. | No durable-job registration, schedule, M15 activation or four/eight policy change. |
+| G4 | Verification results and exact inherited restore exclusions recorded separately by engineer in [verification](verification.md). | Unavailable genuine-restore fixture is not silently passed; no self-acceptance. |
+| G5 | Local checkpoint history, protected fingerprints, remote refs and owned-resource cleanup recorded in verification; engineer prepares handoff. | Owner review remains open. No push, PR, merge, deploy, acceptance or activation. |

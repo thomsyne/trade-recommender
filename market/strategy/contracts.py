@@ -1,7 +1,7 @@
 """Immutable scalar boundaries; no persistence, scheduling or promotion."""
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, localcontext
 
@@ -26,12 +26,14 @@ def decimal(value):
     return result
 
 
-def encoded(value):
+def encoded(value, *, exact=False):
+    """Quantize outputs, but preserve decimal input evidence losslessly for replay."""
+
     def convert(item):
         if isinstance(item, Decimal):
             with localcontext() as ctx:
                 ctx.prec = 34
-                return format_decimal(item)
+                return format(item, "f") if exact else format_decimal(item)
         if isinstance(item, datetime):
             return iso(item)
         if isinstance(item, dict):
@@ -47,7 +49,7 @@ def encoded(value):
 class Unavailable:
     strategy: str
     reason: str
-    schema: str = "phase5/unavailable-v1"
+    schema: str = field(default="phase5/unavailable-v1", init=False)
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,7 @@ class ContinuousForecast:
     buffered: Decimal | None
     components: tuple[Component, ...]
     reason: str | None = None
-    schema: str = "phase5/continuous-v1"
+    schema: str = field(default="phase5/continuous-v1", init=False)
 
     def __post_init__(self):
         if any(
@@ -73,7 +75,9 @@ class ContinuousForecast:
             for v in (self.value, self.buffered)
         ):
             raise ValueError("forecast_bounds")
-        if (self.value is None) != (self.reason is not None):
+        if (self.value is None) != (self.reason is not None) or (self.value is None) != (
+            self.buffered is None
+        ):
             raise ValueError("forecast_missingness")
 
 
@@ -91,10 +95,14 @@ class SetupCandidate:
     expires_at: datetime
     exit_at: datetime
     evidence: tuple[str, ...]
-    schema: str = "phase5/setup-v1"
+    schema: str = field(default="phase5/setup-v1", init=False)
 
     def __post_init__(self):
-        if self.direction not in (-1, 1) or self.granularity not in ("M15", "H1"):
+        if (
+            type(self.direction) is not int
+            or self.direction not in (-1, 1)
+            or self.granularity not in ("M15", "H1")
+        ):
             raise ValueError("setup_direction_or_interval")
         for time in (
             self.available_at,
@@ -123,7 +131,7 @@ class ExecutionIntent:
     simulator_sha256: str
     cost_sha256: str
     calendar_sha256: str
-    schema: str = "phase5/intent-v1"
+    schema: str = field(default="phase5/intent-v1", init=False)
 
 
 @dataclass(frozen=True)
@@ -139,7 +147,7 @@ class ExecutionResult:
     net_account: Decimal
     outcome_evidence: tuple[str, ...]
     reason: str
-    schema: str = "phase5/execution-v1"
+    schema: str = field(default="phase5/execution-v1", init=False)
 
 
 @dataclass(frozen=True)
@@ -148,7 +156,7 @@ class RiskOverlay:
     multiplier: Decimal | None
     reason: str
     evidence: tuple[str, ...] = ()
-    schema: str = "phase5/risk-v1"
+    schema: str = field(default="phase5/risk-v1", init=False)
 
     def __post_init__(self):
         if self.multiplier is not None and (

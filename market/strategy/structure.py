@@ -131,7 +131,10 @@ def failed_break(inputs, *, continuation=False):
     if volatility is None:
         return Unavailable(strategy, "signal_atr_unavailable")
     block = _block(inputs, "M15")
-    liquidity = block.get("liquidity", {})
+    hourly = inputs.series("H1")
+    if not hourly or max(b.available_at for b in hourly) > bars[-1].timestamp:
+        return Unavailable(strategy, "h1_level_not_available_before_m15_confirmation")
+    liquidity = _block(inputs, "H1").get("liquidity", {})
     bos = block.get("higher_timeframe", {}).get("break_of_structure", {})
     if (
         liquidity.get("state") != "available"
@@ -162,7 +165,7 @@ def failed_break(inputs, *, continuation=False):
                     datetime.fromisoformat(event["breach_at"]),
                     datetime.fromisoformat(event["confirmation_at"]),
                 )
-                excursion = [b for b in bars if breach <= b.end <= confirmation]
+                excursion = [b for b in hourly if breach <= b.end <= confirmation]
                 if not excursion:
                     continue
                 boundary = (
