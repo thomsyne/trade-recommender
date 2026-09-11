@@ -51,7 +51,8 @@ def canonical_pairs():
 
 def plan():
     return {
-        "schema": "phase55/acquisition-v2",
+        "schema": "phase55/acquisition-v3",
+        "accepted_predecessor": predecessor_plan(),
         "instruments": canonical_pairs(),
         "periods": PERIODS,
         "chunk_days": DAYS,
@@ -68,6 +69,10 @@ def plan():
             )
         },
     }
+
+
+def predecessor_plan():
+    return json.loads((ROOT / "docs/phase5.5/acquisition-v2-registration.json").read_text())
 
 
 def chunks():
@@ -144,7 +149,7 @@ def fetch(client, request):
         ):
             raise ValueError("provider_candle_shape")
         candle = _parse_live_candle(item)
-        if not candle.complete or candle.volume < 0 or not start <= candle.timestamp < end:
+        if candle.volume < 0 or not start <= candle.timestamp < end:
             raise ValueError("provider_interval_or_completeness")
         if previous_timestamp is not None and candle.timestamp <= previous_timestamp:
             raise ValueError("provider_duplicate_or_unordered")
@@ -164,6 +169,8 @@ def fetch(client, request):
         if registered_candle_completion(candle.timestamp, request["granularity"]) > period_end:
             boundary_exclusions.append(timestamp)
             continue
+        if not candle.complete:
+            raise ValueError("provider_interval_or_completeness")
         timestamps.append(timestamp)
         normalized.append(
             {
@@ -225,7 +232,8 @@ class Store:
                     )
             self.registration = identity_digest(plan())
             rows = self.db.execute("SELECT identity,body FROM registration").fetchall()
-            if rows and rows != [(self.registration, canonical_json(plan()))]:
+            accepted = {identity_digest(p): canonical_json(p) for p in (predecessor_plan(), plan())}
+            if any(accepted.get(key) != body for key, body in rows):
                 raise ValueError("acquisition_registration_drift")
             self.requests = {
                 canonical_json(request): identity_digest(
@@ -233,6 +241,25 @@ class Store:
                 )
                 for request in chunks()
             }
+            self.chunk_registrations = {}
+            for key, body, digest in self.db.execute(
+                "SELECT identity,metadata,metadata_sha256 FROM chunk"
+            ):
+                item = json.loads(body)
+                request = canonical_json(item["request"])
+                if (
+                    request not in self.requests
+                    or request in self.chunk_registrations
+                    or item["registration"] not in dict(rows)
+                    or identity_digest(item) != digest
+                    or key
+                    != identity_digest(
+                        {"registration": item["registration"], "request": item["request"]}
+                    )
+                ):
+                    raise ValueError("acquisition_lineage_corrupt")
+                self.requests[request] = key
+                self.chunk_registrations[request] = item["registration"]
             with self.db:
                 self.db.execute(
                     "INSERT OR IGNORE INTO registration VALUES (?,?)",
@@ -264,7 +291,8 @@ class Store:
             if (
                 identity_digest(metadata) != row[1]
                 or metadata["request"] != request
-                or metadata["registration"] != self.registration
+                or metadata["registration"]
+                != self.chunk_registrations.get(canonical_json(request), self.registration)
                 or hashlib.sha256(row[2]).hexdigest() != metadata["blob_sha256"]
             ):
                 raise ValueError("acquisition_chunk_corrupt")

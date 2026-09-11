@@ -186,3 +186,44 @@ class AcquisitionTests(unittest.TestCase):
         self.assertEqual(metadata["rows"], 1)
         self.assertEqual(metadata["period_boundary_exclusions"], ["2025-01-05T22:00:00+00:00"])
         self.assertEqual(len(json.loads(gzip.decompress(blob))), 1)
+
+    def test_incomplete_week_outside_period_excluded_but_inside_refused(self):
+        request = next(
+            r for r in chunks() if r["period"] == "sealed_second" and r["granularity"] == "W"
+        )
+        candle = {**self.candle, "time": "2026-09-04T21:00:00Z", "complete": False}
+
+        def handle(_):
+            return httpx.Response(
+                200, json={"instrument": "EUR_USD", "granularity": "W", "candles": [candle]}
+            )
+
+        with OandaClient("synthetic", transport=httpx.MockTransport(handle)) as client:
+            metadata, blob = fetch(client, request)
+            self.assertEqual(json.loads(gzip.decompress(blob)), [])
+            self.assertEqual(metadata["period_boundary_exclusions"], ["2026-09-04T21:00:00+00:00"])
+            candle["time"] = "2026-08-28T21:00:00Z"
+            with self.assertRaisesRegex(ValueError, "completeness"):
+                fetch(client, request)
+
+    def test_predecessor_chunks_keep_exact_identity_bytes_and_acquisition_time(self):
+        from research.validation_acquisition import plan, predecessor_plan
+
+        with tempfile.TemporaryDirectory() as directory, self.client() as client:
+            path = Path(directory) / "data.sqlite3"
+            with patch("research.validation_acquisition.plan", side_effect=predecessor_plan):
+                store = Store(path)
+                store.acquire(client, self.request)
+                original = store.db.execute("SELECT * FROM chunk").fetchall()
+                store.close()
+            store = Store(path)
+            try:
+                self.assertFalse(store.acquire(client, self.request))
+                self.assertEqual(store.db.execute("SELECT * FROM chunk").fetchall(), original)
+                self.assertEqual(
+                    store.db.execute("SELECT count(*) FROM registration").fetchone()[0], 2
+                )
+                self.assertEqual(plan()["schema"], "phase55/acquisition-v3")
+                self.assertEqual(len(self.calls), 1)
+            finally:
+                store.close()
