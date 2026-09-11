@@ -17,11 +17,15 @@ from .contracts import (
     EMPTY_PROVENANCE_SHA256,
     METHOD_DIGEST,
     METHOD_KEY,
+    METHOD_V1_DIGEST,
+    METHOD_V11_DIGEST,
     METHOD_VERSION,
+    historical_method_payload,
     method_payload,
     verify_implementation,
 )
 from .engine import build_assessment
+from .legacy import build_v1_empty_assessment, build_v11_empty_assessment
 from .models import (
     AssessmentMethod,
     CapacityAssessment,
@@ -314,6 +318,8 @@ def replay(assessment_id):
     row = MultiTimeframeAssessment.objects.select_related(
         "method", "snapshot", "eligibility", "cost", "capacity", "evidence_packet"
     ).get(pk=assessment_id)
+    if row.method.digest in (METHOD_V1_DIGEST, METHOD_V11_DIGEST):
+        return _replay_historical_empty(row)
     if row.method.digest != METHOD_DIGEST or row.method.payload != method_payload():
         raise ValueError("method_integrity_failure")
     inputs = load_snapshot(row.snapshot_id)
@@ -377,6 +383,56 @@ def replay(assessment_id):
             raise ValueError("candidate_replay_failure")
     elif candidate is not None:
         raise ValueError("candidate_missing")
+    return row
+
+
+def _replay_historical_empty(row):
+    expected_method = historical_method_payload(row.method.digest)
+    if (
+        row.method.payload != expected_method
+        or identity_digest(expected_method) != row.method.digest
+    ):
+        raise ValueError("method_integrity_failure")
+    inputs = load_snapshot(row.snapshot_id)
+    if row.information_cutoff != inputs.cutoff:
+        raise ValueError("assessment_cutoff_forgery")
+    eligibility = _eligibility_envelope(row.eligibility, inputs.cutoff, row.snapshot.instrument_id)
+    if (
+        eligibility["entries"]
+        or row.cost_id is not None
+        or row.capacity_id is not None
+        or row.evidence_packet_id is not None
+        or row.input_manifest.get("evaluations")
+    ):
+        raise ValueError("unsafe_historical_method_inputs")
+    eligibility_reference = (
+        row.eligibility.digest
+        if row.method.digest == METHOD_V1_DIGEST
+        else _eligibility_reference(row.eligibility)
+    )
+    expected_manifest = {
+        "schema": "phase6a/input-manifest-v1",
+        "method": row.method.digest,
+        "snapshot": {"id": row.snapshot_id, "identity": row.snapshot.idempotency_key},
+        "eligibility": eligibility_reference,
+        "evaluations": [],
+        "cost": None,
+        "capacity": None,
+        "evidence": None,
+    }
+    if (
+        row.input_manifest != expected_manifest
+        or identity_digest(expected_manifest) != row.input_digest
+    ):
+        raise ValueError("assessment_manifest_forgery")
+    if row.method.digest == METHOD_V1_DIGEST:
+        expected = build_v1_empty_assessment(inputs.payload)
+    else:
+        expected = build_v11_empty_assessment(inputs.payload)
+    if expected != row.output or identity_digest(expected) != row.output_digest:
+        raise ValueError("assessment_replay_failure")
+    if getattr(row, "eligibletradeintentcandidate", None) is not None:
+        raise ValueError("historical_candidate_forgery")
     return row
 
 

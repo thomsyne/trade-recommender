@@ -1,11 +1,12 @@
 """Pure deterministic Phase 6A projection from authenticated frozen envelopes."""
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
+from market.quality import registered_successor
 from market.state.canonical import format_decimal, identity_digest
 
-from .contracts import METHOD_DIGEST, REASONS, ROLES
+from .contracts import METHOD_DIGEST, METHOD_V11_DIGEST, REASONS, ROLES
 
 _PENDING_REASONS = frozenset({"same_direction_fvg_unavailable"})
 _REJECTED_REASONS = frozenset(
@@ -128,6 +129,16 @@ def _market_fields(snapshot):
     return granularities, monthly, event, missing, htf, zones
 
 
+def _valid_m15_successor(setup):
+    signal_start = datetime.fromisoformat(setup["signal_start"])
+    available_at = datetime.fromisoformat(setup["available_at"])
+    entry_at = datetime.fromisoformat(setup["entry_at"])
+    first = registered_successor(signal_start, "M15")
+    second = registered_successor(first, "M15")
+    expected = first if available_at <= first else second
+    return signal_start < first <= entry_at and available_at <= entry_at and entry_at == expected
+
+
 def build_assessment(
     *,
     method_digest,
@@ -141,7 +152,7 @@ def build_assessment(
     predecessor_terminal_state="open",
 ):
     """Return one closed-schema assessment and optional research-only candidate."""
-    if method_digest != METHOD_DIGEST:
+    if method_digest not in (METHOD_DIGEST, METHOD_V11_DIGEST):
         raise ValueError("input_integrity_failure")
     cutoff = datetime.fromisoformat(snapshot["information_cutoff"])
     entries = eligibility["entries"]
@@ -199,13 +210,12 @@ def build_assessment(
     setup = m15_setups[0]["setup"] if len(m15_setups) == 1 else None
     if setup:
         try:
-            confirmation = datetime.fromisoformat(setup["available_at"])
-            entry_at = datetime.fromisoformat(setup["entry_at"])
-        except (KeyError, ValueError):
+            valid_successor = _valid_m15_successor(setup)
+        except (KeyError, TypeError, ValueError):
             _close(gates, "unsupported_intent_shape", "invalid completed-candle timestamps")
         else:
-            if entry_at != confirmation + timedelta(minutes=15):
-                _close(gates, "unsupported_intent_shape", "entry must be exact next M15")
+            if not valid_successor:
+                _close(gates, "unsupported_intent_shape", "entry must be registered M15 successor")
 
     required_ids = sorted(
         {

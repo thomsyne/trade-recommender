@@ -32,6 +32,21 @@ class IsolationTests(TestCase):
             manifest["original_candidate_commit"], "28fb56a0b695328fa46357d0519ea9a46c059046"
         )
         for relative, expected in manifest["sha256"].items():
+            corrected = subprocess.run(
+                ["git", "show", f"ce089dbb2813dff5574d50c20d4eabbec2ddf3df:{relative}"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            ).stdout
+            self.assertEqual(hashlib.sha256(corrected).hexdigest(), expected)
+
+    def test_closure_source_manifest_is_exact(self):
+        root = Path(__file__).resolve().parents[2]
+        manifest = json.loads((root / "docs/phase6a/closure-source-manifest.json").read_text())
+        self.assertEqual(
+            manifest["corrected_candidate_commit"], "ce089dbb2813dff5574d50c20d4eabbec2ddf3df"
+        )
+        for relative, expected in manifest["sha256"].items():
             self.assertEqual(hashlib.sha256((root / relative).read_bytes()).hexdigest(), expected)
 
     def test_bilateral_import_boundary(self):

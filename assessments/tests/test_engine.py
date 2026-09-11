@@ -1,12 +1,19 @@
+import json
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from importlib import import_module
 from unittest import TestCase
+from zoneinfo import ZoneInfo
 
-from assessments.contracts import METHOD_DIGEST, REASONS, ROLES
-from assessments.engine import build_assessment
+from assessments.contracts import METHOD_DIGEST, METHOD_V11_DIGEST, REASONS, ROLES
+from assessments.engine import _valid_m15_successor, build_assessment
+from assessments.legacy import build_v11_empty_assessment
 from market.state.canonical import identity_digest
+from market.state.features import Bar
+from market.strategy.contracts import encoded
 from market.strategy.definitions import definition_digest
+from market.strategy.setups import candidate as phase5_candidate
 
 CUTOFF = "2026-09-11T12:30:00.000000+00:00"
 HASH = "a" * 64
@@ -72,7 +79,7 @@ def evaluation(strategy=STRATEGY, *, direction=1, wick=False, unavailable_reason
         "schema": "phase5/setup-v1",
         "strategy": strategy,
         "direction": direction,
-        "available_at": "2026-09-11T12:15:00.000000+00:00",
+        "available_at": "2026-09-11T12:15:05.000001+00:00",
         "signal_start": "2026-09-11T12:00:00.000000+00:00",
         "granularity": "M15",
         "reference": "1.100000",
@@ -164,6 +171,16 @@ class EngineTests(TestCase):
         with self.assertRaisesRegex(ValueError, "input_integrity_failure"):
             calculate(method_digest="0" * 64)
 
+    def test_frozen_v11_empty_projection_matches_historical_engine_semantics(self):
+        expected, candidate = build_assessment(
+            method_digest=METHOD_V11_DIGEST,
+            snapshot=snapshot(),
+            eligibility={"identity": "b" * 64, "entries": []},
+            evaluations=[],
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(build_v11_empty_assessment(snapshot()), expected)
+
     def test_empty_eligibility_sits_out_despite_perfect_setup(self):
         output, candidate = calculate(eligibility={"identity": "b" * 64, "entries": []})
         self.assertEqual(output["decision"]["primary_reason"], "no_economically_admitted_strategy")
@@ -231,6 +248,50 @@ class EngineTests(TestCase):
         self.assertGreater(
             datetime.fromisoformat(wick["entry"]), datetime.fromisoformat(wick["confirmation"])
         )
+
+    def test_registered_m15_successor_handles_delayed_boundary_and_weekend(self):
+        start = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
+
+        def phase5_setup(signal_start, available_at):
+            end = signal_start + timedelta(minutes=15)
+            signal = Bar(
+                signal_start,
+                Decimal("1.100000"),
+                Decimal("1.101000"),
+                Decimal("1.099000"),
+                Decimal("1.100000"),
+                end,
+                Decimal("0.000100"),
+                "M15",
+                end,
+                1,
+                HASH,
+            )
+            return json.loads(
+                encoded(
+                    phase5_candidate(
+                        STRATEGY,
+                        signal,
+                        1,
+                        Decimal("1.098000"),
+                        target=Decimal("1.104000"),
+                        available_at=available_at,
+                    )
+                )
+            )
+
+        boundary = phase5_setup(start, start + timedelta(minutes=15))
+        delayed = phase5_setup(start, start + timedelta(minutes=15, microseconds=1))
+        self.assertEqual(boundary["entry_at"], "2026-09-11T12:15:00.000000+00:00")
+        self.assertEqual(delayed["entry_at"], "2026-09-11T12:30:00.000000+00:00")
+        self.assertTrue(_valid_m15_successor(boundary))
+        self.assertTrue(_valid_m15_successor(delayed))
+
+        friday = datetime(2026, 1, 9, 21, 45, tzinfo=UTC)
+        weekend = phase5_setup(friday, friday + timedelta(minutes=15))
+        entry = datetime.fromisoformat(weekend["entry_at"]).astimezone(ZoneInfo("America/New_York"))
+        self.assertEqual((entry.weekday(), entry.hour, entry.minute), (6, 17, 0))
+        self.assertTrue(_valid_m15_successor(weekend))
 
     def test_cost_precision_staleness_spread_and_net_fail_closed(self):
         cases = [
