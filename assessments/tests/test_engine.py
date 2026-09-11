@@ -1,0 +1,408 @@
+import json
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from importlib import import_module
+from unittest import TestCase
+from zoneinfo import ZoneInfo
+
+from assessments.contracts import METHOD_DIGEST, METHOD_V11_DIGEST, REASONS, ROLES
+from assessments.engine import _valid_m15_successor, build_assessment
+from assessments.legacy import build_v11_empty_assessment
+from market.state.canonical import identity_digest
+from market.state.features import Bar
+from market.strategy.contracts import encoded
+from market.strategy.definitions import definition_digest
+from market.strategy.setups import candidate as phase5_candidate
+
+CUTOFF = "2026-09-11T12:30:00.000000+00:00"
+HASH = "a" * 64
+STRATEGY = "orb-m15-confirmed-v1:london"
+
+
+def snapshot():
+    granularities = {
+        timeframe: {
+            "state": "available",
+            "trend": {"state": "available", "direction": "up"},
+            "structure": {
+                "support_resistance_zones": {
+                    "state": "available",
+                    "zones": [
+                        {
+                            "age_bars": 7,
+                            "test_count": 2,
+                            "invalidated": False,
+                            "range_low": "1.090000",
+                            "range_high": "1.091000",
+                        }
+                    ],
+                }
+            },
+        }
+        for timeframe in ("W", "D", "H4", "H1", "M15")
+    }
+    return {
+        "information_cutoff": CUTOFF,
+        "granularities": granularities,
+        "monthly_context": {
+            "state": "available",
+            "completed_months": ["2026-08"],
+            "trend": {"state": "available", "direction": "up"},
+        },
+        "macro_regime": {"state": "unavailable", "reason_code": "macro_vintage_unavailable"},
+        "event_state": {
+            "state": "available",
+            "coverage": "attested_complete",
+            "events": [],
+            "active_window_vintages": [],
+        },
+    }
+
+
+def eligibility(strategy=STRATEGY, role=None, required=()):
+    return {
+        "identity": "b" * 64,
+        "entries": [
+            {
+                "strategy": strategy,
+                "definition_sha256": definition_digest(strategy),
+                "role": role or ROLES[strategy],
+                "required_evidence_ids": list(required),
+            }
+        ],
+    }
+
+
+def evaluation(strategy=STRATEGY, *, direction=1, wick=False, unavailable_reason=None):
+    setup = {
+        "schema": "phase5/setup-v1",
+        "strategy": strategy,
+        "direction": direction,
+        "available_at": "2026-09-11T12:15:05.000001+00:00",
+        "signal_start": "2026-09-11T12:00:00.000000+00:00",
+        "granularity": "M15",
+        "reference": "1.100000",
+        "stop": "1.098000" if direction == 1 else "1.102000",
+        "target": "1.104000" if direction == 1 else "1.096000",
+        "entry_at": "2026-09-11T12:30:00.000000+00:00",
+        "expires_at": "2026-09-11T12:45:00.000000+00:00",
+        "exit_at": "2026-09-11T19:00:00.000000+00:00",
+        "evidence": ["wick_through"] if wick else ["strict_completed_close"],
+    }
+    outputs = (
+        [
+            {
+                "schema": "phase5/unavailable-v1",
+                "strategy": strategy,
+                "reason": unavailable_reason,
+            }
+        ]
+        if unavailable_reason
+        else [setup]
+    )
+    output = {
+        "schema": "phase5/evaluation-v1",
+        "strategy": strategy,
+        "activation": "forbidden",
+        "outputs": outputs,
+    }
+    return {
+        "id": 1,
+        "identity": identity_digest([strategy, direction, wick, unavailable_reason]),
+        "strategy": strategy,
+        "definition_sha256": definition_digest(strategy),
+        "evidence_sha256": HASH,
+        "output_sha256": identity_digest(output),
+        "output": output,
+    }
+
+
+def cost(**components):
+    values = {
+        "spread": "0.000100",
+        "commission": "0.000020",
+        "slippage_latency": "0.000030",
+        "financing": "0.000000",
+        **components,
+    }
+    return {
+        "identity": "c" * 64,
+        "known_at": "2026-09-11T12:14:59.123456+00:00",
+        "stale_after": "2026-09-11T12:31:00.123456+00:00",
+        "components": values,
+    }
+
+
+def capacity(
+    aggregate="available", base="available", quote="available", directions=("long", "short")
+):
+    return {
+        "identity": "d" * 64,
+        "policy_identity": "hard-risk-v3@abc",
+        "source_identity": "frozen-capacity:42",
+        "aggregate": aggregate,
+        "currency_legs": [
+            {"currency": "EUR", "direction": directions[0], "disposition": base},
+            {"currency": "USD", "direction": directions[1], "disposition": quote},
+        ],
+    }
+
+
+def calculate(**overrides):
+    values = {
+        "method_digest": METHOD_DIGEST,
+        "snapshot": snapshot(),
+        "eligibility": eligibility(),
+        "evaluations": [evaluation()],
+        "cost": cost(),
+        "capacity": capacity(),
+    }
+    values.update(overrides)
+    return build_assessment(**values)
+
+
+class EngineTests(TestCase):
+    def test_python_and_sql_reason_precedence_are_identical(self):
+        migration = import_module("assessments.migrations.0003_phase6a_correction_guards")
+        self.assertEqual(migration.REASONS, REASONS)
+
+    def test_wrong_method_identity_refuses(self):
+        with self.assertRaisesRegex(ValueError, "input_integrity_failure"):
+            calculate(method_digest="0" * 64)
+
+    def test_frozen_v11_empty_projection_matches_historical_engine_semantics(self):
+        expected, candidate = build_assessment(
+            method_digest=METHOD_V11_DIGEST,
+            snapshot=snapshot(),
+            eligibility={"identity": "b" * 64, "entries": []},
+            evaluations=[],
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(build_v11_empty_assessment(snapshot()), expected)
+
+    def test_empty_eligibility_sits_out_despite_perfect_setup(self):
+        output, candidate = calculate(eligibility={"identity": "b" * 64, "entries": []})
+        self.assertEqual(output["decision"]["primary_reason"], "no_economically_admitted_strategy")
+        self.assertIsNone(candidate)
+        self.assertEqual(len(output) - 3, 9)
+
+    def test_exact_admitted_setup_emits_candidate_not_execution_authority(self):
+        output, candidate = calculate()
+        self.assertEqual(output["status"], "available")
+        self.assertIsNone(output["decision"]["primary_reason"])
+        self.assertEqual(candidate["schema"], "phase6a/eligible-trade-intent-candidate-v2")
+        self.assertEqual(
+            candidate["authority"], "research_candidate_only_no_execution_or_trade_permission"
+        )
+        self.assertFalse(set(candidate) & {"order", "fill", "recommendation", "size", "execution"})
+        self.assertEqual(output["reward_and_cost"]["gross_r"], "2.000000")
+        self.assertEqual(output["reward_and_cost"]["net_r"], "1.925000")
+
+    def test_roles_do_not_manufacture_shapes(self):
+        strategy = "ewmac-d-v1"
+        forecast = {
+            "id": 2,
+            "identity": "e" * 64,
+            "strategy": strategy,
+            "definition_sha256": definition_digest(strategy),
+            "evidence_sha256": HASH,
+            "output_sha256": HASH,
+            "output": {
+                "schema": "phase5/evaluation-v1",
+                "strategy": strategy,
+                "activation": "forbidden",
+                "outputs": [],
+            },
+        }
+        output, candidate = calculate(eligibility=eligibility(strategy), evaluations=[forecast])
+        self.assertEqual(
+            output["decision"]["primary_reason"], "strategy_role_cannot_originate_intent"
+        )
+        self.assertIsNone(candidate)
+
+    def test_monthly_and_m15_missing_are_unavailable_but_m1_is_not_a_gate(self):
+        market = snapshot()
+        market["monthly_context"] = {"state": "unavailable"}
+        market["granularities"]["M15"] = {"state": "unavailable"}
+        output, candidate = calculate(snapshot=market)
+        self.assertEqual(output["decision"]["primary_reason"], "required_timeframe_unavailable")
+        self.assertFalse(output["mechanical_trigger"]["m1_inferred"])
+        timeframe_gate = next(
+            gate
+            for gate in output["decision"]["gates"]
+            if gate["reason"] == "required_timeframe_unavailable"
+        )
+        self.assertNotIn("M1,", timeframe_gate["detail"] + ",")
+        self.assertIsNone(candidate)
+
+    def test_wick_and_close_are_distinct_and_entry_is_next_m15(self):
+        wick_strategy = "orb-m15-wick-v1:london"
+        _, close = calculate()
+        _, wick = calculate(
+            eligibility=eligibility(wick_strategy),
+            evaluations=[evaluation(wick_strategy, wick=True)],
+        )
+        self.assertNotEqual(close["semantic_identity"], wick["semantic_identity"])
+        self.assertEqual(wick["trigger"], ["wick_through"])
+        self.assertGreater(
+            datetime.fromisoformat(wick["entry"]), datetime.fromisoformat(wick["confirmation"])
+        )
+
+    def test_registered_m15_successor_handles_delayed_boundary_and_weekend(self):
+        start = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
+
+        def phase5_setup(signal_start, available_at):
+            end = signal_start + timedelta(minutes=15)
+            signal = Bar(
+                signal_start,
+                Decimal("1.100000"),
+                Decimal("1.101000"),
+                Decimal("1.099000"),
+                Decimal("1.100000"),
+                end,
+                Decimal("0.000100"),
+                "M15",
+                end,
+                1,
+                HASH,
+            )
+            return json.loads(
+                encoded(
+                    phase5_candidate(
+                        STRATEGY,
+                        signal,
+                        1,
+                        Decimal("1.098000"),
+                        target=Decimal("1.104000"),
+                        available_at=available_at,
+                    )
+                )
+            )
+
+        boundary = phase5_setup(start, start + timedelta(minutes=15))
+        delayed = phase5_setup(start, start + timedelta(minutes=15, microseconds=1))
+        self.assertEqual(boundary["entry_at"], "2026-09-11T12:15:00.000000+00:00")
+        self.assertEqual(delayed["entry_at"], "2026-09-11T12:30:00.000000+00:00")
+        self.assertTrue(_valid_m15_successor(boundary))
+        self.assertTrue(_valid_m15_successor(delayed))
+
+        friday = datetime(2026, 1, 9, 21, 45, tzinfo=UTC)
+        weekend = phase5_setup(friday, friday + timedelta(minutes=15))
+        entry = datetime.fromisoformat(weekend["entry_at"]).astimezone(ZoneInfo("America/New_York"))
+        self.assertEqual((entry.weekday(), entry.hour, entry.minute), (6, 17, 0))
+        self.assertTrue(_valid_m15_successor(weekend))
+
+    def test_cost_precision_staleness_spread_and_net_fail_closed(self):
+        cases = [
+            (None, "spread_unknown"),
+            ({**cost(), "stale_after": "2026-09-11T12:29:59.999999+00:00"}, "cost_evidence_stale"),
+            (cost(spread=None), "spread_unknown"),
+            (cost(spread="0.000201"), "spread_exceeds_strategy_limit"),
+            (
+                cost(
+                    spread="0.000100",
+                    commission="0.002000",
+                    slippage_latency="0.002000",
+                ),
+                "net_reward_nonpositive",
+            ),
+        ]
+        for costs, reason in cases:
+            with self.subTest(reason=reason):
+                output, candidate = calculate(cost=costs)
+                self.assertEqual(output["decision"]["primary_reason"], reason)
+                self.assertIsNone(candidate)
+
+    def test_historical_capacity_and_both_currency_legs_are_frozen(self):
+        for cap, reason in (
+            (None, "capacity_assessment_missing"),
+            (capacity(aggregate="exceeded"), "aggregate_capacity_exceeded"),
+            (capacity(base="exceeded"), "currency_direction_capacity_exceeded"),
+            (capacity(quote="exceeded"), "currency_direction_capacity_exceeded"),
+            (capacity(directions=("short", "long")), "currency_direction_capacity_exceeded"),
+        ):
+            with self.subTest(reason=reason):
+                output, candidate = calculate(capacity=cap)
+                self.assertEqual(output["decision"]["primary_reason"], reason)
+                self.assertIsNone(candidate)
+
+    def test_phase7_packet_requirement_is_method_bound_and_ai_text_has_no_authority(self):
+        required = "f" * 64
+        blocked = eligibility(required=(required,))
+        output, _ = calculate(eligibility=blocked, evidence={"authority": "trade now"})
+        self.assertEqual(output["decision"]["primary_reason"], "required_evidence_not_ready")
+        self.assertIsNone(calculate(evidence={"authority": "trade now"})[1])
+        self.assertEqual(
+            calculate(evidence={"authority": "trade now"})[0]["decision"]["primary_reason"],
+            "input_integrity_failure",
+        )
+
+    def test_event_unknown_active_conflict_and_duplicate_precedence(self):
+        unknown = snapshot()
+        unknown["event_state"] = {"state": "unavailable", "reason_code": "unknown"}
+        self.assertEqual(
+            calculate(snapshot=unknown)[0]["decision"]["primary_reason"], "event_state_unknown"
+        )
+        active = snapshot()
+        active["event_state"]["active_window_vintages"] = [HASH]
+        self.assertEqual(
+            calculate(snapshot=active)[0]["decision"]["primary_reason"], "event_window_blocked"
+        )
+        opposite = evaluation(direction=-1)
+        opposite["id"] = 2
+        opposite["identity"] = "8" * 64
+        self.assertEqual(
+            calculate(evaluations=[evaluation(), opposite])[0]["decision"]["primary_reason"],
+            "conflicting_eligible_setups",
+        )
+        self.assertEqual(
+            calculate(duplicate=True)[0]["decision"]["primary_reason"],
+            "unchanged_duplicate_intent",
+        )
+
+    def test_same_direction_setups_also_conflict(self):
+        second = evaluation()
+        second["id"] = 2
+        second["identity"] = "8" * 64
+        second["output"]["outputs"][0]["target"] = "1.105000"
+        second["output_sha256"] = identity_digest(second["output"])
+        output, candidate = calculate(evaluations=[evaluation(), second])
+        self.assertEqual(output["decision"]["primary_reason"], "conflicting_eligible_setups")
+        self.assertIsNone(candidate)
+
+    def test_gates_have_exact_frozen_order_and_explicit_phase5_reason_mapping(self):
+        for reason, expected in (
+            ("same_direction_fvg_unavailable", "trigger_pending"),
+            ("ambiguous_dual_breach", "trigger_rejected"),
+            ("invalid_geometry", "trigger_invalidated"),
+            ("no_confirmation_before_expiry", "trigger_expired"),
+        ):
+            with self.subTest(reason=reason):
+                output, _ = calculate(evaluations=[evaluation(unavailable_reason=reason)])
+                gates = output["decision"]["gates"]
+                self.assertEqual([gate["reason"] for gate in gates], list(REASONS))
+                self.assertEqual(len(gates), len(REASONS))
+                self.assertEqual(output["decision"]["primary_reason"], expected)
+
+    def test_evaluation_identity_evidence_and_predecessor_terminal_state_are_material(self):
+        _, first = calculate()
+        changed = evaluation()
+        changed["identity"] = "7" * 64
+        changed["evidence_sha256"] = "6" * 64
+        _, successor = calculate(evaluations=[changed])
+        _, expired_successor = calculate(
+            evaluations=[changed], predecessor_terminal_state="expired"
+        )
+        self.assertNotEqual(first["semantic_identity"], successor["semantic_identity"])
+        self.assertNotEqual(successor["semantic_identity"], expired_successor["semantic_identity"])
+        self.assertEqual(successor["evaluation_evidence_sha256"], "6" * 64)
+
+    def test_later_inputs_do_not_mutate_old_bytes(self):
+        output, candidate = calculate()
+        frozen = deepcopy((output, candidate))
+        later = eligibility()
+        later["identity"] = "1" * 64
+        later["entries"][0]["required_evidence_ids"] = ["2" * 64]
+        calculate(eligibility=later)
+        self.assertEqual((output, candidate), frozen)

@@ -1,0 +1,27 @@
+{
+  "base_commit": "005b21f042cbc0aacd556c83ef16c86742cba06a",
+  "corrected_candidate_commit": "ce089dbb2813dff5574d50c20d4eabbec2ddf3df",
+  "corrected_candidate_tree": "943a9e568c3290ae6a4926f74ae0aa5a5c10413d",
+  "implementation_sha256": "1b1d552759276d3887c50a82f9704d5ace4273cf6e6641b627e8d3b694cd68cb",
+  "method_digest": "95bc41c6d6dfcc07f96ac7ec2982ec1f3deea58806cc6ad7581af987efa399e8",
+  "schema": "phase6a/closure-source-manifest-v1",
+  "sha256": {
+    "assessments/contracts.py": "37f0f67a25645b823cf084c3c2e1a4728fc726506c7393d6076ee385020c93c7",
+    "assessments/engine.py": "27c16e54e790d3f43763dba3592ab5990c86535115339a24a2b991fbef495c0a",
+    "assessments/legacy.py": "ee839979902df891ab93235f26d29579006c6ce5b74d3b25ed615d4b9d1b693c",
+    "assessments/migrations/0001_initial.py": "5a12b326e804e22083466e3a0acfd705c485728b8eeef6b323dba0941eb1353a",
+    "assessments/migrations/0002_phase6a_guards.py": "f489e8be62c7c8a0379e1fb59edcee7e8ff8c7f6a97ec32fac490fc068790707",
+    "assessments/migrations/0003_phase6a_correction_guards.py": "b0683f223fb3eb4fcceded7d8a5de64ee807dbf65b677df099d34799938a9054",
+    "assessments/migrations/0004_phase6a_closure_guards.py": "9f5696c6380d5fae66e1cadeacb1004d5a9565fc044992886973abadfe9a53c3",
+    "assessments/models.py": "67337bf50609423e5acb1982dfc7bb49a4d12ad9dc456fa1728d89b5419ea4e4",
+    "assessments/services.py": "e12522a88af199216792b0a55e7ef17707f43200d084671c1b0107de34f034a5",
+    "assessments/source_pins.py": "dd2dad99ca41c80b39eb61f806765002e0581edcb66208fcf0f61be706bc9c53",
+    "assessments/tests/test_engine.py": "095097cd1b99d48386241c48f36078528afeaa3690f144322ca6f3e02f0cdeac",
+    "assessments/tests/test_isolation.py": "f6ad1f132e14ceb2c52ced9098822dac49d9a7bc06450215b4ce1b726bbf37a5",
+    "assessments/tests/test_migrations.py": "cbab8e4f87456c7d0596d455753ccc5a57043b7b66200dbff96866e2473945f0",
+    "docs/phase6a/closure-corrections.md": "462acd4cf9cef34fbfbef0db337d745ef14d6bdab05630b216cdd2c6dbed1928",
+    "docs/phase6a/closure-verification.md": "b3fa4e5c03af349fd94a0c2433da36a6da055699894f0c39c86c94b20e851a16",
+    "docs/phase6a/corrected-source-manifest.json": "8fa8baa3c70e4f49143aceace2aeae207caf30e03a3a71c4ceebd4de58e19236",
+    "docs/phase6a/source-manifest.json": "36c2109efa5a44633ba4ee1664668fd04f0954218e79ef773da0a72d53053136"
+  }
+}
