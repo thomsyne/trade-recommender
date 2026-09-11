@@ -1,0 +1,29 @@
+[Unit]
+Description=Registered offline development replay only
+OnSuccess=phase55-preserve.service
+OnFailure=phase55-preserve.service
+
+[Service]
+Type=exec
+User=phase55
+Group=phase55
+WorkingDirectory=/var/lib/phase55/work
+ExecStart=/bin/bash /var/lib/phase55/work/infra/validation-worker/run-batch.sh
+Environment=OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/phase55/work/.candidate-data/phase55-v1
+ReadOnlyPaths=/var/lib/phase55/work/.candidate-data/phase55-v1/acquisition.sqlite3
+NoNewPrivileges=true
+CapabilityBoundingSet=
+UMask=0077
+MemoryMax=28G
+MemorySwapMax=0
+OOMPolicy=stop
+RuntimeMaxSec=24h
+TimeoutStopSec=120
+KillMode=control-group
+Restart=no
