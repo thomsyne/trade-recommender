@@ -123,11 +123,13 @@ def verify_projection(path, binding):
 
 def run_group(group):
     from research.validation_batch import run
-    from research.validation_registration import Catalog
+    from research.validation_registration import VALIDATION_REVISION, Catalog
     from research.validation_reports import export_population, publish_immutable
 
     root = ROOT / ".candidate-data/phase55-v1"
-    frozen = json.loads((ROOT / "docs/phase5.5/frozen-registration-v5.json").read_text())
+    frozen = json.loads(
+        (ROOT / f"docs/phase5.5/frozen-registration-v{VALIDATION_REVISION}.json").read_text()
+    )
     binding = json.loads((ROOT / "docs/phase5.5/worker-transfer.json").read_text())
     verify_projection(root / "acquisition.sqlite3", binding)
     catalog = Catalog(root / f"worker-{group}.sqlite3")
@@ -177,7 +179,9 @@ def run_group(group):
                             flush=True,
                         )
             for strategy in batch:
-                reports = export_population(catalog, identity, strategy, root / "reports-v5")
+                reports = export_population(
+                    catalog, identity, strategy, root / f"reports-v{VALIDATION_REVISION}"
+                )
                 if len(reports) != 65 or len(set(reports)) != 65:
                     raise ValueError("worker_report_population_incomplete")
                 publish_immutable(

@@ -9,7 +9,7 @@ from pathlib import Path
 from market.state.canonical import canonical_json, identity_digest
 from research.validation_batch import run
 from research.validation_data import audit_cache
-from research.validation_registration import Catalog
+from research.validation_registration import VALIDATION_REVISION, Catalog
 from research.validation_reports import publish_immutable
 from research.validation_worker import verify_projection
 
@@ -33,7 +33,9 @@ def normalized(body):
 def main():
     root = Path(".candidate-data/phase55-v1")
     reference_path = Path(sys.argv[1])
-    frozen = json.loads(Path("docs/phase5.5/frozen-registration-v5.json").read_text())
+    frozen = json.loads(
+        Path(f"docs/phase5.5/frozen-registration-v{VALIDATION_REVISION}.json").read_text()
+    )
     reference = json.loads(reference_path.read_text())
     binding = json.loads(Path("docs/phase5.5/worker-transfer.json").read_text())
     verify_projection(root / "acquisition.sqlite3", binding)
