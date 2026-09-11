@@ -527,3 +527,84 @@ class ReviewReproductions(unittest.TestCase):
             validation_reports.plain_english(body),
             validation_reports.plain_english(json.loads(canonical_json(body))),
         )
+
+
+class CausalFeatureReuseTests(unittest.TestCase):
+    def setUp(self):
+        from research.validation_replay import _structure_feature
+
+        _structure_feature.cache_clear()
+        self.addCleanup(_structure_feature.cache_clear)
+
+    def test_shared_inputs_not_strategy_outcomes_are_reused(self):
+        from market.state import features, liquidity
+        from research.validation_replay import ReplayInput, Series
+
+        at = datetime(2020, 1, 6, 10, tzinfo=UTC)
+        hour = Series([fixtures.candle(at)])
+        data = {"H1": hour}
+        with (
+            patch.object(liquidity, "liquidity_context", return_value={"marker": 17}) as h1,
+            patch.object(
+                features, "break_of_structure_feature", return_value={"marker": 23}
+            ) as m15,
+        ):
+            a = ReplayInput("EUR_USD", at + timedelta(hours=1), data, "phase5-sweep-reversal-v1")
+            b = ReplayInput(
+                "EUR_USD", at + timedelta(hours=1), data, "phase5-acceptance-continuation-v1"
+            )
+            self.assertEqual(a.payload, b.payload)
+            self.assertEqual(h1.call_count, 1)
+            self.assertEqual(m15.call_count, 1)
+            a.payload["granularities"]["H1"]["liquidity"]["marker"] = -999
+            self.assertEqual(b.payload["granularities"]["H1"]["liquidity"]["marker"], 17)
+
+    def test_completed_window_revision_pair_and_restart_boundaries(self):
+        from market.state import liquidity
+        from research.validation_replay import ReplayInput, Series, _structure_feature
+
+        at = datetime(2020, 1, 6, 10, tzinfo=UTC)
+        original = fixtures.candle(at)
+        future = fixtures.candle(at + timedelta(hours=1), close="101")
+
+        def value(rows, cutoff, pair="EUR_USD"):
+            return ReplayInput(
+                pair, cutoff, {"H1": Series(rows)}, "phase5-sweep-reversal-v1"
+            ).payload
+
+        with patch.object(
+            liquidity, "liquidity_context", wraps=liquidity.liquidity_context
+        ) as compute:
+            first = value([original], at + timedelta(hours=1))
+            self.assertEqual(value([original, future], at + timedelta(hours=1, minutes=59)), first)
+            self.assertEqual(compute.call_count, 1)
+            value([original, future], at + timedelta(hours=2))
+            self.assertEqual(compute.call_count, 2)
+            revised = {**original, "acquired_at": "2026-09-11T01:00:00+00:00"}
+            value([revised], at + timedelta(hours=1))
+            self.assertEqual(compute.call_count, 3)
+            value([original], at + timedelta(hours=1), "GBP_USD")
+            self.assertEqual(compute.call_count, 4)
+            _structure_feature.cache_clear()
+            self.assertEqual(value([original], at + timedelta(hours=1)), first)
+            self.assertEqual(compute.call_count, 5)
+
+    def test_cache_is_bounded_and_agrees_with_uncached_formula(self):
+        from market.state import features, liquidity
+        from research.validation_replay import Series, _structure_feature
+
+        at = datetime(2020, 1, 6, 10, tzinfo=UTC)
+        bars = Series([fixtures.candle(at), fixtures.candle(at + timedelta(hours=2))]).bars
+        for granularity in ("H1", "M15"):
+            expected = (
+                liquidity.liquidity_context(bars, features._current_atr(bars), "EUR_USD", "H1")
+                if granularity == "H1"
+                else features.break_of_structure_feature(bars)
+            )
+            self.assertEqual(json.loads(_structure_feature("EUR_USD", granularity, bars)), expected)
+        with patch.object(
+            features, "break_of_structure_feature", return_value={"state": "unavailable"}
+        ):
+            for index in range(4097):
+                _structure_feature(str(index), "M15", ())
+        self.assertEqual(_structure_feature.cache_info().currsize, 4096)

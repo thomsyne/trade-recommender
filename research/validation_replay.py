@@ -6,12 +6,14 @@ or old persisted contract accepts this type as evidence of historical knowledge.
 """
 
 import bisect
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal as D
+from functools import lru_cache
 
 from market.state import features, fvg, liquidity, structure
-from market.state.canonical import identity_digest
+from market.state.canonical import canonical_json, identity_digest
 from market.state.features import Bar, bars_are_consecutive
 from market.strategy.contracts import arithmetic
 from market.strategy.evaluate import evaluate
@@ -59,6 +61,20 @@ class Series:
         if require_contiguous and stop > start and self.gaps[stop - 1] != self.gaps[start]:
             return ()
         return self.bars[start:stop]
+
+
+@lru_cache(maxsize=4096)
+@arithmetic
+def _structure_feature(instrument, granularity, bars):
+    # Keys contain the entire immutable, causally selected bar window, including
+    # revisions/acquisition provenance. Never cache by cutoff or instrument alone.
+    # JSON keeps cached values immutable; each consumer receives its own object.
+    value = (
+        liquidity.liquidity_context(bars, features._current_atr(bars), instrument, "H1")
+        if granularity == "H1"
+        else features.break_of_structure_feature(bars)
+    )
+    return canonical_json(value)
 
 
 @dataclass
@@ -118,15 +134,16 @@ class ReplayInput:
                         USE_TZ=True,
                     )
                 django.setup()
-            bars = self.series("H1")
             blocks["H1"] = {
-                "liquidity": liquidity.liquidity_context(
-                    bars, features._current_atr(bars), self.instrument, "H1"
+                "liquidity": json.loads(
+                    _structure_feature(self.instrument, "H1", self.series("H1"))
                 )
             }
             blocks["M15"] = {
                 "higher_timeframe": {
-                    "break_of_structure": features.break_of_structure_feature(self.series("M15"))
+                    "break_of_structure": json.loads(
+                        _structure_feature(self.instrument, "M15", self.series("M15"))
+                    )
                 }
             }
         elif self.strategy.startswith("orb-m15-fvg"):

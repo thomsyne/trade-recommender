@@ -21,7 +21,7 @@ from market.strategy.definitions import (
 from research.validation_acquisition import ROOT, canonical_pairs
 from research.validation_audit import PERIODS
 
-VALIDATION_REVISION = 3
+VALIDATION_REVISION = 4
 SOURCE_FILES = (
     *(str(path.relative_to(ROOT)) for path in sorted((ROOT / "market/state").glob("*.py"))),
     "market/apps.py",
@@ -37,8 +37,10 @@ SOURCE_FILES = (
     "docs/phase5.5/validation-revision-2.md",
     "docs/phase5.5/frozen-registration.json",
     "docs/phase5.5/frozen-registration-v2.json",
+    "docs/phase5.5/frozen-registration-v3.json",
     "docs/phase5.5/sealed-manifest.json",
     "docs/phase5.5/correction-cycle.md",
+    "docs/phase5.5/performance-successor.md",
 )
 SCENARIOS = ("baseline", "adverse_cost", "extra_interval_latency")
 DEVELOPMENT = ("2019-01-07T00:00:00+00:00", "2025-01-06T00:00:00+00:00")
@@ -126,7 +128,7 @@ def contract(audit):
         "schema": "phase55/validation-registration-v1",
         "revision": VALIDATION_REVISION,
         "supersedes_registration": json.loads(
-            (ROOT / "docs/phase5.5/frozen-registration-v2.json").read_text()
+            (ROOT / "docs/phase5.5/frozen-registration-v3.json").read_text()
         )["identity"],
         "mode": "model_based_retrospective_regular_session_not_broker_execution",
         "strategies": {
