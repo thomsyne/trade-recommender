@@ -167,6 +167,9 @@ class AcquisitionTests(unittest.TestCase):
             and r["period"] == "development"
             and r["end"] == "2025-01-06T00:00:00+00:00"
         )
+        # Exercise both sides in one parser fixture; Store separately refuses
+        # this deliberately wider, unregistered request in its admission test.
+        request = {**request, "start": "2025-01-01T00:00:00+00:00"}
         earlier, crossing = copy.deepcopy(self.candle), copy.deepcopy(self.candle)
         earlier["time"] = "2025-01-02T22:00:00Z"
         crossing["time"] = "2025-01-05T22:00:00Z"
