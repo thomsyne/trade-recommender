@@ -1,8 +1,8 @@
 # Phase 5.5 pre-release verification evidence
 
-Engineering evidence, not independent acceptance. Development is still running;
-this document does not assert a complete development population or review-ready
-candidate. The historical holdout remains sealed and has not been evaluated.
+Engineering evidence, not independent acceptance. The full registered development
+population and its reports are complete and verified. Independent pre-release
+review remains outstanding. The historical holdout remains sealed and unevaluated.
 
 ## Frozen revision 2 checks
 
@@ -53,10 +53,51 @@ must preserve the registered instrument order and fixed account denominator;
 FVG comparisons must retain the same-session confirmed opportunities. Partial
 checkpoint chains remain errors, never reports labelled complete.
 
+## Final population and interrupted attempts
+
+The final idle-catalog pass verified all 180 baseline/instrument chains: 2,191
+consecutive daily checkpoints each, 394,380 in revision 2. Every checkpoint body
+hash and chain predecessor was checked. Independently derived planned-opportunity
+counts matched: 1,565 per daily/ORB identity, 37,560 per H1 identity and 150,240
+per other M15 identity. Four overlay identities remain paired views, not separately
+selected directional populations. The catalog contains zero holdout checkpoints.
+
+All 975 JSON/English pairs passed canonical-byte, identity, text, attribution,
+account-denominator and sealed-state checks: 900 instrument views and 75 separately
+attributed aggregates covering all 19 identities. The final report index freezes
+every report identity and both file hashes. All formal dispositions are
+inconclusive under the preregistered evidence-first rule, not passes. Negative
+diagnostics, failed robustness gates and unavailable reasons remain visible.
+
+The first revision's body, actual registration clock and all 21,921 partial
+checkpoint hashes are preserved. Both runner registrations were committed before
+their respective logged development runs. The metadata-only final seal check
+matched the original 456 sealed chunks / 660,885 observations without selecting
+price blobs. No registered runner source or runtime changed during revision 2.
+
+The final synthetic run passed 37 executed tests with six database-dependent
+skips (43 total); lint and format checks passed for 549 files. The earlier PG15/17
+results and complete-suite limitation above remain unchanged. Forward readiness
+reports zero elapsed complete weeks and missing evidence, not confirmation.
+
+Do not treat interrupted job logs as passes. Earlier workers were deliberately
+repartitioned and resumed. One redundant AUD/JPY worker later timed out at SQLite
+`BEGIN IMMEDIATE` during a concurrent full-chain read. That read was stopped;
+the other worker completed the preserved chain. The final successful integrity
+pass ran after all writers stopped. The interrupted read and timeout logs remain
+indexed alongside the successful final pass. Use a backup or idle writers for
+full-chain reads; no source or timeout parameter was changed after outcomes.
+
+All owned batch, report, verification and log-tail processes are closed; temporary
+report backups are gone. Private replay artifacts remain intentionally retained.
+`evidence-index.json` contains the final closed-file hashes, exact changed paths,
+checkpoint history and links between registration, seal, catalog and reports.
+
 ## Closed evidence hashes
 
-Only finished files are indexed here; active development logs are not frozen.
-These are test/replay logs, not environment or credential files.
+The earlier closed-file index below is preserved. The complete final index is
+`evidence-index.json`. These are test/replay artifacts, not environment or
+credential files; no active log is represented as a frozen result.
 
 | Private filename | Bytes | SHA-256 |
 |---|---:|---|

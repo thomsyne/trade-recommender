@@ -55,6 +55,13 @@ population, or add `--baseline ID` for an overlay. Reporting refuses incomplete
 checkpoint chains. Aggregate account return uses 12 independent CAD100000
 accounts, including unavailable instruments, rather than selecting survivors.
 
+Read full chains with writers idle, or from a temporary SQLite backup as used in
+the reporting evidence. A long live-catalog read can exhaust the 30-second write
+timeout. One redundant development worker encountered this at `BEGIN IMMEDIATE`;
+its existing checkpoints remained intact and the other worker continued that
+chain. A timeout is not a pass: resume from committed daily checkpoints and verify
+the complete population afterward. Preserve the interrupted log.
+
 Observed BA spread, modeled commission/slippage and retrospective conversion are
 separate. Realized drawdown is explicitly **not mark-to-market drawdown**. Candle
 data does not establish actual fills, queue, path, or exceptional-session vintages.
