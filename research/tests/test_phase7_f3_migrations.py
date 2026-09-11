@@ -21,9 +21,10 @@ from forecasts.evidence_context import (
 )
 from market.models import Instrument
 from market.tests.historical_database import HistoricalDatabaseMixin, head_fingerprint
+from research.evidence_models import EvidenceContextResult
 from research.evidence_quality import VERSION, EvidenceError, canonical, digest
 from research.evidence_store import audit_integrity, freeze_packet
-from research.models import EvidenceContextResult, ResearchDocument
+from research.models import ResearchDocument
 from research.tests import test_phase7_evidence as fixtures
 from research.tests import test_phase7_migrations as migration_fixtures
 from research.tests.test_phase7_f3 import DIRECTIVES, NOMINAL_REPORTS

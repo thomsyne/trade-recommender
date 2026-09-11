@@ -374,8 +374,8 @@ def record_context_result(packet_id, response):
     """Explicit offline/test/admin path. No provider call or active method registration."""
     from django.db import transaction
 
+    from research.evidence_models import EvidenceContextResult
     from research.evidence_store import _append, load_frozen_packet
-    from research.models import EvidenceContextResult
 
     with transaction.atomic():
         packet = load_frozen_packet(packet_id)

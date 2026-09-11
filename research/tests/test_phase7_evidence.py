@@ -16,6 +16,13 @@ from forecasts.evidence_context import (
     validate_response_safe,
 )
 from research.evidence_baseline import analyze
+from research.evidence_models import (
+    EvidenceConflict,
+    EvidenceIncident,
+    EvidenceRightsReview,
+    ExactEvidence,
+    FrozenEvidencePacket,
+)
 from research.evidence_quality import (
     FIELDS,
     USES,
@@ -39,15 +46,7 @@ from research.evidence_store import (
     review_rights,
     store_representation,
 )
-from research.models import (
-    EvidenceConflict,
-    EvidenceIncident,
-    EvidenceRightsReview,
-    ExactEvidence,
-    FrozenEvidencePacket,
-    RawRetrieval,
-    ResearchDocument,
-)
+from research.models import RawRetrieval, ResearchDocument
 from research.tests.factories import source_policy
 
 NOW = datetime(2026, 9, 11, 12, tzinfo=UTC)
@@ -709,7 +708,7 @@ class EvidencePersistenceTests(TestCase):
 
         from forecasts.evidence_context import record_context_result, replay_context_result
         from market.models import Instrument
-        from research.models import EvidenceContextResult
+        from research.evidence_models import EvidenceContextResult
 
         self.exact()
         instrument = Instrument.objects.create(

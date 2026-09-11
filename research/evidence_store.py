@@ -10,6 +10,15 @@ from defusedxml import ElementTree
 from django.db import connection, transaction
 from django.utils import timezone
 
+from research.evidence_models import (
+    EvidenceConflict,
+    EvidenceContextResult,
+    EvidenceIncident,
+    EvidenceLegacyAdmission,
+    EvidenceRightsReview,
+    ExactEvidence,
+    FrozenEvidencePacket,
+)
 from research.evidence_quality import (
     VERSION,
     build_packet,
@@ -22,16 +31,7 @@ from research.evidence_quality import (
     validate_representation,
     validate_review,
 )
-from research.models import (
-    EvidenceConflict,
-    EvidenceContextResult,
-    EvidenceIncident,
-    EvidenceLegacyAdmission,
-    EvidenceRightsReview,
-    ExactEvidence,
-    FrozenEvidencePacket,
-    ResearchDiscrepancy,
-)
+from research.models import ResearchDiscrepancy
 from research.parsers import parse_feed
 
 

@@ -11,7 +11,18 @@ engineering review and PM acceptance are separate from deterministic validation.
 `research.evidence_store` owns explicit append operations and immutable-source
 replay. `forecasts.evidence_context` owns an offline request/response contract;
 it contains **no network transport**. Existing ingestion, recommendation,
-interpretation, schedules, configuration and pages remain unchanged.
+interpretation, schedules, consumer configuration and pages remain unchanged.
+
+`research.evidence_models` owns the seven Phase7 model declarations. They retain
+the `research` app label, original tables, fields, constraints and migrations.
+`ResearchConfig.import_models()` imports the extension after the historical
+models module, during Django's model-registration phase and before `models_ready`
+or any `ready()` hooks. No evidence service runs at startup. The historical
+`research/models.py` is byte-identical to the required base and its S1 source pin;
+no governance pin or artifact was relaxed. The fresh-process registration test
+checks this import boundary and exact migration-state equivalence. Since
+`import_models()` is a framework lifecycle hook rather than a prominently
+documented customization API, retain that regression on Django upgrades.
 
 Seven new research records use protective FKs, unique canonical digests, ORM
 mutation refusal and SQL update/delete/truncate guards. `recorded_at` comes from

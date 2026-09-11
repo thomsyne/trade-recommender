@@ -14,9 +14,9 @@ from forecasts.evidence_context import (
     validate_response_safe,
 )
 from market.models import Instrument
+from research.evidence_models import EvidenceContextResult
 from research.evidence_quality import EvidenceError, canonical
 from research.evidence_store import audit_integrity, freeze_packet
-from research.models import EvidenceContextResult
 from research.tests import test_phase7_evidence as fixtures
 
 DIRECTIVES = (

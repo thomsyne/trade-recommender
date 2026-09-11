@@ -18,6 +18,11 @@ from forecasts.evidence_context import (
     validate_response_safe,
 )
 from market.models import Instrument
+from research.evidence_models import (
+    EvidenceContextResult,
+    EvidenceLegacyAdmission,
+    ExactEvidence,
+)
 from research.evidence_quality import EvidenceError, canonical, digest, iso
 from research.evidence_store import (
     admit_legacy_conflicts,
@@ -29,9 +34,6 @@ from research.evidence_store import (
     verify_representation,
 )
 from research.models import (
-    EvidenceContextResult,
-    EvidenceLegacyAdmission,
-    ExactEvidence,
     MacroObservation,
     MacroSeries,
     ResearchDiscrepancy,

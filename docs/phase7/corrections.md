@@ -97,3 +97,65 @@ The coordinator authorized a separate bounded architecture repair to restore
 the exact base file bytes without changing S1 pins/artifacts/tests. No further
 broad run is authorized; the final handoff must distinguish this earlier failed
 complete run from later focused correction/integration evidence.
+
+## Authorized source-pin integration repair and final focused evidence
+
+The exact two broad-run S1 failures reproduced unchanged before the repair.
+Their tests and all S1 governance artifacts remain untouched. The original
+`research/models.py` now matches base bytes, SHA256
+`cb72ee3f0ea35b6e0388bdc26394c80c283607d20c7be0a473c77d6ffe5048e9`.
+The seven Phase7 class definitions moved unchanged to `research.evidence_models`;
+an AST comparison verified identical declarations. `ResearchConfig.import_models`
+registers them during Django phase two, retaining app labels, table names,
+relations and migration ownership. A fresh-interpreter regression proves the
+models exist before ResearchConfig's ready hook and match migration state.
+No migration reorganization, schema/data rewrite or service activation was needed.
+
+The final frozen Python source manifest SHA256 is
+`78aa185bb6390cac49cfbc2eec9af7ee068247098a0e8707db72faad84f71e13`.
+It hashes sorted tracked/unignored Python paths as `path SHA256(bytes)\n`; the
+focused logs record both this manifest and the pre-integration parent commit.
+No Python source changed during or after these runs:
+
+| Check | Final localized-correction evidence |
+|---|---|
+| PG15.19 focused Phase7 + registration + both exact S1 regressions | 42 passed, 15.809s, exit 0 |
+| PG17.11 same focused labels | 42 passed, 15.922s, exit 0 |
+| PG17 `make check`, Django 5.2.17 | Passed; lint, format, system checks, migration drift, compilation |
+| PG15 migration drift | No changes detected, exit 0 |
+| Base source / protected migration preservation | Exact base model bytes; no integration edits to migrations 0016–0023; no pre-Phase7 migration edits |
+| One clean broad suite, earlier `abaef12` only | 1,554 tests, 1,498.470s, two S1 errors, exit 1; not rerun after F3/integration |
+| Original mixed-source broad process | SIGTERM/exit 143, no complete summary; invalid for original and corrected candidates |
+
+Exact commands, terminal statuses and logs are retained under `verification/`.
+The complete broad run and its six original restore-required exclusions remain
+unaltered evidence for its earlier source only. The final candidate has focused
+coverage, **not a passing final broad suite**. No further broad attempt was made.
+
+## Engineering traceability for independent closure and PM review
+
+These are engineering dispositions, not acceptance. F1/F2/F4/F5 were independently
+closed at the preceding candidate; only original F3 and the exact S1 integration
+blocker are submitted for bounded closure. No new review scope is inferred.
+
+| Preregistered requirement | Engineering evidence / remaining qualification |
+|---|---|
+| A — forward-only records | Protective references, append-only SQL, populated reversal refusal; prior data fingerprints stable; historical model source restored |
+| B — exact representation | Immutable RSS replay, macro admission label stamp and precision binding; later mutable labels do not change authenticated replay |
+| C — independent quality | Required retrieval/date-only/unknown precision abstains; no quality label grants rights or whole-item verification |
+| D — cutoff conflict | Unknown/material template preconditions; explicit serialized legacy admission separates discovery from historical observed time |
+| E — rights | Existing six-field/seven-use decisions unchanged; source/processor storage and external grants remain separate; unknown fails closed |
+| F — relevance | Frozen deterministic lexical ranking/dedup/cap and full denominator unchanged; no outcome fitting or new permission |
+| G — packet/readiness | Required-evidence abstention, canonical frozen replay, late-arrival reconstruction and concurrency regressions pass |
+| H/I — context and enforcement | Successor nominal grammar in Python/SQL rejects authentic directives; exact templates retain mechanical preconditions; old method replay remains under original policy; bounded closure requested |
+| J — incident dedupe | Four-writer representation/packet/incident regression passes; only explicit safe notification seam, no automatic delivery hook |
+| K/L — UI/operations/dormancy | No current consumer/page/schedule/provider/strategy/trading switch; model registration alone performs no evidence operation; no visual change |
+
+The committed historical baseline and audit contract remain unchanged. The
+deployed aggregate audit is not a source-row replay without its matching restore;
+unknown frozen jurisdictions and historical legacy arrival remain unknown.
+Pricing stays an owner-review-required assumption. The nominal grammar sacrifices
+coverage intentionally; expanding it requires prospective versioning and review.
+No independent closure or PM acceptance is claimed by these green engineering
+checks. Merge, deployment, provider calls, activation and trading remain outside
+this authorization.
