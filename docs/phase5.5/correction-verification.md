@@ -17,6 +17,13 @@ hashes, checkpoint manifests and registration bodies/acquisition clocks were
 checked without rewriting those artifacts. The metadata-only coverage audit used
 SQL blob-read denial and a decompression sentinel; it matched the frozen audit.
 
+The corrected English renderer was also exercised against all 975 existing
+development reports. Canonical JSON round trips and reversed scenario dictionaries
+produced identical English for every report, matching all 975 original stored text
+files. Both original file hashes per report still matched the old index. This is
+renderer-determinism evidence only, not semantic recertification of old reports;
+successor report publication still requires the complete replay boundary.
+
 ## Full PG17 run failed with two errors
 
 The complete run finished, rather than being interrupted: 1,580 tests ran in
