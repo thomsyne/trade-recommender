@@ -1,8 +1,9 @@
 from copy import deepcopy
 from datetime import datetime
+from importlib import import_module
 from unittest import TestCase
 
-from assessments.contracts import METHOD_DIGEST, ROLES
+from assessments.contracts import METHOD_DIGEST, REASONS, ROLES
 from assessments.engine import build_assessment
 from market.state.canonical import identity_digest
 from market.strategy.definitions import definition_digest
@@ -66,7 +67,7 @@ def eligibility(strategy=STRATEGY, role=None, required=()):
     }
 
 
-def evaluation(strategy=STRATEGY, *, direction=1, wick=False):
+def evaluation(strategy=STRATEGY, *, direction=1, wick=False, unavailable_reason=None):
     setup = {
         "schema": "phase5/setup-v1",
         "strategy": strategy,
@@ -82,15 +83,26 @@ def evaluation(strategy=STRATEGY, *, direction=1, wick=False):
         "exit_at": "2026-09-11T19:00:00.000000+00:00",
         "evidence": ["wick_through"] if wick else ["strict_completed_close"],
     }
+    outputs = (
+        [
+            {
+                "schema": "phase5/unavailable-v1",
+                "strategy": strategy,
+                "reason": unavailable_reason,
+            }
+        ]
+        if unavailable_reason
+        else [setup]
+    )
     output = {
         "schema": "phase5/evaluation-v1",
         "strategy": strategy,
         "activation": "forbidden",
-        "outputs": [setup],
+        "outputs": outputs,
     }
     return {
         "id": 1,
-        "identity": identity_digest([strategy, direction, wick]),
+        "identity": identity_digest([strategy, direction, wick, unavailable_reason]),
         "strategy": strategy,
         "definition_sha256": definition_digest(strategy),
         "evidence_sha256": HASH,
@@ -144,6 +156,10 @@ def calculate(**overrides):
 
 
 class EngineTests(TestCase):
+    def test_python_and_sql_reason_precedence_are_identical(self):
+        migration = import_module("assessments.migrations.0003_phase6a_correction_guards")
+        self.assertEqual(migration.REASONS, REASONS)
+
     def test_wrong_method_identity_refuses(self):
         with self.assertRaisesRegex(ValueError, "input_integrity_failure"):
             calculate(method_digest="0" * 64)
@@ -158,7 +174,7 @@ class EngineTests(TestCase):
         output, candidate = calculate()
         self.assertEqual(output["status"], "available")
         self.assertIsNone(output["decision"]["primary_reason"])
-        self.assertEqual(candidate["schema"], "phase6a/eligible-trade-intent-candidate-v1")
+        self.assertEqual(candidate["schema"], "phase6a/eligible-trade-intent-candidate-v2")
         self.assertEqual(
             candidate["authority"], "research_candidate_only_no_execution_or_trade_permission"
         )
@@ -195,7 +211,12 @@ class EngineTests(TestCase):
         output, candidate = calculate(snapshot=market)
         self.assertEqual(output["decision"]["primary_reason"], "required_timeframe_unavailable")
         self.assertFalse(output["mechanical_trigger"]["m1_inferred"])
-        self.assertNotIn("M1,", output["decision"]["gates"][3]["detail"] + ",")
+        timeframe_gate = next(
+            gate
+            for gate in output["decision"]["gates"]
+            if gate["reason"] == "required_timeframe_unavailable"
+        )
+        self.assertNotIn("M1,", timeframe_gate["detail"] + ",")
         self.assertIsNone(candidate)
 
     def test_wick_and_close_are_distinct_and_entry_is_next_m15(self):
@@ -245,15 +266,16 @@ class EngineTests(TestCase):
                 self.assertEqual(output["decision"]["primary_reason"], reason)
                 self.assertIsNone(candidate)
 
-    def test_required_evidence_is_strategy_bound_and_ai_text_has_no_authority(self):
+    def test_phase7_packet_requirement_is_method_bound_and_ai_text_has_no_authority(self):
         required = "f" * 64
         blocked = eligibility(required=(required,))
         output, _ = calculate(eligibility=blocked, evidence={"authority": "trade now"})
         self.assertEqual(output["decision"]["primary_reason"], "required_evidence_not_ready")
-        ready = {"identity": "9" * 64, "readiness": "ready", "required_ids": [required]}
-        output, candidate = calculate(eligibility=blocked, evidence=ready)
-        self.assertEqual(output["status"], "available")
-        self.assertEqual(candidate["required_evidence"], ready["identity"])
+        self.assertIsNone(calculate(evidence={"authority": "trade now"})[1])
+        self.assertEqual(
+            calculate(evidence={"authority": "trade now"})[0]["decision"]["primary_reason"],
+            "input_integrity_failure",
+        )
 
     def test_event_unknown_active_conflict_and_duplicate_precedence(self):
         unknown = snapshot()
@@ -277,6 +299,43 @@ class EngineTests(TestCase):
             calculate(duplicate=True)[0]["decision"]["primary_reason"],
             "unchanged_duplicate_intent",
         )
+
+    def test_same_direction_setups_also_conflict(self):
+        second = evaluation()
+        second["id"] = 2
+        second["identity"] = "8" * 64
+        second["output"]["outputs"][0]["target"] = "1.105000"
+        second["output_sha256"] = identity_digest(second["output"])
+        output, candidate = calculate(evaluations=[evaluation(), second])
+        self.assertEqual(output["decision"]["primary_reason"], "conflicting_eligible_setups")
+        self.assertIsNone(candidate)
+
+    def test_gates_have_exact_frozen_order_and_explicit_phase5_reason_mapping(self):
+        for reason, expected in (
+            ("same_direction_fvg_unavailable", "trigger_pending"),
+            ("ambiguous_dual_breach", "trigger_rejected"),
+            ("invalid_geometry", "trigger_invalidated"),
+            ("no_confirmation_before_expiry", "trigger_expired"),
+        ):
+            with self.subTest(reason=reason):
+                output, _ = calculate(evaluations=[evaluation(unavailable_reason=reason)])
+                gates = output["decision"]["gates"]
+                self.assertEqual([gate["reason"] for gate in gates], list(REASONS))
+                self.assertEqual(len(gates), len(REASONS))
+                self.assertEqual(output["decision"]["primary_reason"], expected)
+
+    def test_evaluation_identity_evidence_and_predecessor_terminal_state_are_material(self):
+        _, first = calculate()
+        changed = evaluation()
+        changed["identity"] = "7" * 64
+        changed["evidence_sha256"] = "6" * 64
+        _, successor = calculate(evaluations=[changed])
+        _, expired_successor = calculate(
+            evaluations=[changed], predecessor_terminal_state="expired"
+        )
+        self.assertNotEqual(first["semantic_identity"], successor["semantic_identity"])
+        self.assertNotEqual(successor["semantic_identity"], expired_successor["semantic_identity"])
+        self.assertEqual(successor["evaluation_evidence_sha256"], "6" * 64)
 
     def test_later_inputs_do_not_mutate_old_bytes(self):
         output, candidate = calculate()

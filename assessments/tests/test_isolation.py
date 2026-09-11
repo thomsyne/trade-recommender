@@ -1,6 +1,7 @@
 import ast
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from unittest import TestCase
 
@@ -15,6 +16,21 @@ class IsolationTests(TestCase):
         root = Path(__file__).resolve().parents[2]
         manifest = json.loads((root / "docs/phase6a/source-manifest.json").read_text())
         self.assertEqual(manifest["base_commit"], "005b21f042cbc0aacd556c83ef16c86742cba06a")
+        for relative, expected in manifest["sha256"].items():
+            original = subprocess.run(
+                ["git", "show", f"28fb56a0b695328fa46357d0519ea9a46c059046:{relative}"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            ).stdout
+            self.assertEqual(hashlib.sha256(original).hexdigest(), expected)
+
+    def test_corrected_source_manifest_is_exact(self):
+        root = Path(__file__).resolve().parents[2]
+        manifest = json.loads((root / "docs/phase6a/corrected-source-manifest.json").read_text())
+        self.assertEqual(
+            manifest["original_candidate_commit"], "28fb56a0b695328fa46357d0519ea9a46c059046"
+        )
         for relative, expected in manifest["sha256"].items():
             self.assertEqual(hashlib.sha256((root / relative).read_bytes()).hexdigest(), expected)
 

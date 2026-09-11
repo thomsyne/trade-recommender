@@ -2,22 +2,22 @@
 
 import json
 from datetime import UTC
-from decimal import Decimal
 
 from django.db import connection, transaction
 from django.utils import timezone
 
 from market.models import MarketStateSnapshot, StrategyEvaluation
 from market.state.canonical import canonical_json, identity_digest
-from market.strategy.definitions import STRATEGIES, definition_digest
 from market.strategy.persistence import _verified_chain, load_snapshot
-from research.evidence_store import load_frozen_packet
 
 from .contracts import (
+    EMPTY_DECISION_SHA256,
+    EMPTY_ELIGIBILITY_ERA,
+    EMPTY_MANIFEST_SHA256,
+    EMPTY_PROVENANCE_SHA256,
     METHOD_DIGEST,
     METHOD_KEY,
     METHOD_VERSION,
-    ROLES,
     method_payload,
     verify_implementation,
 )
@@ -27,26 +27,9 @@ from .models import (
     CapacityAssessment,
     CostEvidence,
     EligibilitySnapshot,
-    EligibleTradeIntentCandidate,
     IntentSupersession,
     MultiTimeframeAssessment,
 )
-
-
-def _iso(value):
-    if value.tzinfo is None:
-        raise ValueError("naive_time")
-    return value.astimezone(UTC).isoformat(timespec="microseconds")
-
-
-def _hash(value, name):
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(c not in "0123456789abcdef" for c in value)
-    ):
-        raise ValueError(f"invalid_{name}")
-    return value
 
 
 def _lock(key):
@@ -56,6 +39,10 @@ def _lock(key):
 
 def _canonical(value):
     return json.loads(canonical_json(value))
+
+
+def _iso(value):
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 @transaction.atomic
@@ -74,38 +61,23 @@ def register_method():
 
 
 def _eligibility_payload(instrument, era, entries, decision, manifest, provenance):
-    normalized = []
-    for item in entries:
-        strategy = item["strategy"]
-        if strategy not in STRATEGIES:
-            raise ValueError("unknown_strategy")
-        role = item["role"]
-        if role != ROLES[strategy] or item["definition_sha256"] != definition_digest(strategy):
-            raise ValueError("eligibility_attribution")
-        required = sorted(set(item.get("required_evidence_ids", [])))
-        if required:
-            raise ValueError("strategy_has_no_phase7_requirement_in_method_v1")
-        for digest in required:
-            _hash(digest, "required_evidence")
-        normalized.append(
-            {
-                "strategy": strategy,
-                "definition_sha256": item["definition_sha256"],
-                "role": role,
-                "required_evidence_ids": required,
-            }
-        )
-    normalized.sort(key=lambda item: item["strategy"])
-    if len({item["strategy"] for item in normalized}) != len(normalized):
-        raise ValueError("duplicate_eligibility")
+    if entries:
+        raise ValueError("phase55_authority_unavailable")
+    if (
+        era != EMPTY_ELIGIBILITY_ERA
+        or decision != EMPTY_DECISION_SHA256
+        or manifest != EMPTY_MANIFEST_SHA256
+        or provenance != EMPTY_PROVENANCE_SHA256
+    ):
+        raise ValueError("canonical_empty_eligibility_required")
     return {
         "schema": "phase6a/eligibility-v1",
         "instrument": instrument.code,
         "era": era,
-        "phase55_decision_sha256": _hash(decision, "phase55_decision"),
-        "phase55_manifest_sha256": _hash(manifest, "phase55_manifest"),
-        "admission_provenance_sha256": _hash(provenance, "admission_provenance"),
-        "entries": normalized,
+        "phase55_decision_sha256": decision,
+        "phase55_manifest_sha256": manifest,
+        "admission_provenance_sha256": provenance,
+        "entries": [],
     }
 
 
@@ -121,7 +93,12 @@ def append_reviewed_eligibility(
     admission_provenance_sha256,
     valid_until=None,
 ):
-    """Future owner seam only; this phase has no command/caller and seeds nothing."""
+    """Append only the canonical empty set until an authoritative Phase 5.5 contract exists."""
+    now = timezone.now()
+    if decision_known_at.tzinfo is None or decision_known_at > now:
+        raise ValueError("eligibility_chronology")
+    if valid_until is not None:
+        raise ValueError("canonical_empty_eligibility_has_no_expiry")
     payload = _canonical(
         _eligibility_payload(
             instrument,
@@ -136,77 +113,30 @@ def append_reviewed_eligibility(
     _lock(digest)
     existing = EligibilitySnapshot.objects.filter(digest=digest).first()
     if existing:
+        if existing.decision_known_at != decision_known_at:
+            raise ValueError("eligibility_identity_conflict")
         return existing
-    if decision_known_at > timezone.now() or (valid_until and valid_until <= timezone.now()):
-        raise ValueError("eligibility_chronology")
-    return EligibilitySnapshot.objects.create(
+    row = EligibilitySnapshot.objects.create(
         instrument=instrument,
-        valid_from=timezone.now(),  # SQL replaces this with its database clock.
-        valid_until=valid_until,
+        valid_from=now,  # SQL replaces this with its database clock.
+        valid_until=None,
         decision_known_at=decision_known_at,
         payload=payload,
         digest=digest,
         recorded_at=timezone.now(),
     )
+    row.refresh_from_db()
+    return row
 
 
 @transaction.atomic
 def append_cost_evidence(instrument, *, known_at, stale_after, payload):
-    required = {"schema", "source_identity", "source_version", "timestamp_precision", "components"}
-    if set(payload) != required or payload["schema"] != "phase6a/cost-evidence-v1":
-        raise ValueError("cost_schema")
-    if payload["timestamp_precision"] not in ("microsecond", "provider_exact"):
-        raise ValueError("cost_timestamp_precision")
-    if set(payload["components"]) != {"spread", "commission", "slippage_latency", "financing"}:
-        raise ValueError("cost_components")
-    for name, value in payload["components"].items():
-        if value is not None and (
-            not Decimal(value).is_finite() or (name != "financing" and Decimal(value) < 0)
-        ):
-            raise ValueError("cost_value")
-    if known_at.tzinfo is None or stale_after <= known_at:
-        raise ValueError("cost_chronology")
-    body = _canonical({**payload, "known_at": _iso(known_at), "stale_after": _iso(stale_after)})
-    digest = identity_digest(body)
-    _lock(digest)
-    return CostEvidence.objects.get_or_create(
-        digest=digest,
-        defaults={
-            "instrument": instrument,
-            "known_at": known_at,
-            "stale_after": stale_after,
-            "payload": body,
-            "recorded_at": timezone.now(),
-        },
-    )[0]
+    raise ValueError("cost_authority_unavailable")
 
 
 @transaction.atomic
 def append_capacity_assessment(instrument, *, assessed_at, payload):
-    required = {"schema", "policy_identity", "source_identity", "aggregate", "currency_legs"}
-    if set(payload) != required or payload["schema"] != "phase6a/capacity-v1":
-        raise ValueError("capacity_schema")
-    currencies = instrument.code.split("_")
-    if [leg.get("currency") for leg in payload["currency_legs"]] != currencies:
-        raise ValueError("capacity_currency_legs")
-    if payload["aggregate"] not in ("available", "exceeded") or any(
-        leg.get("disposition") not in ("available", "exceeded")
-        or leg.get("direction") not in ("long", "short")
-        for leg in payload["currency_legs"]
-    ):
-        raise ValueError("capacity_disposition")
-    body = _canonical({**payload, "assessed_at": _iso(assessed_at)})
-    digest = identity_digest(body)
-    _lock(digest)
-    return CapacityAssessment.objects.get_or_create(
-        digest=digest,
-        defaults={
-            "instrument": instrument,
-            "assessed_at": assessed_at,
-            "payload": body,
-            "recorded_at": timezone.now(),
-        },
-    )[0]
+    raise ValueError("capacity_authority_unavailable")
 
 
 def _evaluation_envelope(row, snapshot_id):
@@ -229,6 +159,9 @@ def _eligibility_envelope(row, cutoff, instrument_id):
         row.digest != identity_digest(row.payload)
         or row.instrument_id != instrument_id
         or row.payload["instrument"] != row.instrument.code
+        or row.valid_from != row.recorded_at
+        or row.valid_until is not None
+        or row.decision_known_at > row.recorded_at
         or not row.valid_from <= cutoff
         or (row.valid_until is not None and cutoff >= row.valid_until)
         or row.decision_known_at > cutoff
@@ -251,28 +184,35 @@ def _eligibility_envelope(row, cutoff, instrument_id):
 def _cost_envelope(row, cutoff, instrument_id):
     if row is None:
         return None
-    if (
-        row.instrument_id != instrument_id
-        or row.digest != identity_digest(row.payload)
-        or row.known_at > cutoff
-        or row.payload["known_at"] != _iso(row.known_at)
-        or row.payload["stale_after"] != _iso(row.stale_after)
-    ):
-        raise ValueError("cost_integrity_failure")
-    return {**row.payload, "identity": row.digest}
+    if row.recorded_at > cutoff:
+        raise ValueError("cost_recorded_after_cutoff")
+    raise ValueError("cost_authority_unavailable")
 
 
 def _capacity_envelope(row, cutoff, instrument_id):
     if row is None:
         return None
-    if (
-        row.instrument_id != instrument_id
-        or row.digest != identity_digest(row.payload)
-        or row.assessed_at > cutoff
-        or row.payload["assessed_at"] != _iso(row.assessed_at)
-    ):
-        raise ValueError("capacity_integrity_failure")
-    return {**row.payload, "identity": row.digest}
+    if row.recorded_at > cutoff:
+        raise ValueError("capacity_recorded_after_cutoff")
+    raise ValueError("capacity_authority_unavailable")
+
+
+def _evidence_envelope(packet_id, cutoff, instrument_id, required_ids):
+    if required_ids:
+        raise ValueError("method_evidence_requirement_integrity_failure")
+    if packet_id is not None:
+        raise ValueError("unrequired_evidence_packet")
+    return None, None
+
+
+def _eligibility_reference(row):
+    return {
+        "digest": row.digest,
+        "decision_known_at": _iso(row.decision_known_at),
+        "valid_from": _iso(row.valid_from),
+        "valid_until": _iso(row.valid_until) if row.valid_until else None,
+        "recorded_at": _iso(row.recorded_at),
+    }
 
 
 @transaction.atomic
@@ -293,6 +233,8 @@ def assess(
         pk=eligibility_id
     )
     eligibility = _eligibility_envelope(eligibility_row, cutoff, snapshot_row.instrument_id)
+    if evaluation_ids:
+        raise ValueError("evaluation_not_admitted_by_empty_eligibility")
     evaluations = [
         _evaluation_envelope(row, snapshot_id)
         for row in StrategyEvaluation.objects.select_related("definition")
@@ -307,24 +249,24 @@ def assess(
     )
     cost = _cost_envelope(cost_row, cutoff, snapshot_row.instrument_id)
     capacity = _capacity_envelope(capacity_row, cutoff, snapshot_row.instrument_id)
-    evidence_row = None
-    evidence = None
-    if evidence_packet_id:
-        evidence_row = load_frozen_packet(evidence_packet_id)
-        if evidence_row.instrument_id != snapshot_row.instrument_id or evidence_row.cutoff > cutoff:
-            raise ValueError("evidence_attribution")
-        evidence = {**evidence_row.payload, "identity": evidence_row.digest}
-        if not any(item["required_evidence_ids"] for item in eligibility["entries"]):
-            raise ValueError("unrequired_evidence_packet")
+    required_ids = sorted(
+        {digest for item in eligibility["entries"] for digest in item["required_evidence_ids"]}
+    )
+    evidence_row, evidence = _evidence_envelope(
+        evidence_packet_id, cutoff, snapshot_row.instrument_id, required_ids
+    )
     manifest = {
         "schema": "phase6a/input-manifest-v1",
         "method": method.digest,
         "snapshot": {"id": snapshot_id, "identity": snapshot_row.idempotency_key},
-        "eligibility": eligibility_row.digest,
+        "eligibility": _eligibility_reference(eligibility_row),
         "evaluations": [
             {
                 "id": item["id"],
                 "identity": item["identity"],
+                "strategy": item["strategy"],
+                "definition_sha256": item["definition_sha256"],
+                "evidence_sha256": item["evidence_sha256"],
                 "output_sha256": item["output_sha256"],
             }
             for item in evaluations
@@ -349,33 +291,8 @@ def assess(
         capacity=capacity,
         evidence=evidence,
     )
-    predecessor = None
     if candidate:
-        _lock("candidate:" + candidate["semantic_identity"])
-        predecessor = (
-            EligibleTradeIntentCandidate.objects.filter(
-                assessment__snapshot__instrument_id=snapshot_row.instrument_id,
-                payload__strategy=candidate["strategy"],
-                payload__direction=candidate["direction"],
-            )
-            .order_by("-recorded_at", "-pk")
-            .first()
-        )
-        duplicate = (
-            predecessor is not None
-            and predecessor.semantic_identity == candidate["semantic_identity"]
-        )
-        if duplicate:
-            preliminary, candidate = build_assessment(
-                method_digest=method.digest,
-                snapshot=inputs.payload,
-                eligibility=eligibility,
-                evaluations=evaluations,
-                cost=cost,
-                capacity=capacity,
-                evidence=evidence,
-                duplicate=True,
-            )
+        raise ValueError("candidate_without_authoritative_eligibility")
     row = MultiTimeframeAssessment.objects.create(
         method=method,
         snapshot=snapshot_row,
@@ -390,35 +307,7 @@ def assess(
         output_digest=identity_digest(preliminary),
         recorded_at=timezone.now(),
     )
-    candidate_row = None
-    if candidate:
-        evaluation = next(
-            e for e in evaluations if e["identity"] == candidate["evaluation_identity"]
-        )
-        candidate_row = EligibleTradeIntentCandidate.objects.create(
-            assessment=row,
-            evaluation_id=evaluation["id"],
-            predecessor=predecessor,
-            semantic_identity=candidate["semantic_identity"],
-            payload=candidate,
-            digest=identity_digest(candidate),
-            recorded_at=timezone.now(),
-        )
-        if predecessor:
-            supersession = {
-                "schema": "phase6a/intent-supersession-v1",
-                "predecessor": predecessor.digest,
-                "successor": candidate_row.digest,
-                "observed_at_cutoff": _iso(cutoff),
-            }
-            IntentSupersession.objects.create(
-                predecessor=predecessor,
-                successor=candidate_row,
-                payload=supersession,
-                digest=identity_digest(supersession),
-                recorded_at=timezone.now(),
-            )
-    return row, candidate_row, True
+    return row, None, True
 
 
 def replay(assessment_id):
@@ -428,7 +317,11 @@ def replay(assessment_id):
     if row.method.digest != METHOD_DIGEST or row.method.payload != method_payload():
         raise ValueError("method_integrity_failure")
     inputs = load_snapshot(row.snapshot_id)
+    if row.information_cutoff != inputs.cutoff:
+        raise ValueError("assessment_cutoff_forgery")
     eligibility = _eligibility_envelope(row.eligibility, inputs.cutoff, row.snapshot.instrument_id)
+    if row.input_manifest.get("evaluations"):
+        raise ValueError("evaluation_not_admitted_by_empty_eligibility")
     evaluations = []
     for item in row.input_manifest["evaluations"]:
         evaluation = StrategyEvaluation.objects.select_related("definition").get(pk=item["id"])
@@ -436,17 +329,35 @@ def replay(assessment_id):
         if item != {
             "id": envelope["id"],
             "identity": envelope["identity"],
+            "strategy": envelope["strategy"],
+            "definition_sha256": envelope["definition_sha256"],
+            "evidence_sha256": envelope["evidence_sha256"],
             "output_sha256": envelope["output_sha256"],
         }:
             raise ValueError("evaluation_manifest_forgery")
         evaluations.append(envelope)
     cost = _cost_envelope(row.cost, inputs.cutoff, row.snapshot.instrument_id)
     capacity = _capacity_envelope(row.capacity, inputs.cutoff, row.snapshot.instrument_id)
-    evidence = None
-    if row.evidence_packet:
-        packet = load_frozen_packet(row.evidence_packet_id)
-        evidence = {**packet.payload, "identity": packet.digest}
-    if identity_digest(row.input_manifest) != row.input_digest:
+    required_ids = sorted(
+        {digest for item in eligibility["entries"] for digest in item["required_evidence_ids"]}
+    )
+    _, evidence = _evidence_envelope(
+        row.evidence_packet_id, inputs.cutoff, row.snapshot.instrument_id, required_ids
+    )
+    expected_manifest = {
+        "schema": "phase6a/input-manifest-v1",
+        "method": row.method.digest,
+        "snapshot": {"id": row.snapshot_id, "identity": row.snapshot.idempotency_key},
+        "eligibility": _eligibility_reference(row.eligibility),
+        "evaluations": [],
+        "cost": None,
+        "capacity": None,
+        "evidence": None,
+    }
+    if (
+        row.input_manifest != expected_manifest
+        or identity_digest(row.input_manifest) != row.input_digest
+    ):
         raise ValueError("assessment_manifest_forgery")
     expected, candidate = build_assessment(
         method_digest=row.method.digest,
@@ -469,6 +380,44 @@ def replay(assessment_id):
     return row
 
 
+def _validate_candidate_links(assessment):
+    candidate = getattr(assessment, "eligibletradeintentcandidate", None)
+    if candidate is None:
+        if IntentSupersession.objects.filter(successor__assessment=assessment).exists():
+            raise ValueError("supersession_without_candidate")
+        return
+    observations = list(
+        IntentSupersession.objects.select_related(
+            "predecessor__assessment__snapshot", "successor__assessment__snapshot"
+        ).filter(successor=candidate)
+    )
+    if (candidate.predecessor_id is None and observations) or (
+        candidate.predecessor_id is not None and len(observations) != 1
+    ):
+        raise ValueError("candidate_supersession_pairing")
+    if not observations:
+        return
+    observation = observations[0]
+    predecessor = observation.predecessor
+    expected_payload = {
+        "schema": "phase6a/intent-supersession-v1",
+        "predecessor": predecessor.digest,
+        "successor": candidate.digest,
+        "observed_at_cutoff": _iso(candidate.assessment.information_cutoff),
+    }
+    if (
+        predecessor.pk != candidate.predecessor_id
+        or predecessor.assessment.snapshot.instrument_id
+        != candidate.assessment.snapshot.instrument_id
+        or predecessor.payload.get("strategy") != candidate.payload.get("strategy")
+        or predecessor.payload.get("direction") != candidate.payload.get("direction")
+        or observation.payload != expected_payload
+        or observation.digest != identity_digest(expected_payload)
+        or IntentSupersession.objects.filter(predecessor=predecessor).count() != 1
+    ):
+        raise ValueError("supersession_integrity_failure")
+
+
 @transaction.atomic
 def audit_integrity(*, after_id=0, limit=20):
     """Bounded read-only semantic audit; never repairs or activates records."""
@@ -485,12 +434,7 @@ def audit_integrity(*, after_id=0, limit=20):
     for row in rows[:limit]:
         try:
             replay(row.pk)
-            supersession = IntentSupersession.objects.filter(successor__assessment=row).first()
-            if supersession and (
-                supersession.digest != identity_digest(supersession.payload)
-                or supersession.successor.predecessor_id != supersession.predecessor_id
-            ):
-                raise ValueError("supersession_integrity_failure")
+            _validate_candidate_links(row)
         except Exception:
             violations.append({"id": row.pk, "reason": "phase6a_integrity_failure"})
     checked = rows[:limit]
