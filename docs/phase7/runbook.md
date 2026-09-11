@@ -141,8 +141,9 @@ groups, conflict interpretations, bounded thesis, abstention explanation and
 research questions. Each claim binds exact field quotation, evidence ID,
 relationship, fact/interpretation/hypothesis, directness and conflict state.
 
-The corrected dormant context method is `bounded-evidence-context-v2`; its method
-digest also pins the text vocabulary and claim-support policy. It deliberately
+The corrected dormant context method is `bounded-evidence-context-v3`; its method
+digest pins a nominal source-phrase grammar, explicit v2 predecessor identity,
+and claim-support policy. It deliberately
 admits only exact source quotations as source-report facts, or
 finite uncertainty/conflict/research templates. Supporting/opposing directional
 claims remain unavailable without a mechanically checkable support proposition;
@@ -152,15 +153,20 @@ reconstructable values, outside facts, causal claims, strategy/risk/capacity/
 abstention authority, profit, activation or learning-policy changes are admitted.
 Prompts are only mitigation; closed validation is the enforcement boundary.
 Invalid responses return a fixed safe error and are not saved with raw exceptions.
-The source-text boundary uses normalized ASCII and a small closed neutral
-vocabulary, not only a blacklist. Unknown words, numeric constructions and all
-unlisted authority-language forms fail closed, even inside exact quotations or
-attribution. This intentionally sacrifices coverage; `USD market overview` is a
-positive control. Broader language requires a prospective method and review, not
-adding terms because particular audit headlines were rejected. The unresolved
+Source quotations and attribution must parse as a finite nominal report phrase;
+contextual templates are admitted only by exact relationship-bound equality.
+Template words do not grant permission to compose source prose. For example,
+`USD market report` is allowed but `USD report market` is not; there is no
+verb-object or evidence-status-reclassification production. Both Python and SQL
+enforce the successor source grammar. This intentionally sacrifices coverage;
+broader language requires a prospective method and review, not adding terms
+because particular audit headlines were rejected. The unresolved
 conflict template requires every cited item to be material/unknown at cutoff;
 none, nonmaterial and post-cutoff cannot support it. Existing published methods
-and histories are untouched. No new result is admitted under candidate method v1.
+and histories are untouched. V1/v2 results retain their original policies for
+historical replay, including their known limitations; they are not upgraded by
+relabeling. Migration 0023 admits new results only under the successor pin, and
+refuses populated reversal. No new result is admitted under a predecessor method.
 
 ## Notifications and integrity
 

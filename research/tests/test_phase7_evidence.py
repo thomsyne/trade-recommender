@@ -722,7 +722,7 @@ class EvidencePersistenceTests(TestCase):
         self.assertEqual(record_context_result(p.pk, r).pk, row.pk)
         self.assertEqual(
             digest(METHOD),
-            import_module("research.migrations.0022_phase7_provenance_corrections").METHOD_SHA256,
+            import_module("research.migrations.0023_phase7_source_grammar").METHOD_SHA256,
         )
         ResearchDocument.objects.filter(pk=self.doc.pk).update(
             title="Changed current title", published_at=timezone.now()

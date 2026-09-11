@@ -1,0 +1,88 @@
+Creating test database for alias 'default'...
+Cloning test database for alias 'default'...
+Cloning test database for alias 'default'...
+Cloning test database for alias 'default'...
+Cloning test database for alias 'default'...
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_contract_identity_as_dataset_name_is_refused
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_dataset_name_as_contract_identity_is_refused
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_every_other_pinned_identity_mismatch_remains_fail_closed
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_every_registration_identity_mismatch_remains_fail_closed
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_exact_accepted_dataset3_identity_uses_one_registration_query
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_preload_query_budget_is_three_independent_of_row_count
+Found 1545 test(s).
+System check identified no issues (0 silenced).
+/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/.venv/lib/python3.11/site-packages/django/core/handlers/base.py:61: UserWarning: No directory at: /Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/staticfiles/
+  mw_instance = middleware(adapted_handler)
+...................../Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/.venv/lib/python3.11/site-packages/django/core/handlers/base.py:61: UserWarning: No directory at: /Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/staticfiles/
+  mw_instance = middleware(adapted_handler)
+...../Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/.venv/lib/python3.11/site-packages/django/core/handlers/base.py:61: UserWarning: No directory at: /Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/staticfiles/
+  mw_instance = middleware(adapted_handler)
+....Forbidden: /
+Forbidden: /inbox/
+Forbidden: /research/
+Forbidden: /reviews/
+Forbidden: /operations/
+Forbidden: /calibration/
+Forbidden: /paper/
+Forbidden: /exposure/
+Forbidden: /markets/USD_CAD/
+Forbidden (Origin checking failed - null does not match any trusted origins.): /login/
+Forbidden (CSRF cookie not set.): /login/
+.............................................................................................................................................................................................................................................................................................................................................................................................../Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/.venv/lib/python3.11/site-packages/django/utils/connection.py:15: UserWarning: Limit for query logging exceeded, only the last 9000 queries will be returned.
+  return getattr(self._connections[self._alias], item)
+.................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................E......E............................................Process SpawnPoolWorker-1:
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/pool.py", line 114, in worker
+    task = get()
+           ^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/queues.py", line 367, in get
+    return _ForkingPickler.loads(res)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_evidence.py", line 34, in <module>
+    from research.evidence_store import (
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/evidence_store.py", line 25, in <module>
+    from research.models import (
+ImportError: cannot import name 'EvidenceLegacyAdmission' from 'research.models' (/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/models.py)
+official research registry ready
+canonical production registry ready
+created development owner account
+canonical market data ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+.............E......E...........EEE.............................................................................................................................................................................................../Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 7 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

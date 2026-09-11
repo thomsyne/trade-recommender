@@ -1,0 +1,9 @@
+.venv/bin/ruff check .
+All checks passed!
+.venv/bin/ruff format --check .
+552 files already formatted
+.venv/bin/python manage.py check
+System check identified no issues (0 silenced).
+.venv/bin/python manage.py makemigrations --check --dry-run
+No changes detected
+.venv/bin/python -m compileall -q config dashboard forecasts market operations research

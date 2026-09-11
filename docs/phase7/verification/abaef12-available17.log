@@ -1,0 +1,184 @@
+Creating test database for alias 'default'...
+Cloning test database for alias 'default'...
+Cloning test database for alias 'default'...
+Cloning test database for alias 'default'...
+Cloning test database for alias 'default'...
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_contract_identity_as_dataset_name_is_refused
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_dataset_name_as_contract_identity_is_refused
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_every_other_pinned_identity_mismatch_remains_fail_closed
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_every_registration_identity_mismatch_remains_fail_closed
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_exact_accepted_dataset3_identity_uses_one_registration_query
+RESTORE REQUIRED (not executed): research.tests.test_failed_break_detector_v2_queries.DetectorV2QueryBudgetTests.test_preload_query_budget_is_three_independent_of_row_count
+Found 1554 test(s).
+System check identified no issues (0 silenced).
+/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/.venv/lib/python3.11/site-packages/django/core/handlers/base.py:61: UserWarning: No directory at: /Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/staticfiles/
+  mw_instance = middleware(adapted_handler)
+...................../Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/.venv/lib/python3.11/site-packages/django/core/handlers/base.py:61: UserWarning: No directory at: /Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/staticfiles/
+  mw_instance = middleware(adapted_handler)
+...../Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/.venv/lib/python3.11/site-packages/django/core/handlers/base.py:61: UserWarning: No directory at: /Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/staticfiles/
+  mw_instance = middleware(adapted_handler)
+....Forbidden: /
+Forbidden: /inbox/
+Forbidden: /research/
+Forbidden: /reviews/
+Forbidden: /operations/
+Forbidden: /calibration/
+Forbidden: /paper/
+Forbidden: /exposure/
+Forbidden: /markets/USD_CAD/
+Forbidden (Origin checking failed - null does not match any trusted origins.): /login/
+Forbidden (CSRF cookie not set.): /login/
+.............................................................................................................................................................................................................................................................................................................................................................................................../Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/.venv/lib/python3.11/site-packages/django/utils/connection.py:15: UserWarning: Limit for query logging exceeded, only the last 9000 queries will be returned.
+  return getattr(self._connections[self._alias], item)
+.......................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................E......E................................................................................................................................................................................................................................................................................................official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+{"status": "AUTHORIZED_NOT_EXECUTED"}
+official research registry ready
+canonical production registry ready
+created development owner account
+canonical market data ready
+{"attempt_id": 1, "attempt_number": 1, "ingestion_run_id": 94, "status": "succeeded"}
+official research registry ready
+canonical production registry ready
+created development owner account
+canonical market data ready
+official research registry ready
+official research registry ready
+official research registry ready
+canonical production registry ready
+created development owner account
+canonical market data ready
+official research registry ready
+canonical production registry ready
+canonical market data ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+canonical production registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+official research registry ready
+canonical production registry ready
+created development owner account
+canonical market data ready
+registered failed-break-phase-1-freeze-v1
+registered failed-break-phase-1-freeze-v1
+......
+======================================================================
+ERROR: test_return_blind_allowlist_and_s1_execution_authority_remains_closed (research.tests.test_failed_break_v2_s0.V2S0GovernanceTests.test_return_blind_allowlist_and_s1_execution_authority_remains_closed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py", line 57, in testPartExecutor
+    yield
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py", line 623, in run
+    self._callTestMethod(testMethod)
+    ^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py", line 579, in _callTestMethod
+    if method() is not None:
+    ^^^^^^^^^^^^^^^^^
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_failed_break_v2_s0.py", line 535, in test_return_blind_allowlist_and_s1_execution_authority_remains_closed
+    self.assertFalse(load_v2_s1_policy()["authorization"]["persistent_v2_s1_execution"])
+    ^^^^^^^^^^^^^^^^^
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/failed_break_v2_s1_governance.py", line 87, in load_v2_s1_policy
+    raise V2S1GovernanceRefusal(f"v2 S1 source pin changed: {relative_path}")
+    ^^^^^^^^^^^^^^^^^
+research.failed_break_v2_s1_governance.V2S1GovernanceRefusal: v2 S1 source pin changed: research/models.py
+
+======================================================================
+ERROR: test_artifacts_are_canonical_and_direct_execution_stays_closed (research.tests.test_failed_break_v2_s1.V2S1GovernanceTests.test_artifacts_are_canonical_and_direct_execution_stays_closed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py", line 57, in testPartExecutor
+    yield
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py", line 623, in run
+    self._callTestMethod(testMethod)
+    ^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/unittest/case.py", line 579, in _callTestMethod
+    if method() is not None:
+    ^^^^^^^^^^^^^^^^^
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_failed_break_v2_s1.py", line 63, in test_artifacts_are_canonical_and_direct_execution_stays_closed
+    policy = load_v2_s1_policy()
+    ^^^^^^^^^^^^^^^^^
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/failed_break_v2_s1_governance.py", line 87, in load_v2_s1_policy
+    raise V2S1GovernanceRefusal(f"v2 S1 source pin changed: {relative_path}")
+    ^^^^^^^^^^^^^^^^^
+research.failed_break_v2_s1_governance.V2S1GovernanceRefusal: v2 S1 source pin changed: research/models.py
+
+----------------------------------------------------------------------
+Ran 1554 tests in 1498.470s
+
+FAILED (errors=2)
+Destroying test database for alias 'default'...
+Destroying test database for alias 'default'...
+Destroying test database for alias 'default'...
+Destroying test database for alias 'default'...
+Destroying test database for alias 'default'...
