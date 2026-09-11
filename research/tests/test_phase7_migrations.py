@@ -31,7 +31,7 @@ class Phase7MigrationTests(HistoricalDatabaseMixin, TransactionTestCase):
     def test_forward_preservation_empty_reverse_and_populated_refusal(self):
         source = source_policy().source
         before = self.fingerprint()
-        target = [("research", "0021_phase7_context_guards")]
+        target = [("research", "0022_phase7_provenance_corrections")]
         MigrationExecutor(connection).migrate(target)
         self.assertEqual(before, self.fingerprint(before))
         MigrationExecutor(connection).migrate(

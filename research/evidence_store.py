@@ -2,7 +2,11 @@
 
 import hashlib
 import json
+import re
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 
+from defusedxml import ElementTree
 from django.db import connection, transaction
 from django.utils import timezone
 
@@ -22,9 +26,11 @@ from research.models import (
     EvidenceConflict,
     EvidenceContextResult,
     EvidenceIncident,
+    EvidenceLegacyAdmission,
     EvidenceRightsReview,
     ExactEvidence,
     FrozenEvidencePacket,
+    ResearchDiscrepancy,
 )
 from research.parsers import parse_feed
 
@@ -65,8 +71,48 @@ def review_rights(source, payload):
     return _append(EvidenceRightsReview, payload, source=source)
 
 
+def news_timestamp_precision(body, matches):
+    """Inspect the original timestamp, not the parser's UTC fallback datetime."""
+    precisions = set()
+    for node in ElementTree.fromstring(body).iter():
+        if node.tag.rsplit("}", 1)[-1] not in {"item", "entry"}:
+            continue
+        if parse_feed(ElementTree.tostring(node))[0] not in matches:
+            continue
+        raw = next(
+            (
+                child.text
+                for child in node
+                if child.tag.rsplit("}", 1)[-1] in {"pubDate", "published", "updated", "date"}
+                and child.text
+            ),
+            "",
+        ).strip()
+        precision = "unknown"
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            precision = "date_only"
+        elif re.search(r"\d{2}:\d{2}:\d{2}", raw):
+            try:
+                try:
+                    parsed = parsedate_to_datetime(raw)
+                except (TypeError, ValueError):
+                    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if parsed.tzinfo is not None:
+                    precision = "provider_exact"
+            except ValueError:
+                pass
+        precisions.add(precision)
+    return precisions.pop() if len(precisions) == 1 else "unknown"
+
+
 def verify_representation(
-    payload, retrieval, *, document=None, observation=None, replay_only=False
+    payload,
+    retrieval,
+    *,
+    document=None,
+    observation=None,
+    replay_only=False,
+    admitted_macro_label=None,
 ):
     validate_representation(payload)
     require(payload["retrieval_id"] == retrieval.pk, "wrong_retrieval")
@@ -104,6 +150,11 @@ def verify_representation(
             and (iso(item.published_at) if item.published_at else None) == payload["published_at"]
         ]
         require(bool(matches) and payload["normalized_fact"] == "", "unproven_representation")
+        precision = news_timestamp_precision(bytes(retrieval.body), matches)
+        require(
+            payload["quality"]["timestamp_precision"] in {precision, "unknown"},
+            "timestamp_provenance",
+        )
     else:
         require(
             observation is not None
@@ -127,12 +178,20 @@ def verify_representation(
             and payload["normalized_fact"] == observation.normalized_value,
             "observation_value",
         )
-        if not replay_only:
-            require(
-                payload["headline"] == observation.series.label
-                and payload["supplied_summary"] == "",
-                "observation_label",
-            )
+        label = admitted_macro_label if replay_only else observation.series.label
+        require(
+            label is not None
+            and payload["headline"] == label
+            and payload["supplied_summary"] == "",
+            "observation_label",
+        )
+        precision = {"provider": "provider_exact", "retrieval": "retrieval_only"}.get(
+            observation.availability_precision, "unknown"
+        )
+        require(
+            payload["quality"]["timestamp_precision"] in {precision, "unknown"},
+            "timestamp_provenance",
+        )
         require(payload["published_at"] == iso(observation.available_at), "observation_time")
 
 
@@ -140,6 +199,8 @@ def verify_representation(
 def store_representation(payload, *, retrieval, storage_review, document=None, observation=None):
     _lock()
     verify_representation(payload, retrieval, document=document, observation=observation)
+    if document is not None:
+        admit_legacy_conflicts(document)
     require(payload["storage_review_sha256"] == storage_review.digest, "wrong_rights_identity")
     now = timezone.now()
     latest = (
@@ -181,6 +242,38 @@ def record_conflict(earlier, later, *, declaration=None):
     return _append(EvidenceConflict, payload, earlier=earlier, later=later)
 
 
+def legacy_admission_payload(discrepancy):
+    return {
+        "version": VERSION,
+        "discrepancy_id": discrepancy.pk,
+        "document": discrepancy.entity_key.removeprefix("document:"),
+        "legacy_observed_at": iso(discrepancy.observed_at),
+        "historical_arrival": "unknown",
+    }
+
+
+@transaction.atomic
+def admit_legacy_conflicts(document):
+    """Explicit opt-in discovery. Invoke before choosing a future packet cutoff.
+
+    No hook is installed on legacy ingestion. observed_at remains a legacy claim;
+    only this database-stamped admission is prospective Phase7 knowledge.
+    """
+    _lock()
+    rows = []
+    for discrepancy in ResearchDiscrepancy.objects.filter(
+        kind="conflict", entity_key="document:" + document.canonical_hash
+    ).order_by("pk"):
+        rows.append(
+            _append(
+                EvidenceLegacyAdmission,
+                legacy_admission_payload(discrepancy),
+                discrepancy=discrepancy,
+            )
+        )
+    return rows
+
+
 @transaction.atomic
 def freeze_packet(instrument, *, cutoff, required_ids=()):
     """Universe = ALL exact evidence known by cutoff; SQL verifies completeness.
@@ -200,6 +293,7 @@ def freeze_packet(instrument, *, cutoff, required_ids=()):
             document=row.document,
             observation=row.observation,
             replay_only=True,
+            admitted_macro_label=row.admitted_macro_label,
         )
         rights = (
             EvidenceRightsReview.objects.filter(
@@ -294,6 +388,7 @@ def load_frozen_packet(packet_id):
             document=row.document,
             observation=row.observation,
             replay_only=True,
+            admitted_macro_label=row.admitted_macro_label,
         )
     return packet
 
@@ -309,6 +404,7 @@ def audit_integrity():
         FrozenEvidencePacket,
         EvidenceIncident,
         EvidenceContextResult,
+        EvidenceLegacyAdmission,
     ):
         count = 0
         for row in model.objects.iterator():
@@ -322,6 +418,7 @@ def audit_integrity():
                     document=row.document,
                     observation=row.observation,
                     replay_only=True,
+                    admitted_macro_label=row.admitted_macro_label,
                 )
             elif model is EvidenceConflict:
                 declaration = (
@@ -336,6 +433,8 @@ def audit_integrity():
                 load_frozen_packet(row.pk)
             elif model is EvidenceContextResult:
                 replay_context_result(row)
+            elif model is EvidenceLegacyAdmission:
+                require(row.payload == legacy_admission_payload(row.discrepancy), "legacy_replay")
             else:
                 require(row.payload == incident_payload(row.conflict), "incident_replay")
             count += 1

@@ -481,9 +481,21 @@ class EvidencePersistenceTests(TestCase):
         )
 
     def exact(
-        self, title="Bank of Canada inflation statement", summary="Official statement supplied"
+        self,
+        title="Bank of Canada inflation statement",
+        summary="Official statement supplied",
+        *,
+        published_raw=None,
+        timestamp_precision="provider_exact",
     ):
-        body = f"<rss><channel><item><guid>1</guid><link>{self.url}</link><title>{title}</title><description>{summary}</description><pubDate>{self.now.strftime('%a, %d %b %Y %H:%M:%S GMT')}</pubDate></item></channel></rss>".encode()
+        from research.parsers import parse_feed
+
+        stamp = (
+            published_raw
+            if published_raw is not None
+            else self.now.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        )
+        body = f"<rss><channel><item><guid>1</guid><link>{self.url}</link><title>{title}</title><description>{summary}</description><pubDate>{stamp}</pubDate></item></channel></rss>".encode()
         retrieval = RawRetrieval.objects.create(
             source_policy=self.policy,
             url="https://official.example/feed",
@@ -505,11 +517,12 @@ class EvidencePersistenceTests(TestCase):
             canonical_url=self.url,
             canonical_hash=self.doc.canonical_hash,
             supplied_summary=summary,
-            published_at=iso(self.now.replace(microsecond=0)),
+            published_at=iso(parse_feed(body)[0].published_at),
             first_observed_at=iso(self.now),
             retrieved_at=iso(self.now),
             storage_review_sha256=self.local.digest,
         )
+        rep["quality"]["timestamp_precision"] = timestamp_precision
         return store_representation(
             rep, retrieval=retrieval, storage_review=self.local, document=self.doc
         )
@@ -671,6 +684,7 @@ class EvidencePersistenceTests(TestCase):
 
     def test_legacy_conflict_is_unknown_not_qualified_support(self):
         from market.models import Instrument
+        from research.evidence_store import admit_legacy_conflicts
         from research.models import ResearchDiscrepancy
 
         a = self.exact()
@@ -682,6 +696,7 @@ class EvidencePersistenceTests(TestCase):
             observed_at=self.now,
             detail={},
         )
+        admit_legacy_conflicts(self.doc)
         instrument = Instrument.objects.create(
             code="USD_CAD", base_currency="USD", quote_currency="CAD", display_order=1
         )
@@ -707,7 +722,7 @@ class EvidencePersistenceTests(TestCase):
         self.assertEqual(record_context_result(p.pk, r).pk, row.pk)
         self.assertEqual(
             digest(METHOD),
-            import_module("research.migrations.0021_phase7_context_guards").METHOD_SHA256,
+            import_module("research.migrations.0022_phase7_provenance_corrections").METHOD_SHA256,
         )
         ResearchDocument.objects.filter(pk=self.doc.pk).update(
             title="Changed current title", published_at=timezone.now()

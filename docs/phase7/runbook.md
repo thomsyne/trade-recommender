@@ -13,7 +13,7 @@ replay. `forecasts.evidence_context` owns an offline request/response contract;
 it contains **no network transport**. Existing ingestion, recommendation,
 interpretation, schedules, configuration and pages remain unchanged.
 
-Six new research records use protective FKs, unique canonical digests, ORM
+Seven new research records use protective FKs, unique canonical digests, ORM
 mutation refusal and SQL update/delete/truncate guards. `recorded_at` comes from
 the database clock, not the caller. Source reviews and evidence writes serialize
 through a transaction advisory lock in READ COMMITTED. Packet construction takes
@@ -29,6 +29,16 @@ and retrieval timestamps, storage rights identity, and separate quality properti
 News admission reparses the immutable RSS/Atom retrieval and requires an exact
 item match. Macro admission binds the exact immutable observation, normalized
 value and retrieval; identity is series + observation period, not latest vintage.
+Forward correction migration 0022 stamps the admitted macro series label in a
+protected column and requires matching headline and empty supplied summary in
+SQL. Replay compares that frozen label, never a later mutable series label.
+An older candidate row without this provenance remains unchanged but cannot be
+authenticated by the corrected loader; no current label is backfilled as history.
+Macro timestamp precision must match the immutable observation's provider versus
+retrieval precision (or explicitly remain unknown). News precision is checked
+against the original XML timestamp: a date-only or timezone-free value cannot
+be promoted merely because the legacy parser supplies a UTC datetime. Unknown
+formats stay unknown. Required evidence without provider-exact precision abstains.
 The old canonical document/representation/discrepancy remains intact. Nothing
 backfills an unprovable historical permission, directness or timestamp precision.
 
@@ -79,6 +89,15 @@ immaterial. Material declarations give `material`; duplicates/repeats are
 `nonmaterial`. A later event is `post-cutoff` in pure as-of analysis and never
 changes a stored packet. Legacy `kind=conflict` is conservatively represented as
 unclassified: its historical timestamp does not prove material falsehood.
+`EvidenceLegacyAdmission` separately preserves legacy `observed_at`, explicitly
+unknown historical arrival, and database-stamped Phase7 discovery time. The new
+opt-in `store_representation` service admits existing legacy conflicts for that
+document under the same lock. An explicitly invoked `admit_legacy_conflicts`
+refreshes discovery for later legacy rows; a future consumer must invoke it
+before choosing its packet cutoff. No hook is added to existing ingestion.
+The packet query uses only admissions known at cutoff, never a live legacy join.
+Late legacy rows or admissions cannot change reconstruction at an old cutoff;
+they qualify subsequent packets. Historical audit definitions remain unchanged.
 
 Relevance v1 is deliberately deterministic and lexical, not an economic signal.
 Frozen title currency/country/region matches score 40 per base/quote, a linked
@@ -122,7 +141,9 @@ groups, conflict interpretations, bounded thesis, abstention explanation and
 research questions. Each claim binds exact field quotation, evidence ID,
 relationship, fact/interpretation/hypothesis, directness and conflict state.
 
-V1 deliberately admits only exact source quotations as source-report facts, or
+The corrected dormant context method is `bounded-evidence-context-v2`; its method
+digest also pins the text vocabulary and claim-support policy. It deliberately
+admits only exact source quotations as source-report facts, or
 finite uncertainty/conflict/research templates. Supporting/opposing directional
 claims remain unavailable without a mechanically checkable support proposition;
 citation membership alone cannot supply one. This is a conservative subset of
@@ -131,6 +152,15 @@ reconstructable values, outside facts, causal claims, strategy/risk/capacity/
 abstention authority, profit, activation or learning-policy changes are admitted.
 Prompts are only mitigation; closed validation is the enforcement boundary.
 Invalid responses return a fixed safe error and are not saved with raw exceptions.
+The source-text boundary uses normalized ASCII and a small closed neutral
+vocabulary, not only a blacklist. Unknown words, numeric constructions and all
+unlisted authority-language forms fail closed, even inside exact quotations or
+attribution. This intentionally sacrifices coverage; `USD market overview` is a
+positive control. Broader language requires a prospective method and review, not
+adding terms because particular audit headlines were rejected. The unresolved
+conflict template requires every cited item to be material/unknown at cutoff;
+none, nonmaterial and post-cutoff cannot support it. Existing published methods
+and histories are untouched. No new result is admitted under candidate method v1.
 
 ## Notifications and integrity
 
@@ -145,7 +175,7 @@ logical notification.
 
 Run `manage.py audit_phase7_integrity` only against an explicitly selected database.
 It sets REPEATABLE READ READ ONLY, 60s statement timeout and 2s lock timeout; output
-is bounded aggregate record counts or a safe error. It checks all six new record
+is bounded aggregate record counts or a safe error. It checks all seven new record
 types, immutable representation/source identity and semantic packet/context replay.
 It does not activate a model, schedule or consumer. No default API/page was changed,
 so this slice has no visual redesign or screenshot deliverable.

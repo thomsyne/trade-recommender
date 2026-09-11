@@ -677,6 +677,7 @@ class ExactEvidence(ImmutableRecord):
     observation = models.ForeignKey(MacroObservation, on_delete=models.PROTECT, null=True)
     retrieval = models.ForeignKey(RawRetrieval, on_delete=models.PROTECT)
     storage_review = models.ForeignKey(EvidenceRightsReview, on_delete=models.PROTECT)
+    admitted_macro_label = models.TextField(null=True, editable=False)
     recorded_at = models.DateTimeField(default=timezone.now, editable=False)
     digest = models.CharField(max_length=64, unique=True)
     payload = models.JSONField()
@@ -715,6 +716,15 @@ class EvidenceContextResult(ImmutableRecord):
     """Explicit offline validated context, never a recommendation or authority."""
 
     packet = models.ForeignKey(FrozenEvidencePacket, on_delete=models.PROTECT)
+    recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+    digest = models.CharField(max_length=64, unique=True)
+    payload = models.JSONField()
+
+
+class EvidenceLegacyAdmission(ImmutableRecord):
+    """Phase7 discovery time, independent of caller-supplied legacy observed_at."""
+
+    discrepancy = models.OneToOneField(ResearchDiscrepancy, on_delete=models.PROTECT)
     recorded_at = models.DateTimeField(default=timezone.now, editable=False)
     digest = models.CharField(max_length=64, unique=True)
     payload = models.JSONField()
