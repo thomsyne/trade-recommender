@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from market.state.canonical import canonical_json, identity_digest
 from research.validation_batch import opportunities, run, shadow_readiness
@@ -266,6 +266,92 @@ class ClockExecutionTests(unittest.TestCase):
         self.assertEqual(output, first)
         self.assertEqual(choose.call_count, 1)
 
+    def test_report_accounts_costs_overlap_and_missingness_independently(self):
+        from decimal import Decimal as D
+
+        from research.validation_reports import summarize
+
+        rows = []
+        for instrument in ("USD_CAD", "AUD_CAD"):
+            result = simulate(
+                self.setup,
+                instrument,
+                Series([candle(self.at, high="105", low="97")]),
+                {},
+                self.registration,
+                "baseline",
+            )
+            rows.append(
+                {
+                    "instrument": instrument,
+                    "session": "regular_fx",
+                    "opportunity": self.at.isoformat(),
+                    "scenarios": {"baseline": result},
+                }
+            )
+        rows.append(
+            {"scenarios": {"baseline": {"state": "unavailable", "reason": "missing_calendar"}}}
+        )
+        result = summarize(rows, "baseline", accounts=2)
+        self.assertEqual(result["planned_opportunities"], 3)
+        self.assertEqual(result["eligible_opportunities"], 2)
+        self.assertEqual(D(result["money"]["net_CAD"]), D("-1300.10"))
+        self.assertEqual(D(result["money"]["commission_CAD"]), D("0.10"))
+        self.assertEqual(D(result["diagnostic_net_account_return"]), D("-0.0065005"))
+        self.assertIsNone(result["full_population_net_account_return"])
+        self.assertEqual(result["effective_week_units"], 1)
+        self.assertEqual(result["concurrent_positions_peak"], 2)
+        self.assertEqual(result["overlapping_currency_trade_pairs"], 1)
+        self.assertEqual(D(result["realized_drawdown_CAD"]), D("1300.10"))
+
+    def test_atomic_report_publication_refuses_conflicts_and_recovers(self):
+        from research.validation_reports import publish_immutable
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.json"
+            with patch(
+                "research.validation_reports.os.link", side_effect=OSError("synthetic interruption")
+            ):
+                with self.assertRaises(OSError):
+                    publish_immutable(path, "first")
+            self.assertFalse(path.exists())
+            publish_immutable(path, "first")
+            publish_immutable(path, "first")
+            with self.assertRaisesRegex(ValueError, "immutable_report_conflict"):
+                publish_immutable(path, "second")
+            self.assertEqual(path.read_text(), "first")
+            self.assertEqual([p.name for p in Path(directory).iterdir()], ["report.json"])
+
+    def test_loader_skips_sealed_blobs_and_refuses_changed_manifest(self):
+        from research.validation_data import load_development
+
+        records = {
+            name: {
+                "metadata_sha256": name,
+                "request": {"period": period, "instrument": "EUR_USD", "granularity": "H1"},
+                "acquired_at": "2026-09-11T00:00:00+00:00",
+            }
+            for name, period in (("sealed", "sealed_first"), ("allowed", "development"))
+        }
+        manifest = {key: value["metadata_sha256"] for key, value in records.items()}
+
+        def blob(_, key, __):
+            self.assertEqual(key, "allowed")
+            return [{"timestamp": "2020-01-06T01:00:00+00:00"}]
+
+        with (
+            patch("research.validation_data.connect", return_value=Mock()),
+            patch("research.validation_data.metadata", return_value=("synthetic", records)),
+            patch("research.validation_data._verified_blob", side_effect=blob) as read,
+        ):
+            rows = load_development("unused", manifest, "EUR_USD", "H1")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(read.call_count, 1)
+            read.reset_mock()
+            with self.assertRaisesRegex(ValueError, "manifest_mismatch"):
+                load_development("unused", {}, "EUR_USD", "H1")
+            read.assert_not_called()
+
 
 class CatalogTests(unittest.TestCase):
     def setUp(self):
@@ -288,12 +374,34 @@ class CatalogTests(unittest.TestCase):
                 "opportunity": "2019-01-07T22:00:00+00:00",
                 "strategy": "carry-readiness-v1",
                 "instrument": "EUR_USD",
+                "session": "regular_fx",
+                "decision": {
+                    "schema": "phase55/readiness-v1",
+                    "reason": "pit_forwards_financing_rollover_ranking_unavailable",
+                },
+                "volatility_stratum": "unavailable",
+                "overlays": {
+                    s: {"multiplier": None, "reason": "baseline_has_no_setup"}
+                    for s in ("fixed-risk-v1", "ewma-risk-v1", "garch-t-risk-v1", "macro-risk-v1")
+                },
                 "scenarios": {
                     s: {"state": "unavailable", "reason": "synthetic_missing_forwards"}
                     for s in self.state
                 },
             }
         ]
+        self.rows[0]["overlays"]["macro-risk-v1"]["reason"] = (
+            "mandatory_pit_event_vintages_unavailable"
+        )
+        self.rows[0]["evaluation_identity"] = identity_digest(
+            {
+                "registration": self.identity,
+                **{
+                    k: self.rows[0][k]
+                    for k in ("opportunity", "instrument", "strategy", "decision")
+                },
+            }
+        )
 
     def tearDown(self):
         self.catalog.close()
@@ -369,10 +477,17 @@ class CatalogTests(unittest.TestCase):
 
     def test_missing_predecessor_and_population_refuse(self):
         key = {**self.key, "start": self.key["end"], "end": "2019-01-09T00:00:00+00:00"}
+        row = {**self.rows[0], "opportunity": "2019-01-08T22:00:00+00:00"}
+        row["evaluation_identity"] = identity_digest(
+            {
+                "registration": self.identity,
+                **{k: row[k] for k in ("opportunity", "instrument", "strategy", "decision")},
+            }
+        )
         with self.assertRaises(sqlite3.IntegrityError):
             self.catalog.checkpoint(
                 key,
-                [{**self.rows[0], "opportunity": "2019-01-08T22:00:00+00:00"}],
+                [row],
                 end_state=self.state,
                 predecessor=None,
             )
@@ -459,3 +574,150 @@ class CatalogTests(unittest.TestCase):
             self.catalog.db.execute("SELECT count(*) FROM checkpoint").fetchone()[0], 0
         )
         self.catalog.checkpoint(self.key, self.rows, end_state=self.state, predecessor=None)
+
+    def test_modeled_row_admission_accepts_finite_loss_and_refuses_nan(self):
+        from decimal import Decimal as D
+
+        from market.strategy.contracts import encoded
+        from market.strategy.setups import candidate
+        from research.validation_batch import day_rows
+
+        strategy = "orb-m15-wick-v1:london"
+        at = datetime(2019, 1, 7, 8, 30, tzinfo=UTC)
+
+        def m15(at, **prices):
+            return {
+                **candle(at, **prices),
+                "granularity": "M15",
+                "end": (at + timedelta(minutes=15)).isoformat(),
+            }
+
+        signal = Series([m15(at - timedelta(minutes=15))]).bars[0]
+        setup = json.loads(
+            encoded(
+                candidate(
+                    strategy, signal, 1, D("98"), target=D("106"), exit_at=at + timedelta(hours=3)
+                )
+            )
+        )
+        output = {
+            "schema": "phase5/evaluation-v1",
+            "strategy": strategy,
+            "outputs": [setup],
+            "activation": "forbidden",
+        }
+        active = dict(self.state)
+        with patch("research.validation_batch.selection", return_value=(output, setup)):
+            rows = day_rows(
+                self.identity,
+                self.body,
+                strategy,
+                "USD_CAD",
+                at.replace(hour=0, minute=0),
+                {"M15": Series([m15(at, high="107", low="97")])},
+                {},
+                active,
+            )
+        self.assertEqual(rows[0]["scenarios"]["baseline"]["state"], "modeled")
+        self.assertLess(D(rows[0]["scenarios"]["baseline"]["net_CAD"]), 0)
+        key = {**self.key, "strategy": strategy, "instrument": "USD_CAD"}
+        invalid = copy.deepcopy(rows)
+        result = invalid[0]["scenarios"]["baseline"]
+        result["net_CAD"] = "NaN"
+        result["identity"] = identity_digest(
+            {
+                "setup": setup,
+                "instrument": "USD_CAD",
+                "scenario": "baseline",
+                "result": {k: v for k, v in result.items() if k != "identity"},
+            }
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.catalog.checkpoint(key, invalid, end_state=active, predecessor=None)
+        self.catalog.checkpoint(key, rows, end_state=active, predecessor=None)
+
+    def test_proposals_distinguish_missing_from_complete_negative_evidence(self):
+        from research.validation_reports import development_proposal
+
+        baseline = {
+            "integrity_clean": True,
+            "states": {},
+            "effective_week_units": 52,
+            "eligible_opportunities": 100,
+            "trades": 30,
+            "usable_instruments": 3,
+            "money": {"net_CAD": "100"},
+            "remove_best_instrument_net_CAD": "40",
+            "remove_best_month_net_CAD": "60",
+            "halves": [{"effective_weeks": 26, "net_CAD": "50"}] * 2,
+            "concentration": {"instrument": "0.4", "UTC_month": "0.3"},
+        }
+        body = {
+            "strategy": "orb-m15-fvg-v1:london",
+            "scenarios": {s: copy.deepcopy(baseline) for s in self.state},
+            "paired_comparator": {
+                s: {"unavailable_or_unmatched": 0, "total_increment_CAD": "1"} for s in self.state
+            },
+        }
+        self.assertEqual(
+            development_proposal(body, self.body)["proposal"],
+            "candidate_for_independent_review_not_retained",
+        )
+        body["scenarios"]["adverse_cost"]["money"]["net_CAD"] = "0"
+        self.assertEqual(development_proposal(body, self.body)["proposal"], "reject")
+        body["scenarios"]["adverse_cost"]["states"]["unavailable"] = 1
+        self.assertEqual(development_proposal(body, self.body)["proposal"], "inconclusive")
+        body["scenarios"]["adverse_cost"]["states"].clear()
+        body["scenarios"]["adverse_cost"]["money"]["net_CAD"] = "100"
+        body["paired_comparator"]["baseline"]["total_increment_CAD"] = "-1"
+        self.assertEqual(development_proposal(body, self.body)["proposal"], "reject")
+        body["paired_comparator"]["baseline"]["unavailable_or_unmatched"] = 1
+        self.assertEqual(development_proposal(body, self.body)["proposal"], "inconclusive")
+
+    def test_shadow_time_gate_and_retrospective_type_refusal(self):
+        from market.strategy.contracts import SnapshotInput
+        from research.validation_batch import forward_shadow
+
+        # Exercise the forward wrapper's time/type gates independently of the
+        # existing Phase4 snapshot verifier, covered by its original tests.
+        with patch.object(SnapshotInput, "__post_init__"):
+
+            def snapshot(at, bars=()):
+                return SnapshotInput(
+                    1,
+                    canonical_json(
+                        {
+                            "idempotency_key": "synthetic",
+                            "output_payload": {
+                                "information_cutoff": at.isoformat(),
+                                "instrument": "EUR_USD",
+                            },
+                        }
+                    ),
+                    bars,
+                )
+
+            cutoff = datetime(2026, 9, 11, tzinfo=UTC)
+            result = forward_shadow(self.body, snapshot(cutoff), "carry-readiness-v1")
+            self.assertIsNone(result["execution"]["net_CAD"])
+            self.assertEqual(result["activation"], "forbidden")
+            with patch("research.validation_batch.evaluate") as evaluate:
+                with self.assertRaisesRegex(ValueError, "future_unregistered"):
+                    forward_shadow(
+                        self.body,
+                        snapshot(datetime.now(UTC) + timedelta(days=1)),
+                        "carry-readiness-v1",
+                    )
+                with self.assertRaisesRegex(ValueError, "future_unregistered"):
+                    forward_shadow(
+                        self.body, snapshot(datetime(2025, 1, 6, tzinfo=UTC)), "carry-readiness-v1"
+                    )
+                with self.assertRaisesRegex(ValueError, "retrospective"):
+                    forward_shadow(
+                        self.body,
+                        snapshot(cutoff, Series([candle(cutoff - timedelta(hours=1))]).bars),
+                        "carry-readiness-v1",
+                    )
+                evaluate.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "same_snapshot_baseline"):
+                forward_shadow(self.body, snapshot(cutoff), "fixed-risk-v1")

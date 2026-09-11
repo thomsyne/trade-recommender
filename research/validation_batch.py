@@ -7,9 +7,11 @@ from decimal import Decimal as D
 from functools import lru_cache
 
 from market.state.canonical import canonical_json, identity_digest
+from market.state.features import Bar
 from market.state.sessions import session_open_utc
-from market.strategy.contracts import arithmetic, encoded
+from market.strategy.contracts import SnapshotInput, arithmetic, encoded
 from market.strategy.definitions import STRATEGIES
+from market.strategy.evaluate import evaluate
 from market.strategy.risk import volatility_overlay
 from market.strategy.trend import sigma
 from research.validation_acquisition import ROOT
@@ -251,6 +253,67 @@ def shadow_readiness(now):
         "reason": "forward_evidence_not_collected",
         "mode": "offline_only",
     }
+
+
+def forward_shadow(registration, inputs, strategy, *, baseline=None):
+    """Manual prospective decision evidence; never retrospective execution claims.
+
+    The caller supplies an original verified Phase4 SnapshotInput. No provider,
+    production writer or schedule is invoked. Missing execution evidence stays
+    unavailable; elapsed weeks alone never confirm a candidate.
+    """
+    from research.validation_registration import validate_registration
+
+    validate_registration(registration)
+    now = datetime.now(UTC)
+    if type(inputs) is not SnapshotInput:
+        raise ValueError("forward_requires_original_verified_snapshot")
+    inputs.__post_init__()
+    if (
+        not datetime(2026, 9, 11, tzinfo=UTC) <= inputs.cutoff <= now
+        or inputs.cutoff >= datetime.fromisoformat(registration["shadow"]["maximum_end"])
+        or strategy not in STRATEGIES
+        or inputs.payload["instrument"] not in registration["instruments"]
+        or len(inputs.bars) > 1800
+        or any(
+            type(b) is not Bar or b.observed_at > inputs.cutoff or b.end > inputs.cutoff
+            for b in inputs.bars
+        )
+    ):
+        raise ValueError("forward_future_unregistered_or_retrospective_evidence")
+    snapshot = json.loads(inputs.envelope_json)["idempotency_key"]
+    if strategy in OVERLAYS:
+        if (
+            not baseline
+            or baseline.get("snapshot") != snapshot
+            or baseline.get("strategy") not in STRATEGIES
+            or baseline["strategy"] in OVERLAYS
+            or baseline.get("registration") != identity_digest(registration)
+            or baseline.get("identity")
+            != identity_digest({k: v for k, v in baseline.items() if k != "identity"})
+        ):
+            raise ValueError("forward_overlay_requires_same_snapshot_baseline")
+    elif baseline is not None:
+        raise ValueError("forward_directional_baseline_not_applicable")
+    body = {
+        "schema": "phase55/forward-shadow-decision-v1",
+        "registration": identity_digest(registration),
+        "snapshot": snapshot,
+        "strategy": strategy,
+        "instrument": inputs.payload["instrument"],
+        "cutoff": inputs.cutoff.isoformat(),
+        "decision": evaluate(inputs, strategy),
+        "baseline": baseline["identity"] if baseline else None,
+        "execution": {
+            "state": "unavailable",
+            "reason": "genuine_forward_execution_evidence_not_supplied",
+            "net_CAD": None,
+        },
+        "mode": "offline_prospective_not_retrospective",
+        "activation": "forbidden",
+    }
+    body["identity"] = identity_digest(body)
+    return body
 
 
 def main():

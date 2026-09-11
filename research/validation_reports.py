@@ -1,6 +1,8 @@
 """Deterministic, separately attributed diagnostics. Never an acceptance authority."""
 
 import json
+import os
+import tempfile
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal as D
@@ -220,9 +222,13 @@ def report(strategy, instrument, rows, registration_id, scenarios, *, accounts=1
         "registration": registration_id,
         "strategy": strategy,
         "instrument": instrument,
+        "session": (baseline or strategy).split(":")[1]
+        if ":" in (baseline or strategy)
+        else "regular_fx",
         "baseline_identity": baseline,
         "original_definition_revision": 2,
         "validation_revision": 1,
+        "mode": "model_based_retrospective_regular_session_not_broker_execution",
         "account_allocation": {"independent_CAD_accounts": accounts, "equity_each": "100000"},
         "period": "development",
         "scenarios": {
@@ -425,22 +431,60 @@ def export_report(catalog, registration_id, strategy, instrument, destination, *
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     for suffix, text in (("json", canonical_json(body) + "\n"), ("txt", plain_english(body))):
         path = directory / f"{body['identity']}.{suffix}"
-        if path.exists():
-            if path.read_text() != text:
-                raise ValueError("immutable_report_conflict")
-        else:
-            with path.open("x") as handle:
-                handle.write(text)
+        publish_immutable(path, text)
     return body["identity"]
 
 
+def publish_immutable(path, text):
+    # A crash can leave an unpublished temporary file, never a partially published
+    # report. Concurrent identical publishers converge; differing bytes refuse.
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=path.parent, prefix=".phase55-report-"
+    ) as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+        try:
+            os.link(handle.name, path)
+        except FileExistsError:
+            if path.read_text() != text:
+                raise ValueError("immutable_report_conflict") from None
+
+
 def plain_english(body):
-    baseline = body["scenarios"]["baseline"]
-    return (
-        f"{body['strategy']} / {body['instrument']}: {body['proposal']}. "
-        f"{baseline['planned_opportunities']} planned opportunities; {baseline['trades']} modeled trades; "
-        f"{baseline['states'].get('unavailable', 0)} unavailable. "
-        f"Diagnostic net CAD: {baseline['money']['net_CAD']}. "
+    lines = [
+        f"{body['strategy']} / {body['instrument']} / {body['session']}: {body['proposal']}.",
+        f"Original definition revision 2; validation revision 1; paired baseline: {body['baseline_identity']}.",
+        f"Registration: {body['registration']}; period: development; null means unavailable.",
         "Model-based retrospective only. Exceptional-session evidence is missing; "
-        "integrity-clean retention is blocked. Holdout remains sealed. Not trading approval.\n"
-    )
+        "integrity-clean retention is blocked. Holdout remains sealed. Not trading approval.",
+    ]
+    for scenario, result in body["scenarios"].items():
+        lines.extend(
+            (
+                f"\nScenario {scenario}: {result['planned_opportunities']} planned opportunities; "
+                f"{result['eligible_opportunities']} eligible; {result['trades']} modeled trades.",
+                f"Opportunity states: {canonical_json(result['states'])}.",
+                f"Exact unavailable reasons and counts: {canonical_json(result['unavailable_reasons'])}.",
+                f"Gross, separate costs, net and turnover in CAD: {canonical_json(result['money'])}.",
+                f"Diagnostic account return: {result['diagnostic_net_account_return']}; "
+                f"full-population return: {result['full_population_net_account_return']}.",
+                f"Active UTC ISO weeks: {canonical_json(result['active_UTC_ISO_weeks'])}; "
+                f"effective dependence units: {result['effective_week_units']}.",
+                f"Realized (not mark-to-market) drawdown CAD: {result['realized_drawdown_CAD']}; "
+                f"worst week: {result['worst_week_CAD']}; lower 5% weekly tail: {result['weekly_lower_5pct_CAD']}.",
+                f"Chronological halves: {canonical_json(result['halves'])}.",
+                f"Long/short net CAD: {canonical_json(result['long_short_net_CAD'])}; "
+                f"side/high-volatility strata: {canonical_json(result['side_and_volatility_strata'])}.",
+                f"Absolute-net concentration: {canonical_json(result['concentration'])}; "
+                f"net without best instrument: {result['remove_best_instrument_net_CAD']}; "
+                f"net without best UTC month: {result['remove_best_month_net_CAD']}.",
+                f"Total holding seconds: {result['holding_seconds_total']}; "
+                f"peak concurrent positions: {result['concurrent_positions_peak']}; "
+                f"overlapping-currency trade pairs: {result['overlapping_currency_trade_pairs']}.",
+                "Event-period evidence is unavailable: event_vintages_missing.",
+            )
+        )
+    lines.append(f"Matched comparators: {canonical_json(body.get('paired_comparator'))}.")
+    lines.append(f"Development gates: {canonical_json(body.get('development_gates'))}.")
+    return "\n".join(lines) + "\n"

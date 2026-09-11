@@ -2,9 +2,11 @@
 
 import hashlib
 import json
+import os
 import platform
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal as D
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from zoneinfo import TZPATH
@@ -46,7 +48,21 @@ def sources():
 
 def runtime():
     packages = {}
-    for name in ("arch", "numpy", "scipy", "pandas", "tzdata"):
+    for name in (
+        "arch",
+        "numpy",
+        "scipy",
+        "pandas",
+        "statsmodels",
+        "formulaic",
+        "patsy",
+        "packaging",
+        "python-dateutil",
+        "pytz",
+        "tzdata",
+        "Django",
+        "httpx",
+    ):
         try:
             packages[name] = version(name)
         except PackageNotFoundError:
@@ -59,8 +75,18 @@ def runtime():
         zones[zone] = hashlib.sha256(paths[0].read_bytes()).hexdigest()
     return {
         "python": platform.python_version(),
+        "system": platform.system(),
         "machine": platform.machine(),
         "packages": packages,
+        "single_thread_numeric_runtime": {
+            name: os.environ.get(name) == "1"
+            for name in (
+                "OMP_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS",
+            )
+        },
         "regular_model_timezone_sha256": zones,
         "historical_exception_vintage": "unavailable",
     }
@@ -171,7 +197,7 @@ def validate_registration(body):
 
 def admit_period(body, start, end):
     validate_registration(body)
-    if any(t.utcoffset() is None for t in (start, end)) or start >= end:
+    if any(t.utcoffset() != timedelta(0) for t in (start, end)) or start >= end:
         raise ValueError("validation_period_invalid")
     a, b = map(datetime.fromisoformat, DEVELOPMENT)
     if not a <= start < end <= b:
@@ -234,6 +260,10 @@ class Catalog:
 
     def _admit_checkpoint(self, text, registration_text):
         try:
+            from market.strategy.schema import validate_evaluation
+            from research.validation_batch import BLOCKED, OVERLAYS, opportunities
+            from research.validation_reports import MONEY
+
             body, registration = json.loads(text), json.loads(registration_text)
             key = body["key"]
             if set(body) != {"schema", "registration", "key", "rows", "end_state", "predecessor"}:
@@ -277,8 +307,100 @@ class Catalog:
                     )
                 ):
                     return 0
+                if set(row) != {
+                    "opportunity",
+                    "strategy",
+                    "instrument",
+                    "session",
+                    "decision",
+                    "scenarios",
+                    "evaluation_identity",
+                    "overlays",
+                    "volatility_stratum",
+                }:
+                    return 0
+                if row["session"] != (
+                    key["strategy"].split(":")[1] if ":" in key["strategy"] else "regular_fx"
+                ):
+                    return 0
+                decision = row["decision"]
+                if key["strategy"] in BLOCKED:
+                    if decision != {
+                        "schema": "phase55/readiness-v1",
+                        "reason": BLOCKED[key["strategy"]],
+                    }:
+                        return 0
+                else:
+                    validate_evaluation(decision, key["strategy"])
+                if row["evaluation_identity"] != identity_digest(
+                    {
+                        "registration": key["registration"],
+                        "opportunity": row["opportunity"],
+                        "instrument": key["instrument"],
+                        "strategy": key["strategy"],
+                        "decision": decision,
+                    }
+                ):
+                    return 0
+                if set(row["overlays"]) != set(OVERLAYS) or row["volatility_stratum"] not in {
+                    "high",
+                    "other",
+                    "unavailable",
+                }:
+                    return 0
+                if row["overlays"]["macro-risk-v1"] != {
+                    "multiplier": None,
+                    "reason": BLOCKED["macro-risk-v1"],
+                }:
+                    return 0
+                for risk in row["overlays"].values():
+                    value = risk["multiplier"]
+                    if value is not None and (not D(value).is_finite() or not 0 <= D(value) <= 1):
+                        return 0
+                for scenario, result in row["scenarios"].items():
+                    if not isinstance(result.get("reason"), str) or not result["reason"]:
+                        return 0
+                    if result["state"] != "modeled":
+                        if set(result) != {"state", "reason"}:
+                            return 0
+                        continue
+                    setup = next(
+                        (
+                            p
+                            for p in decision.get("outputs", [])
+                            if p["schema"] == "phase5/setup-v1"
+                        ),
+                        None,
+                    )
+                    if (
+                        setup is None
+                        or result["registration_sha256"] != key["registration"]
+                        or result["identity"]
+                        != identity_digest(
+                            {
+                                "setup": setup,
+                                "instrument": key["instrument"],
+                                "scenario": scenario,
+                                "result": {k: v for k, v in result.items() if k != "identity"},
+                            }
+                        )
+                        or any(
+                            not D(result[field]).is_finite()
+                            for field in MONEY + ("units", "net_account_return")
+                        )
+                        or D(result["units"]) <= 0
+                        or any(
+                            D(result[field]) < 0
+                            for field in MONEY
+                            if field not in {"gross_CAD", "net_CAD"}
+                        )
+                        or not a
+                        <= datetime.fromisoformat(result["entered_at"])
+                        < datetime.fromisoformat(result["exited_at"])
+                        <= b
+                    ):
+                        return 0
                 seen.add(at)
-            from research.validation_batch import OVERLAYS, opportunities
 
             if key["strategy"] in OVERLAYS or seen != set(opportunities(key["strategy"], start)):
                 return 0
@@ -293,7 +415,7 @@ class Catalog:
                 "SELECT body_sha256 FROM checkpoint WHERE identity=?", (identity_digest(prior_key),)
             ).fetchone()
             return int(prior is not None and body["predecessor"] == prior[0])
-        except (ValueError, TypeError, KeyError, AttributeError):
+        except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError):
             return 0
 
     def register(self, audit):
@@ -326,10 +448,10 @@ class Catalog:
             "end_state": dict(end_state),
             "predecessor": predecessor,
         }
-        registration = self.load(key["registration"])
-        admit_period(
-            registration, datetime.fromisoformat(key["start"]), datetime.fromisoformat(key["end"])
-        )
+        # The batch authenticates source/runtime/manifest before any data access.
+        # SQL independently admits every insert against the immutable registered
+        # periods, population, row schema and predecessor, without rereading all
+        # source files and package metadata for each daily checkpoint.
         if (
             key["strategy"] not in STRATEGIES
             or key["instrument"] not in canonical_pairs()
