@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from market.oanda import OandaClient, _parse_live_candle
+from market.quality import live_interval_is_aligned, registered_candle_completion
 from market.state.canonical import canonical_json, identity_digest
 from research.validation_audit import PERIODS
 
@@ -50,7 +51,7 @@ def canonical_pairs():
 
 def plan():
     return {
-        "schema": "phase55/acquisition-v1",
+        "schema": "phase55/acquisition-v2",
         "instruments": canonical_pairs(),
         "periods": PERIODS,
         "chunk_days": DAYS,
@@ -62,6 +63,7 @@ def plan():
                 "research/validation_acquisition.py",
                 "research/validation_audit.py",
                 "market/oanda.py",
+                "market/quality.py",
                 "market/management/commands/seed_canonical.py",
             )
         },
@@ -90,6 +92,8 @@ def chunks():
 
 def fetch(client, request):
     """One bounded, fixed GET; parse only candle fields, never provider error text."""
+    start, end = datetime.fromisoformat(request["start"]), datetime.fromisoformat(request["end"])
+    include_first = live_interval_is_aligned(start, request["granularity"])
     params = {
         "price": "BA",
         "granularity": request["granularity"],
@@ -99,7 +103,7 @@ def fetch(client, request):
         "dailyAlignment": "17",
         "alignmentTimezone": "America/New_York",
         "weeklyAlignment": "Friday",
-        "includeFirst": "true",
+        "includeFirst": "true" if include_first else "false",
     }
     started = datetime.now(UTC)
     with client.client.stream(
@@ -129,8 +133,11 @@ def fetch(client, request):
         or len(payload["candles"]) > 4999
     ):
         raise ValueError("provider_envelope_mismatch")
-    normalized, timestamps = [], []
-    start, end = datetime.fromisoformat(request["start"]), datetime.fromisoformat(request["end"])
+    normalized, timestamps, boundary_exclusions = [], [], []
+    period_end = datetime.fromisoformat(
+        next(b for name, _, b in PERIODS if name == request["period"])
+    ).replace(tzinfo=UTC)
+    previous_timestamp = None
     for item in payload["candles"]:
         if set(item) != {"time", "complete", "volume", "bid", "ask"} or any(
             set(item[side]) != {"o", "h", "l", "c"} for side in ("bid", "ask")
@@ -139,8 +146,9 @@ def fetch(client, request):
         candle = _parse_live_candle(item)
         if not candle.complete or candle.volume < 0 or not start <= candle.timestamp < end:
             raise ValueError("provider_interval_or_completeness")
-        if timestamps and candle.timestamp.isoformat() <= timestamps[-1]:
+        if previous_timestamp is not None and candle.timestamp <= previous_timestamp:
             raise ValueError("provider_duplicate_or_unordered")
+        previous_timestamp = candle.timestamp
         for side in ("bid", "ask"):
             opening, high, low, close = [
                 getattr(candle, f"{side}_{field}") for field in ("open", "high", "low", "close")
@@ -153,6 +161,9 @@ def fetch(client, request):
         ):
             raise ValueError("provider_crossed_quotes")
         timestamp = candle.timestamp.isoformat()
+        if registered_candle_completion(candle.timestamp, request["granularity"]) > period_end:
+            boundary_exclusions.append(timestamp)
+            continue
         timestamps.append(timestamp)
         normalized.append(
             {
@@ -168,6 +179,8 @@ def fetch(client, request):
     data = canonical_json(normalized).encode()
     metadata = {
         "request": request,
+        "include_first": include_first,
+        "period_boundary_exclusions": boundary_exclusions,
         "request_started_at": started.isoformat(),
         "acquired_at": acquired.isoformat(),
         "provider_request_id": provider_id,

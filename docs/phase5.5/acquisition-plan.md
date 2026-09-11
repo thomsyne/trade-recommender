@@ -58,3 +58,21 @@ Missing mandatory calendar/macro/financing/conversion or other evidence still
 blocks affected evaluations. Carry cannot use policy rates; range cannot assume
 event clearance; macro cannot assume no events. Acquisition does not waive these
 rules or guarantee that every acquired candle is usable in retrospective replay.
+
+## Acquisition revision 2 boundary correction, still before outcomes
+
+The first real W canary correctly failed the interval guard: OANDA's
+`includeFirst=true` includes the candle covering an unaligned `from`, even when
+its start precedes `from`. Three bounded attempts produced zero stored chunks.
+The failed revision-1 cache is preserved separately, not rewritten.
+
+Revision 2 uses includeFirst=true only when `from` is on the registered interval
+grid; otherwise false. Each request is still an independent half-open chunk.
+Additionally exclude a candle whose registered completion crosses the enclosing
+period end; retain its timestamp as a boundary exclusion, not its price values.
+In particular a Sunday daily candle before Monday holdout start must not carry
+holdout prices into the development blob. Internal chunk ends do not discard
+otherwise valid candles; period ends do. Registered completion is a boundary
+model, not provider-specific event/calendar attestation. Tests discriminate the
+straddling candle from an earlier valid daily candle. Source pins and the private
+acquisition registration change to `phase55/acquisition-v2` before new requests.

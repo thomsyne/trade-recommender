@@ -158,3 +158,28 @@ class AcquisitionTests(unittest.TestCase):
             path.write_text("OANDA_TOKEN=not-practice\n")
             with self.assertRaisesRegex(ValueError, "missing"):
                 practice_token(path)
+
+    def test_unaligned_from_excludes_covering_bar_and_seals_cross_boundary_values(self):
+        request = next(
+            r
+            for r in chunks()
+            if r["granularity"] == "D"
+            and r["period"] == "development"
+            and r["end"] == "2025-01-06T00:00:00+00:00"
+        )
+        earlier, crossing = copy.deepcopy(self.candle), copy.deepcopy(self.candle)
+        earlier["time"] = "2025-01-02T22:00:00Z"
+        crossing["time"] = "2025-01-05T22:00:00Z"
+
+        def handle(http_request):
+            self.assertEqual(http_request.url.params["includeFirst"], "false")
+            return httpx.Response(
+                200,
+                json={"instrument": "EUR_USD", "granularity": "D", "candles": [earlier, crossing]},
+            )
+
+        with OandaClient("synthetic-secret", transport=httpx.MockTransport(handle)) as client:
+            metadata, blob = fetch(client, request)
+        self.assertEqual(metadata["rows"], 1)
+        self.assertEqual(metadata["period_boundary_exclusions"], ["2025-01-05T22:00:00+00:00"])
+        self.assertEqual(len(json.loads(gzip.decompress(blob))), 1)
