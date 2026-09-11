@@ -683,8 +683,12 @@ class ExactEvidence(ImmutableRecord):
 
 
 class EvidenceConflict(ImmutableRecord):
-    earlier = models.ForeignKey(ExactEvidence, on_delete=models.PROTECT, related_name="later_changes")
-    later = models.ForeignKey(ExactEvidence, on_delete=models.PROTECT, related_name="earlier_changes")
+    earlier = models.ForeignKey(
+        ExactEvidence, on_delete=models.PROTECT, related_name="later_changes"
+    )
+    later = models.ForeignKey(
+        ExactEvidence, on_delete=models.PROTECT, related_name="earlier_changes"
+    )
     recorded_at = models.DateTimeField(default=timezone.now, editable=False)
     digest = models.CharField(max_length=64, unique=True)
     payload = models.JSONField()
@@ -702,6 +706,15 @@ class EvidenceIncident(ImmutableRecord):
     """Logical notification identity only; no delivery/outbox side effect."""
 
     conflict = models.ForeignKey(EvidenceConflict, on_delete=models.PROTECT)
+    recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+    digest = models.CharField(max_length=64, unique=True)
+    payload = models.JSONField()
+
+
+class EvidenceContextResult(ImmutableRecord):
+    """Explicit offline validated context, never a recommendation or authority."""
+
+    packet = models.ForeignKey(FrozenEvidencePacket, on_delete=models.PROTECT)
     recorded_at = models.DateTimeField(default=timezone.now, editable=False)
     digest = models.CharField(max_length=64, unique=True)
     payload = models.JSONField()

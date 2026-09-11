@@ -1,8 +1,9 @@
 """Explicit, dormant Phase 7 persistence. No automatic ingestion or delivery hook."""
 
 import hashlib
+import json
 
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 from research.evidence_quality import (
@@ -19,12 +20,20 @@ from research.evidence_quality import (
 )
 from research.models import (
     EvidenceConflict,
+    EvidenceContextResult,
     EvidenceIncident,
     EvidenceRightsReview,
     ExactEvidence,
     FrozenEvidencePacket,
 )
 from research.parsers import parse_feed
+
+
+def _lock():
+    with connection.cursor() as cursor:
+        cursor.execute("SHOW transaction_isolation")
+        require(cursor.fetchone()[0] == "read committed", "requires_read_committed")
+        cursor.execute("SELECT pg_advisory_xact_lock(7007001)")
 
 
 def _append(model, payload, **identity):
@@ -39,6 +48,7 @@ def _append(model, payload, **identity):
 
 @transaction.atomic
 def review_rights(source, payload):
+    _lock()
     validate_review(payload)
     require(payload["source_id"] == source.pk, "wrong_source")
     # Serialize prospective review chains per source, independently of processor.
@@ -55,7 +65,9 @@ def review_rights(source, payload):
     return _append(EvidenceRightsReview, payload, source=source)
 
 
-def verify_representation(payload, retrieval, *, document=None, observation=None):
+def verify_representation(
+    payload, retrieval, *, document=None, observation=None, replay_only=False
+):
     validate_representation(payload)
     require(payload["retrieval_id"] == retrieval.pk, "wrong_retrieval")
     require(
@@ -64,7 +76,8 @@ def verify_representation(payload, retrieval, *, document=None, observation=None
         == hashlib.sha256(bytes(retrieval.body)).hexdigest(),
         "retrieval_hash",
     )
-    require(payload["source_id"] == retrieval.source_policy.source_id, "wrong_source")
+    if not replay_only:
+        require(payload["source_id"] == retrieval.source_policy.source_id, "wrong_source")
     require(payload["retrieved_at"] == iso(retrieval.fetched_at), "retrieval_time")
     require(payload["content_type"] == retrieval.content_type, "content_type")
     if document:
@@ -72,12 +85,15 @@ def verify_representation(payload, retrieval, *, document=None, observation=None
             payload["document_id"] == document.pk and payload["observation_id"] is None,
             "cross_document",
         )
-        require(
-            payload["canonical_hash"] == document.canonical_hash
-            and payload["canonical_url"] == document.canonical_url,
-            "canonical_identity",
-        )
-        require(payload["first_observed_at"] == iso(document.first_observed_at), "observation_time")
+        if not replay_only:
+            require(
+                payload["canonical_hash"] == document.canonical_hash
+                and payload["canonical_url"] == document.canonical_url,
+                "canonical_identity",
+            )
+            require(
+                payload["first_observed_at"] == iso(document.first_observed_at), "observation_time"
+            )
         matches = [
             item
             for item in parse_feed(bytes(retrieval.body))
@@ -97,19 +113,32 @@ def verify_representation(payload, retrieval, *, document=None, observation=None
         )
         require(observation.retrieval_id == retrieval.pk, "wrong_retrieval")
         require(
+            payload["canonical_hash"]
+            == digest(["macro", observation.series_id, observation.observation_period.isoformat()]),
+            "macro_identity",
+        )
+        require(
+            payload["canonical_url"] == retrieval.url
+            and payload["first_observed_at"] == iso(retrieval.fetched_at),
+            "macro_provenance",
+        )
+        require(
             payload["source_item_id"] == str(observation.pk)
             and payload["normalized_fact"] == observation.normalized_value,
             "observation_value",
         )
-        require(
-            payload["headline"] == observation.series.label and payload["supplied_summary"] == "",
-            "observation_label",
-        )
+        if not replay_only:
+            require(
+                payload["headline"] == observation.series.label
+                and payload["supplied_summary"] == "",
+                "observation_label",
+            )
         require(payload["published_at"] == iso(observation.available_at), "observation_time")
 
 
 @transaction.atomic
 def store_representation(payload, *, retrieval, storage_review, document=None, observation=None):
+    _lock()
     verify_representation(payload, retrieval, document=document, observation=observation)
     require(payload["storage_review_sha256"] == storage_review.digest, "wrong_rights_identity")
     now = timezone.now()
@@ -159,11 +188,19 @@ def freeze_packet(instrument, *, cutoff, required_ids=()):
     Nothing invokes this on import, ingestion, recommendation or a schedule.
     Unknown rights and legacy material that lacks exact representations stay out.
     """
+    _lock()
     require(cutoff <= timezone.now(), "future_cutoff")
     required_ids = sorted(required_ids)
     candidates = []
     rows = ExactEvidence.objects.filter(recorded_at__lte=cutoff).order_by("digest")
     for row in rows:
+        verify_representation(
+            row.payload,
+            row.retrieval,
+            document=row.document,
+            observation=row.observation,
+            replay_only=True,
+        )
         rights = (
             EvidenceRightsReview.objects.filter(
                 source_id=row.payload["source_id"],
@@ -173,9 +210,13 @@ def freeze_packet(instrument, *, cutoff, required_ids=()):
             .order_by("-recorded_at", "-pk")
             .first()
         )
-        events = EvidenceConflict.objects.filter(
-            earlier__payload__canonical_hash=row.payload["canonical_hash"], recorded_at__lte=cutoff
-        ).order_by("digest")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT phase7_conflicts(%s,%s)", [row.payload["canonical_hash"], cutoff]
+            )
+            events = cursor.fetchone()[0]
+            if isinstance(events, str):
+                events = json.loads(events)
         candidates.append(
             {
                 "id": row.digest,
@@ -183,15 +224,7 @@ def freeze_packet(instrument, *, cutoff, required_ids=()):
                 "known_at": iso(row.recorded_at),
                 "rights": rights.payload if rights else None,
                 "rights_known_at": iso(rights.recorded_at) if rights else None,
-                "conflicts": [
-                    {
-                        "digest": e.digest,
-                        "known_at": iso(e.recorded_at),
-                        "class": e.payload["class"],
-                        "changed_fields": e.payload["changed_fields"],
-                    }
-                    for e in events
-                ],
+                "conflicts": events,
                 "role": "required" if row.digest in required_ids else "contextual",
             }
         )
@@ -228,7 +261,46 @@ def record_incident(conflict):
     return _append(EvidenceIncident, incident_payload(conflict), conflict=conflict)
 
 
+@transaction.atomic
+def notify_incident(conflict):
+    """Explicit admin/test delivery seam; never called by ingestion or packet creation."""
+    from operations.notifications import create_owner_notification
+
+    incident = record_incident(conflict)
+    return create_owner_notification(
+        idempotency_key="phase7-evidence:" + incident.digest,
+        kind="evidence_discrepancy",
+        severity="warning",
+        title="Evidence discrepancy requires review",
+        body="An immutable evidence discrepancy was recorded. Review its qualified evidence before use.",
+        action_path="",
+        subject_type="phase7_evidence_incident",
+        subject_id=str(incident.pk),
+    )
+
+
+def load_frozen_packet(packet_id):
+    """Replay only frozen identities and immutable retrieval bytes, not current policies."""
+    packet = FrozenEvidencePacket.objects.get(pk=packet_id)
+    require(packet.digest == digest(packet.payload), "stored_digest")
+    replay(packet.payload)
+    for entry in packet.payload["entries"]:
+        candidate = entry["candidate"]
+        row = ExactEvidence.objects.get(digest=candidate["id"])
+        require(row.payload == candidate["representation"], "stored_representation")
+        verify_representation(
+            row.payload,
+            row.retrieval,
+            document=row.document,
+            observation=row.observation,
+            replay_only=True,
+        )
+    return packet
+
+
 def audit_integrity():
+    from forecasts.evidence_context import replay_context_result
+
     counts = {}
     for model in (
         EvidenceRightsReview,
@@ -236,6 +308,7 @@ def audit_integrity():
         EvidenceConflict,
         FrozenEvidencePacket,
         EvidenceIncident,
+        EvidenceContextResult,
     ):
         count = 0
         for row in model.objects.iterator():
@@ -244,7 +317,11 @@ def audit_integrity():
                 validate_review(row.payload)
             elif model is ExactEvidence:
                 verify_representation(
-                    row.payload, row.retrieval, document=row.document, observation=row.observation
+                    row.payload,
+                    row.retrieval,
+                    document=row.document,
+                    observation=row.observation,
+                    replay_only=True,
                 )
             elif model is EvidenceConflict:
                 declaration = (
@@ -256,7 +333,9 @@ def audit_integrity():
                 change = classify_change(row.earlier.payload, row.later.payload, declaration)
                 require(all(row.payload[k] == v for k, v in change.items()), "conflict_replay")
             elif model is FrozenEvidencePacket:
-                replay(row.payload)
+                load_frozen_packet(row.pk)
+            elif model is EvidenceContextResult:
+                replay_context_result(row)
             else:
                 require(row.payload == incident_payload(row.conflict), "incident_replay")
             count += 1

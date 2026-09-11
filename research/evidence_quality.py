@@ -284,6 +284,8 @@ def classify_change(earlier, later, declaration=None):
 
 
 def conflict_state(events, cutoff):
+    require(type(events) is list, "invalid_conflicts")
+    require(len({e["digest"] for e in events}) == len(events), "duplicate_conflict")
     known = [e for e in events if instant(e["known_at"]) <= cutoff]
     for e in events:
         closed(e, ("digest", "known_at", "class", "changed_fields"))
@@ -347,7 +349,12 @@ def build_packet(*, instrument, cutoff, candidates, required_ids):
     """
     instant(cutoff)
     require(type(candidates) is list and type(required_ids) is list)
+    require(
+        all(type(i) is str and re.fullmatch("[a-f0-9]{64}", i) for i in required_ids),
+        "required_identity",
+    )
     require(required_ids == sorted(set(required_ids)), "duplicate_required")
+    candidates = json.loads(canonical(candidates))
     now = instant(cutoff)
     entries = []
     ids = []
@@ -365,7 +372,7 @@ def build_packet(*, instrument, cutoff, candidates, required_ids):
         )
         ids.append(candidate["id"])
         conflict = conflict_state(candidate["conflicts"], now)
-        rank = relevance(rep, instrument, now, conflict)
+        candidate["conflicts"].sort(key=lambda event: event["digest"])
         reasons = []
         published = instant(rep["published_at"]) if rep["published_at"] else None
         if (
@@ -380,12 +387,16 @@ def build_packet(*, instrument, cutoff, candidates, required_ids):
             reasons.append("stale")
         if rep["quality"]["retrieval_integrity"] != "hash_checked":
             reasons.append("retrieval_unavailable")
-        if rank["score"] == 0:
-            reasons.append("irrelevant")
         rights = candidate["rights"]
         rights_available = rights is not None and instant(candidate["rights_known_at"]) <= now
         decisions = {}
-        for field in ("headline", "supplied_summary", "normalized_fact", "derived_label"):
+        for field in (
+            "headline",
+            "supplied_summary",
+            "normalized_fact",
+            "derived_label",
+            "url_attribution",
+        ):
             decisions[field] = {
                 use: permission(
                     rights if rights_available else None,
@@ -397,8 +408,26 @@ def build_packet(*, instrument, cutoff, candidates, required_ids):
                 )
                 for use in ("deterministic_processing", "external_llm")
             }
+        if all(
+            decisions[field]["deterministic_processing"] == "allowed"
+            for field in ("headline", "derived_label")
+        ):
+            rank = relevance(rep, instrument, now, conflict)
+            if rank["score"] == 0:
+                reasons.append("irrelevant")
+        else:
+            rank = {"score": 0, "reasons": ["deterministic_rights_unavailable"]}
         if any(state != "allowed" for state in decisions["headline"].values()):
             reasons.append("rights_blocked")
+        if any(state != "allowed" for state in decisions["url_attribution"].values()):
+            reasons.append("attribution_rights_blocked")
+        if any(state != "allowed" for state in decisions["derived_label"].values()):
+            reasons.append("derived_label_rights_blocked")
+        if candidate["role"] == "required" and any(
+            rep[field] and any(s != "allowed" for s in decisions[field].values())
+            for field in ("headline", "supplied_summary", "normalized_fact")
+        ):
+            reasons.append("required_field_rights_blocked")
         if candidate["role"] == "required" and (
             conflict in {"material", "unknown"}
             or rep["quality"]["timestamp_precision"] != "provider_exact"
@@ -457,7 +486,7 @@ def build_packet(*, instrument, cutoff, candidates, required_ids):
         "included_count": admitted,
         "excluded_counts": counts,
         "unavailable_required": missing,
-        "readiness": "abstain" if missing else "ready",
+        "readiness": "abstain" if missing or not admitted else "ready",
     }
     return body
 

@@ -1,0 +1,16 @@
+{
+  "dump_sha256": "not_captured_no_dump",
+  "historical_claim_snapshot": "unknown",
+  "image_digest": "unknown",
+  "instance": "i-06a17f7ac14d7b282",
+  "region": "us-east-1",
+  "source": "deployed-primary",
+  "source_hashes": {
+    "forecasts.models": "a372f80d4c4313ab2a51958ad608558142640c7581e06ceed9957b5f9ee1f95f",
+    "forecasts.recommendations": "a289ca073d0068d1581fbb346e2322fcb6406df92d7542ce8aab7b96a8fcc15c",
+    "research.models": "cb72ee3f0ea35b6e0388bdc26394c80c283607d20c7be0a473c77d6ffe5048e9",
+    "research.services": "c1338ed7c9f779a9b09ce7418ca382624647fa8dfa6b07d05e38d6373c52e0e9"
+  },
+  "source_revision": "unknown",
+  "ssm_command": "506caab1-be6a-4859-9c5a-417e972c9260"
+}
