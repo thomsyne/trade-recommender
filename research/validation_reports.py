@@ -1,6 +1,5 @@
 """Deterministic, separately attributed diagnostics. Never an acceptance authority."""
 
-import json
 import os
 import tempfile
 from collections import Counter, defaultdict
@@ -10,7 +9,7 @@ from pathlib import Path
 
 from market.state.canonical import canonical_json, identity_digest
 from market.strategy.contracts import arithmetic
-from research.validation_registration import DEVELOPMENT_SPLIT, VALIDATION_REVISION
+from research.validation_registration import DEVELOPMENT_SPLIT, SCENARIOS, Catalog
 
 MONEY = (
     "gross_CAD",
@@ -216,32 +215,9 @@ def paired_increment(candidate, comparator, scenario):
     }
 
 
-def report(strategy, instrument, rows, registration_id, scenarios, *, accounts=1, baseline=None):
-    body = {
-        "schema": "phase55/validation-report-v1",
-        "registration": registration_id,
-        "strategy": strategy,
-        "instrument": instrument,
-        "session": (baseline or strategy).split(":")[1]
-        if ":" in (baseline or strategy)
-        else "regular_fx",
-        "baseline_identity": baseline,
-        "original_definition_revision": 2,
-        "validation_revision": VALIDATION_REVISION,
-        "mode": "model_based_retrospective_regular_session_not_broker_execution",
-        "account_allocation": {"independent_CAD_accounts": accounts, "equity_each": "100000"},
-        "period": "development",
-        "scenarios": {
-            s: summarize(rows() if callable(rows) else rows, s, accounts=accounts)
-            for s in scenarios
-        },
-        "proposal": "inconclusive",
-        "reason": "integrity_evidence_incomplete_holdout_sealed",
-        "holdout": "sealed_not_evaluated",
-        "activation": "forbidden",
-    }
-    body["identity"] = identity_digest(body)
-    return body
+def report(catalog, registration_id, strategy, instrument, *, baseline=None):
+    """Certifying boundary: no caller rows, account counts, periods or labels."""
+    return next(_verified_reports(catalog, registration_id, [(strategy, instrument, baseline)]))
 
 
 @arithmetic
@@ -361,72 +337,132 @@ def development_proposal(body, registration):
 
 
 def saved_rows(catalog, registration_id, strategy, instrument, *, overlay=None):
+    rows, _, _ = catalog.verify_chain(registration_id, strategy, instrument)
+    yield from overlay_rows(rows, overlay) if overlay else rows
+
+
+def _verified_reports(catalog, registration_id, requests):
+    from research.validation_batch import OVERLAYS, timeframe
+
+    if type(catalog) is not Catalog:
+        raise ValueError("verified_catalog_required")
     registration = catalog.load(registration_id)
-    expected, end = map(datetime.fromisoformat, registration["development"])
-    predecessor = None
-    query = """SELECT body,body_sha256 FROM checkpoint WHERE registration_id=?
-        AND json_extract(body,'$.key.strategy')=? AND json_extract(body,'$.key.instrument')=?
-        ORDER BY json_extract(body,'$.key.start')"""
-    for text, digest in catalog.db.execute(query, (registration_id, strategy, instrument)):
-        body = json.loads(text)
-        if (
-            identity_digest(body) != digest
-            or body["key"]["start"] != expected.isoformat()
-            or body["predecessor"] != predecessor
-        ):
-            raise ValueError("report_checkpoint_chain_corrupt")
-        expected += timedelta(days=1)
-        if body["key"]["end"] != expected.isoformat() or expected > end:
-            raise ValueError("report_checkpoint_period_drift")
-        predecessor = digest
-        yield from overlay_rows(body["rows"], overlay) if overlay else body["rows"]
-    if expected != end:
-        raise ValueError("development_checkpoints_incomplete_not_a_pass")
+    needed = set()
+    for strategy, instrument, baseline in requests:
+        if strategy not in registration["strategies"] or instrument not in [
+            *registration["instruments"],
+            "aggregate",
+        ]:
+            raise ValueError("unregistered_report_population")
+        if (strategy in OVERLAYS) != (baseline is not None) or baseline in OVERLAYS:
+            raise ValueError("report_overlay_requires_separate_baseline")
+        source = baseline or strategy
+        if source not in registration["strategies"]:
+            raise ValueError("report_baseline_unregistered")
+        population = registration["instruments"] if instrument == "aggregate" else [instrument]
+        for pair in population:
+            needed.add((source, pair))
+            if not baseline and source.startswith("orb-m15-fvg"):
+                needed.add((source.replace("orb-m15-fvg", "orb-m15-confirmed"), pair))
+    # Preloading is internal and goes through exactly the same complete causal
+    # verification as focused publication. No selected-row API can mint claims.
+    verified, bindings, shared = {}, {}, {}
+    for source, pair in sorted(needed):
+        rows, _, terminal = catalog.verify_chain(registration_id, source, pair)
+        # Only after full-body verification: omit unused decision payloads and
+        # intern identical immutable views to bound a twelve-pair M15 report.
+        for row in rows:
+            row.pop("decision")
+            for field in ("scenarios", "overlays"):
+                value = row[field]
+                row[field] = shared.setdefault(canonical_json(value), value)
+        verified[source, pair] = rows
+        bindings[source, pair] = {
+            "strategy": source,
+            "instrument": pair,
+            "terminal_checkpoint_sha256": terminal,
+            "daily_checkpoints": (
+                datetime.fromisoformat(registration["development"][1])
+                - datetime.fromisoformat(registration["development"][0])
+            ).days,
+        }
+    for strategy, instrument, baseline in requests:
+        source = baseline or strategy
+        population = registration["instruments"] if instrument == "aggregate" else [instrument]
+
+        def rows(overlay=None, comparator=source):
+            for pair in population:
+                values = verified[comparator, pair]
+                yield from overlay_rows(values, overlay) if overlay else values
+
+        body = {
+            "schema": registration["report_schema"],
+            "registration": registration_id,
+            "strategy": strategy,
+            "instrument": instrument,
+            "session": source.split(":")[1] if ":" in source else "regular_fx",
+            "timeframe": timeframe(source),
+            "baseline_identity": baseline,
+            "original_definition_revision": 2,
+            "validation_revision": registration["revision"],
+            "mode": registration["mode"],
+            "account_allocation": {
+                "independent_CAD_accounts": len(population),
+                "equity_each": registration["research_equity_CAD"],
+            },
+            "period": "development",
+            "period_bounds": registration["development"],
+            "checkpoint_bindings": [bindings[source, p] for p in population],
+            "scenarios": {
+                s: summarize(rows(strategy if baseline else None), s, accounts=len(population))
+                for s in SCENARIOS
+            },
+            "reason": "integrity_evidence_incomplete_holdout_sealed",
+            "holdout": "sealed_not_evaluated",
+            "activation": "forbidden",
+        }
+        if baseline:
+            body["paired_comparator"] = {
+                s: paired_increment(rows(strategy), rows(), s) for s in SCENARIOS
+            }
+        elif strategy.startswith("orb-m15-fvg"):
+            confirmed = strategy.replace("orb-m15-fvg", "orb-m15-confirmed")
+            body["comparator_checkpoint_bindings"] = [bindings[confirmed, p] for p in population]
+            body["paired_comparator"] = {
+                s: paired_increment(rows(), rows(comparator=confirmed), s) for s in SCENARIOS
+            }
+        else:
+            body["paired_comparator"] = None
+        body.update(development_proposal(body, registration))
+        body["identity"] = identity_digest(body)
+        yield body
 
 
-def export_report(catalog, registration_id, strategy, instrument, destination, *, baseline=None):
+def export_population(catalog, registration_id, source, destination):
+    """Bounded one-baseline batch: twelve instruments plus aggregate, five views."""
     from research.validation_batch import OVERLAYS
 
     registration = catalog.load(registration_id)
-    population = registration["instruments"] if instrument == "aggregate" else [instrument]
-    if strategy not in registration["strategies"] or any(
-        p not in registration["instruments"] for p in population
-    ):
-        raise ValueError("unregistered_report_population")
-    if (strategy in OVERLAYS) != (baseline is not None) or baseline in OVERLAYS:
-        raise ValueError("report_overlay_requires_separate_baseline")
-    source = baseline or strategy
-    if source not in registration["strategies"]:
+    if source not in registration["strategies"] or source in OVERLAYS:
         raise ValueError("report_baseline_unregistered")
+    requests = [
+        (s, p, source if s in OVERLAYS else None)
+        for s in (source, *OVERLAYS)
+        for p in (*registration["instruments"], "aggregate")
+    ]
+    return [
+        _publish_report(body, destination)
+        for body in _verified_reports(catalog, registration_id, requests)
+    ]
 
-    def rows(overlay=None, comparator=source):
-        for pair in population:
-            yield from saved_rows(catalog, registration_id, comparator, pair, overlay=overlay)
 
-    body = report(
-        strategy,
-        instrument,
-        lambda: rows(strategy if baseline else None),
-        registration_id,
-        registration["scenarios"],
-        accounts=len(population),
-        baseline=baseline,
+def export_report(catalog, registration_id, strategy, instrument, destination, *, baseline=None):
+    return _publish_report(
+        report(catalog, registration_id, strategy, instrument, baseline=baseline), destination
     )
-    if baseline:
-        body["paired_comparator"] = {
-            s: paired_increment(rows(strategy), rows(), s) for s in registration["scenarios"]
-        }
-    elif strategy.startswith("orb-m15-fvg"):
-        confirmed = strategy.replace("orb-m15-fvg", "orb-m15-confirmed")
-        body["paired_comparator"] = {
-            s: paired_increment(rows(), rows(comparator=confirmed), s)
-            for s in registration["scenarios"]
-        }
-    else:
-        body["paired_comparator"] = None
-    body.update(development_proposal(body, registration))
-    del body["identity"]
-    body["identity"] = identity_digest(body)
+
+
+def _publish_report(body, destination):
     directory = Path(destination)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     for suffix, text in (("json", canonical_json(body) + "\n"), ("txt", plain_english(body))):
@@ -460,7 +496,8 @@ def plain_english(body):
         "Model-based retrospective only. Exceptional-session evidence is missing; "
         "integrity-clean retention is blocked. Holdout remains sealed. Not trading approval.",
     ]
-    for scenario, result in body["scenarios"].items():
+    for scenario in SCENARIOS:
+        result = body["scenarios"][scenario]
         lines.extend(
             (
                 f"\nScenario {scenario}: {result['planned_opportunities']} planned opportunities; "

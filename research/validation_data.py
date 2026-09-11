@@ -4,7 +4,6 @@ import gzip
 import hashlib
 import json
 import sqlite3
-from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,8 +15,7 @@ from market.quality import (
     registered_successor,
 )
 from market.state.canonical import canonical_json, identity_digest
-from research.validation_acquisition import chunks, plan, predecessor_plan
-from research.validation_audit import PERIODS
+from research.validation_acquisition import ROOT, chunks, plan, predecessor_plan
 
 
 def connect(path):
@@ -77,6 +75,34 @@ def metadata(connection):
 
 
 def _verified_blob(connection, key, meta):
+    # This gate precedes even a SELECT. Metadata projection after decoding is
+    # not a seal. Only the frozen warmup/development requests may reach a blob.
+    try:
+        request = meta["request"]
+        start, end = map(datetime.fromisoformat, (request["start"], request["end"]))
+        allowed = (
+            request["period"] in {"warmup", "development"}
+            and start.utcoffset() == end.utcoffset() == timedelta(0)
+            and datetime(2017, 1, 1, tzinfo=UTC) <= start < end <= datetime(2025, 1, 6, tzinfo=UTC)
+        )
+    except (KeyError, TypeError, ValueError):
+        allowed = False
+    if not allowed:
+        raise ValueError("sealed_or_invalid_blob_request") from None
+    stored = connection.execute(
+        "SELECT metadata,metadata_sha256 FROM chunk WHERE identity=?", (key,)
+    ).fetchone()
+    try:
+        actual = json.loads(stored[0])
+        authenticated = (
+            identity_digest(actual) == stored[1]
+            and meta == {"metadata_sha256": stored[1], **actual}
+            and key == identity_digest({"registration": actual["registration"], "request": request})
+        )
+    except (TypeError, KeyError, ValueError):
+        authenticated = False
+    if not authenticated:
+        raise ValueError("blob_metadata_identity_mismatch") from None
     blob = connection.execute("SELECT blob FROM chunk WHERE identity=?", (key,)).fetchone()[0]
     if hashlib.sha256(blob).hexdigest() != meta["blob_sha256"]:
         raise ValueError("acquisition_blob_corrupt")
@@ -93,83 +119,34 @@ def _verified_blob(connection, key, meta):
 
 
 def audit_cache(path):
-    """May inspect sealed timestamps only; never expose a price or calculate outcomes."""
-    connection = connect(path)
+    """Post-freeze coverage audit: authenticate metadata, never read price blobs."""
+    connection = None
     try:
+        connection = connect(path)
+        connection.set_authorizer(
+            lambda action, table, column, *_: (
+                sqlite3.SQLITE_DENY
+                if action == sqlite3.SQLITE_READ and table == "chunk" and column == "blob"
+                else sqlite3.SQLITE_OK
+            )
+        )
         registration, records = metadata(connection)
-        groups = defaultdict(list)
-        for key, item in records.items():
-            request = item["request"]
-            groups[(request["period"], request["instrument"], request["granularity"])].append(key)
-        summary = []
-        for (period, instrument, granularity), keys in sorted(groups.items()):
-            timestamps, acquisition_times, excluded = [], [], []
-            for key in keys:
-                # Deliberate audit-only projection, including holdout; no rows leave this scope.
-                timestamps.extend(
-                    r["timestamp"] for r in _verified_blob(connection, key, records[key])
-                )
-                acquisition_times.append(records[key]["acquired_at"])
-                excluded.extend(records[key]["period_boundary_exclusions"])
-            _, a, b = next(p for p in PERIODS if p[0] == period)
-            start, end = (
-                datetime.fromisoformat(a).replace(tzinfo=UTC),
-                datetime.fromisoformat(b).replace(tzinfo=UTC),
-            )
-            expected = set(expected_times(start, end, granularity))
-            actual = set(timestamps)
-            missing, unexpected = sorted(expected - actual), sorted(actual - expected)
-            summary.append(
-                {
-                    "period": period,
-                    "instrument": instrument,
-                    "granularity": granularity,
-                    "rows": len(timestamps),
-                    "distinct_intervals": len(actual),
-                    "duplicate_intervals": len(timestamps) - len(actual),
-                    "first_timestamp": min(actual) if actual else None,
-                    "last_timestamp": max(actual) if actual else None,
-                    "first_acquired": min(acquisition_times),
-                    "last_acquired": max(acquisition_times),
-                    "nominal_expected_intervals": len(expected),
-                    "nominal_missing_intervals": len(missing),
-                    "missing_timestamp_sha256": identity_digest(missing),
-                    "unexpected_intervals": len(unexpected),
-                    "unexpected_regular_open_intervals": sum(
-                        regular_open(datetime.fromisoformat(at), granularity) for at in unexpected
-                    ),
-                    "outside_regular_model_intervals": sum(
-                        not regular_open(datetime.fromisoformat(at), granularity)
-                        for at in unexpected
-                    ),
-                    "unexpected_timestamp_sha256": identity_digest(unexpected),
-                    "period_boundary_exclusions": sorted(excluded),
-                    "expected_calendar": "regular_NY_FX_model_not_exception_attestation",
-                    "bid_available": len(timestamps),
-                    "ask_available": len(timestamps),
-                    "mid": "derived_only",
-                    "revisions": "single_acquisition_final_snapshot_no_historical_vintage_claim",
-                    "manifest_sha256": identity_digest(
-                        {key: records[key]["metadata_sha256"] for key in sorted(keys)}
-                    ),
-                }
-            )
-        return {
-            "schema": "phase55/acquired-coverage-v1",
-            "acquisition_registration": registration,
-            "manifest": {key: item["metadata_sha256"] for key, item in sorted(records.items())},
-            "groups": summary,
-            "holdout": "sealed_metadata_only",
-            "mandatory_unavailable": [
-                "historical_financing_rollovers",
-                "exceptional_session_vintages",
-                "macro_event_vintages",
-                "carry_forwards_ranking",
-            ],
-            "prior_use": "owner_attested_no_phase5_results_2025-01-06_to_2026-09-07",
-        }
+        frozen = json.loads((ROOT / "docs/phase5.5/frozen-registration-v2.json").read_text())
+        audit = json.loads((ROOT / "docs/phase5.5/acquired-coverage.json").read_text())
+        if (
+            identity_digest(frozen["body"]) != frozen["identity"]
+            or identity_digest(audit) != frozen["body"]["audit_sha256"]
+            or registration != audit["acquisition_registration"]
+            or {k: v["metadata_sha256"] for k, v in records.items()} != audit["manifest"]
+        ):
+            raise ValueError("frozen_coverage_mismatch")
+        return audit
+    except (ValueError, KeyError, TypeError, OSError, sqlite3.Error):
+        # Never echo provider metadata, malformed JSON contents or DB errors.
+        raise ValueError("frozen_coverage_metadata_unavailable") from None
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 def load_development(path, manifest, instrument, granularity):

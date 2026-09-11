@@ -21,7 +21,7 @@ from market.strategy.definitions import (
 from research.validation_acquisition import ROOT, canonical_pairs
 from research.validation_audit import PERIODS
 
-VALIDATION_REVISION = 2
+VALIDATION_REVISION = 3
 SOURCE_FILES = (
     *(str(path.relative_to(ROOT)) for path in sorted((ROOT / "market/state").glob("*.py"))),
     "market/apps.py",
@@ -36,6 +36,9 @@ SOURCE_FILES = (
     "docs/phase5.5/validation-contract.md",
     "docs/phase5.5/validation-revision-2.md",
     "docs/phase5.5/frozen-registration.json",
+    "docs/phase5.5/frozen-registration-v2.json",
+    "docs/phase5.5/sealed-manifest.json",
+    "docs/phase5.5/correction-cycle.md",
 )
 SCENARIOS = ("baseline", "adverse_cost", "extra_interval_latency")
 DEVELOPMENT = ("2019-01-07T00:00:00+00:00", "2025-01-06T00:00:00+00:00")
@@ -123,7 +126,7 @@ def contract(audit):
         "schema": "phase55/validation-registration-v1",
         "revision": VALIDATION_REVISION,
         "supersedes_registration": json.loads(
-            (ROOT / "docs/phase5.5/frozen-registration.json").read_text()
+            (ROOT / "docs/phase5.5/frozen-registration-v2.json").read_text()
         )["identity"],
         "mode": "model_based_retrospective_regular_session_not_broker_execution",
         "strategies": {
@@ -180,7 +183,7 @@ def contract(audit):
             "missingness",
             "adverse_gap_dual_hit",
         ],
-        "report_schema": "phase55/validation-report-v1",
+        "report_schema": "phase55/validation-report-v2",
         "activation": "forbidden",
         "shadow": {
             "start": "2026-09-11T00:00:00+00:00",
@@ -218,6 +221,11 @@ class Catalog:
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.acquisition_path = ROOT / ".candidate-data/phase55-v1/acquisition.sqlite3"
+        # In-memory proofs originate only in deterministic replay, never in
+        # persisted claims. They survive neither process restart nor source drift.
+        self._proofs = {}
+        self._pending = None
         self.db = sqlite3.connect(path, timeout=30)
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA synchronous=FULL")
@@ -407,19 +415,173 @@ class Catalog:
 
             if key["strategy"] in OVERLAYS or seen != set(opportunities(key["strategy"], start)):
                 return 0
-            if start == a:
-                return int(body["predecessor"] is None)
+            digest = identity_digest(body)
+            proof = self._proofs.get(identity_digest(key))
+            if self._pending == digest and proof is not None:
+                if proof[1] != digest or proof[0] != body["predecessor"]:
+                    return 0
+                if start == a:
+                    return int(body["predecessor"] is None)
+                prior_key = {
+                    **key,
+                    "start": (start - timedelta(days=1)).isoformat(),
+                    "end": key["start"],
+                }
+                prior = self.db.execute(
+                    "SELECT body,body_sha256 FROM checkpoint WHERE identity=?",
+                    (identity_digest(prior_key),),
+                ).fetchone()
+                return int(
+                    prior is not None
+                    and identity_digest(json.loads(prior[0])) == prior[1] == body["predecessor"]
+                )
+            # Raw SQL has the same semantic boundary as the Python API. Rehashed
+            # accounting, altered decisions and invented occupancy cannot pass.
+            self.load(key["registration"])
+            _, active, predecessor = self.verify_chain(
+                key["registration"], key["strategy"], key["instrument"], stop=start, collect=False
+            )
+            expected = self.replay_checkpoint(key, registration, active, predecessor)
+            return int(canonical_json(expected) == canonical_json(body))
+        except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError):
+            return 0
+
+    def replay_checkpoint(self, key, registration, active, predecessor):
+        """Derive the closed decision/result/accounting/state contract from inputs."""
+        from research.validation_batch import OVERLAYS, data_for, day_rows
+
+        if set(key) != {"registration", "strategy", "instrument", "start", "end"}:
+            raise ValueError("checkpoint_key_contract")
+        start, end = map(datetime.fromisoformat, (key["start"], key["end"]))
+        a, b = map(datetime.fromisoformat, registration["development"])
+        if (
+            key["registration"] != identity_digest(registration)
+            or key["strategy"] not in registration["strategies"]
+            or key["strategy"] in OVERLAYS
+            or key["instrument"] not in registration["instruments"]
+            or start.utcoffset() != timedelta(0)
+            or end.utcoffset() != timedelta(0)
+            or start.time() != datetime.min.time()
+            or end - start != timedelta(days=1)
+            or not a <= start < end <= b
+        ):
+            raise ValueError("checkpoint_sealed_population_or_period")
+        if start == a:
+            valid_state = predecessor is None and active == {
+                s: None for s in registration["scenarios"]
+            }
+        else:
             prior_key = {
                 **key,
                 "start": (start - timedelta(days=1)).isoformat(),
-                "end": start.isoformat(),
+                "end": key["start"],
             }
-            prior = self.db.execute(
-                "SELECT body_sha256 FROM checkpoint WHERE identity=?", (identity_digest(prior_key),)
-            ).fetchone()
-            return int(prior is not None and body["predecessor"] == prior[0])
-        except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError):
-            return 0
+            proof = self._proofs.get(identity_digest(prior_key))
+            valid_state = (
+                proof is not None and proof[1] == predecessor and proof[2] == canonical_json(active)
+            )
+        if not valid_state:
+            raise ValueError("resume_state_not_derived_from_verified_prefix")
+        data, conversions = data_for(
+            self.acquisition_path, registration, key["strategy"], key["instrument"]
+        )
+        state = dict(active)
+        rows = day_rows(
+            key["registration"],
+            registration,
+            key["strategy"],
+            key["instrument"],
+            start,
+            data,
+            conversions,
+            state,
+        )
+        body = {
+            "schema": "phase55/checkpoint-v1",
+            "registration": key["registration"],
+            "key": dict(key),
+            "rows": rows,
+            "end_state": state,
+            "predecessor": predecessor,
+        }
+        # Store only replay-derived hashes/state, not a supplied row's signature.
+        self._proofs[identity_digest(key)] = (
+            predecessor,
+            identity_digest(body),
+            canonical_json(state),
+        )
+        return body
+
+    def verify_chain(self, registration_id, strategy, instrument, *, stop=None, collect=True):
+        """Verify a complete causal prefix before exposing rows or resume state.
+
+        Traversal follows the fixed daily grid, not arbitrary ancestor pointers.
+        Fetching completes before replay so a reader does not hold a DB lock while
+        evaluating formulas. A fresh call always hashes the actual stored bodies.
+        """
+        from research.validation_batch import OVERLAYS
+
+        registration = self.load(registration_id)
+        start, end = map(datetime.fromisoformat, registration["development"])
+        stop = end if stop is None else stop
+        if (
+            strategy not in registration["strategies"]
+            or strategy in OVERLAYS
+            or instrument not in registration["instruments"]
+            or stop.utcoffset() != timedelta(0)
+            or stop.time() != datetime.min.time()
+            or not start <= stop <= end
+        ):
+            raise ValueError("chain_sealed_population_or_period")
+        if (
+            stop == end
+            and self.db.execute(
+                """SELECT count(*) FROM checkpoint WHERE registration_id=?
+            AND json_extract(body,'$.key.strategy')=? AND json_extract(body,'$.key.instrument')=?""",
+                (registration_id, strategy, instrument),
+            ).fetchone()[0]
+            != (end - start).days
+        ):
+            raise ValueError("complete_population_incomplete_or_extra_period")
+        records = self.db.execute(
+            """SELECT identity,body,body_sha256 FROM checkpoint
+            WHERE registration_id=? AND json_extract(body,'$.key.strategy')=?
+            AND json_extract(body,'$.key.instrument')=? AND json_extract(body,'$.key.start')<?
+            ORDER BY json_extract(body,'$.key.start') LIMIT ?""",
+            (registration_id, strategy, instrument, stop.isoformat(), (stop - start).days + 1),
+        ).fetchall()
+        if len(records) != (stop - start).days:
+            raise ValueError("previous_checkpoint_required_chain_incomplete")
+        active, predecessor, rows = {s: None for s in registration["scenarios"]}, None, []
+        day = start
+        for identity, text, digest in records:
+            body = json.loads(text)
+            key = {
+                "registration": registration_id,
+                "strategy": strategy,
+                "instrument": instrument,
+                "start": day.isoformat(),
+                "end": (day + timedelta(days=1)).isoformat(),
+            }
+            if (
+                identity_digest(key) != identity
+                or body.get("key") != key
+                or identity_digest(body) != digest
+                or body.get("predecessor") != predecessor
+            ):
+                raise ValueError("checkpoint_chain_identity_or_ancestry")
+            proof = self._proofs.get(identity)
+            if proof is None or proof[0] != predecessor:
+                self.replay_checkpoint(key, registration, active, predecessor)
+                proof = self._proofs[identity]
+            if proof[1] != digest or canonical_json(body.get("end_state")) != proof[2]:
+                raise ValueError("checkpoint_semantic_replay_mismatch")
+            active = json.loads(proof[2])
+            predecessor = digest
+            if collect:
+                rows.extend(body["rows"])
+            day += timedelta(days=1)
+        return rows, active, predecessor
 
     def register(self, audit):
         body = json.loads(canonical_json(contract(audit)))
@@ -461,6 +623,22 @@ class Catalog:
             or len(rows) > 2000
         ):
             raise ValueError("checkpoint_population_or_bound")
+        registration = self.load(key["registration"])
+        _, active, prior = self.verify_chain(
+            key["registration"],
+            key["strategy"],
+            key["instrument"],
+            stop=datetime.fromisoformat(key["start"]),
+            collect=False,
+        )
+        expected = self.replay_checkpoint(key, registration, active, prior)
+        if canonical_json(expected) != canonical_json(body):
+            raise sqlite3.IntegrityError("checkpoint_semantic_replay_mismatch")
+        return self._write_replayed(body)
+
+    def _write_replayed(self, body):
+        """Internal producer path; SQL still requires the replay-derived proof."""
+        key = body["key"]
         identity = identity_digest(key)
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -469,6 +647,7 @@ class Catalog:
             ).fetchone()
             if prior and prior[0] != canonical_json(body):
                 raise ValueError("checkpoint_retry_conflict")
+            self._pending = identity_digest(body)
             self.db.execute(
                 "INSERT OR IGNORE INTO checkpoint VALUES (?,?,?,?)",
                 (identity, key["registration"], canonical_json(body), identity_digest(body)),
@@ -477,6 +656,8 @@ class Catalog:
         except BaseException:
             self.db.rollback()
             raise
+        finally:
+            self._pending = None
         return identity
 
     def close(self):

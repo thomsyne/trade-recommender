@@ -418,7 +418,10 @@ class CatalogTests(unittest.TestCase):
                     for s in ("fixed-risk-v1", "ewma-risk-v1", "garch-t-risk-v1", "macro-risk-v1")
                 },
                 "scenarios": {
-                    s: {"state": "unavailable", "reason": "synthetic_missing_forwards"}
+                    s: {
+                        "state": "unavailable",
+                        "reason": "pit_forwards_financing_rollover_ranking_unavailable",
+                    }
                     for s in self.state
                 },
             }
@@ -470,7 +473,7 @@ class CatalogTests(unittest.TestCase):
             self.catalog.checkpoint(self.key, self.rows, end_state=self.state, predecessor=None),
         )
         self.assertEqual(before, self.catalog.db.execute("SELECT * FROM checkpoint").fetchall())
-        with self.assertRaisesRegex(ValueError, "conflict"):
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "semantic"):
             self.catalog.checkpoint(
                 self.key,
                 self.rows,
@@ -517,7 +520,7 @@ class CatalogTests(unittest.TestCase):
                 **{k: row[k] for k in ("opportunity", "instrument", "strategy", "decision")},
             }
         )
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaisesRegex(ValueError, "chain_incomplete"):
             self.catalog.checkpoint(
                 key,
                 [row],
@@ -639,6 +642,13 @@ class CatalogTests(unittest.TestCase):
             "outputs": [setup],
             "activation": "forbidden",
         }
+        data = {"M15": Series([m15(at, high="107", low="97")])}
+        for mocked in (
+            patch("research.validation_batch.selection", return_value=(output, setup)),
+            patch("research.validation_batch.data_for", return_value=(data, {})),
+        ):
+            mocked.start()
+            self.addCleanup(mocked.stop)
         active = dict(self.state)
         with patch("research.validation_batch.selection", return_value=(output, setup)):
             rows = day_rows(

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal as D
 from functools import lru_cache
 
+from market.quality import registered_successor
 from market.state.canonical import canonical_json, identity_digest
 from market.state.features import Bar
 from market.state.sessions import session_open_utc
@@ -13,7 +14,7 @@ from market.strategy.contracts import SnapshotInput, arithmetic, encoded
 from market.strategy.definitions import STRATEGIES
 from market.strategy.evaluate import evaluate
 from market.strategy.risk import volatility_overlay
-from market.strategy.trend import sigma
+from market.strategy.trend import breakout, ewmac, sigma
 from research.validation_acquisition import ROOT
 from research.validation_data import expected_times, load_development
 from research.validation_execution import simulate
@@ -78,6 +79,117 @@ def row_reason(output):
     if output.get("schema") == "phase55/readiness-v1":
         return output["reason"]
     return output["outputs"][0].get("reason", "setup_unavailable")
+
+
+@arithmetic
+def forecast_step(
+    strategy,
+    instrument,
+    bars,
+    *,
+    costs,
+    cutoff,
+    registration,
+    scenario,
+    conversion_rate,
+    execution_spread,
+    previous=None,
+):
+    """Frozen next-D exposure mapping, not a fill or financing simulator.
+
+    Completed bars size the exposure; the execution spread only charges its
+    change. The persisted predecessor belongs to this identity/pair/scenario.
+    Real batch admission still stops at the genuine-financing readiness gate:
+    this pure capability cannot manufacture a financed development observation.
+    """
+    if strategy not in ("ewmac-d-v1", "breakout-d-v1") or scenario not in registration["scenarios"]:
+        raise ValueError("forecast_mapping_attribution")
+    if (
+        cutoff.utcoffset() != timedelta(0)
+        or not bars
+        or bars[-1].end != cutoff
+        or any(b.granularity != "D" or b.end > cutoff for b in bars)
+    ):
+        raise ValueError("forecast_mapping_noncausal_bars")
+    execute_at = registered_successor(bars[-1].timestamp, "D")
+    if scenario == "extra_interval_latency":
+        execute_at = registered_successor(execute_at, "D")
+    if execute_at >= datetime.fromisoformat(registration["development"][1]):
+        raise ValueError("sealed_forecast_execution")
+    if previous is not None and (
+        previous.get("identity")
+        != identity_digest({k: v for k, v in previous.items() if k != "identity"})
+        or any(
+            previous.get(k) != v
+            for k, v in {
+                "strategy": strategy,
+                "instrument": instrument,
+                "scenario": scenario,
+                "registration": identity_digest(registration),
+            }.items()
+        )
+        or datetime.fromisoformat(previous["cutoff"]) >= cutoff
+        or datetime.fromisoformat(previous["execute_at"]) >= execute_at
+    ):
+        raise ValueError("forecast_mapping_predecessor")
+    prior_forecast = D(previous["buffered"]) if previous else D(0)
+    forecast = (ewmac if strategy == "ewmac-d-v1" else breakout)(
+        bars, costs=costs, cutoff=cutoff, previous=prior_forecast
+    )
+    volatility = sigma(tuple(b.close for b in bars))
+    if forecast.buffered is None or volatility is None:
+        return {
+            "state": "unavailable",
+            "reason": forecast.reason or "volatility_unavailable",
+        }, previous
+    rate, spread = conversion_rate, execution_spread
+    if (
+        rate is None
+        or spread is None
+        or not rate.is_finite()
+        or rate <= 0
+        or not spread.is_finite()
+        or spread <= 0
+    ):
+        return {
+            "state": "unavailable",
+            "reason": "forecast_conversion_or_spread_unavailable",
+        }, previous
+    price = bars[-1].close
+    equity = D(registration["research_equity_CAD"])
+    cap = min(
+        equity / (price * rate), equity * D(registration["risk_fraction"]) / (volatility * rate)
+    )
+    units = forecast.buffered / 20 * cap
+    change = units - (D(previous["units"]) if previous else D(0))
+    state = {
+        "strategy": strategy,
+        "instrument": instrument,
+        "scenario": scenario,
+        "registration": identity_digest(registration),
+        "cutoff": cutoff.isoformat(),
+        "execute_at": execute_at.isoformat(),
+        "buffered": str(forecast.buffered),
+        "units": str(units),
+        "predecessor": previous["identity"] if previous else None,
+    }
+    state["identity"] = identity_digest(state)
+    return {
+        "state": "mapped_exposure_not_execution",
+        "forecast": json.loads(encoded(forecast)),
+        "baseline_units_cap": str(cap),
+        "units_change": str(change),
+        "turnover_CAD": str(abs(change) * price * rate),
+        "spread_CAD": str(abs(change) * spread * rate / 2),
+        "commission_CAD": str(
+            abs(change) * D(registration["commission_CAD_per_base_side"][scenario])
+        ),
+        "slippage_CAD": str(
+            abs(change) * spread * rate * D(registration["slippage_spreads_per_side"][scenario])
+        ),
+        "financing_CAD": None,
+        "execution_claim": "none",
+    }, state
 
 
 @arithmetic
@@ -158,25 +270,7 @@ def day_rows(registration_id, registration, strategy, instrument, day, data, con
     return rows
 
 
-def run(
-    catalog, registration_id, acquisition_path, strategy, instrument, start, end, *, baseline=None
-):
-    registration = catalog.load(registration_id)
-    admit_period(registration, start, end)  # Before any price blob is requested.
-    if strategy not in STRATEGIES or instrument not in registration["instruments"]:
-        raise ValueError("unregistered_population")
-    if (
-        start.time() != datetime.min.time()
-        or end.time() != datetime.min.time()
-        or end - start > timedelta(days=32)
-    ):
-        raise ValueError("batch_requires_1_to_32_whole_UTC_days")
-    if strategy in OVERLAYS:
-        if baseline not in STRATEGIES or baseline in OVERLAYS:
-            raise ValueError("overlay_requires_paired_baseline")
-        strategy = baseline
-    elif baseline is not None:
-        raise ValueError("baseline_only_for_overlay")
+def data_for(acquisition_path, registration, strategy, instrument):
     # All required data is loaded once per focused chunk. Blocked readiness-only
     # identities do not read prices just to restate absent mandatory evidence.
     data, conversions = {}, {}
@@ -201,27 +295,36 @@ def run(
                 conversions[pair] = series_for(
                     acquisition_path, manifest_json, pair, timeframe(strategy)
                 )
-    active = {s: None for s in registration["scenarios"]}
-    predecessor = None
-    day = start
-    if start.isoformat() != registration["development"][0]:
-        prior_key = {
-            "registration": registration_id,
-            "strategy": strategy,
-            "instrument": instrument,
-            "start": (start - timedelta(days=1)).isoformat(),
-            "end": start.isoformat(),
-        }
-        prior = catalog.db.execute(
-            "SELECT body,body_sha256 FROM checkpoint WHERE identity=?",
-            (identity_digest(prior_key),),
-        ).fetchone()
-        if prior is None or identity_digest(json.loads(prior[0])) != prior[1]:
-            raise ValueError("previous_checkpoint_required")
-        prior_body = json.loads(prior[0])
-        active = prior_body["end_state"]
-        predecessor = prior[1]
+    return data, conversions
+
+
+def run(
+    catalog, registration_id, acquisition_path, strategy, instrument, start, end, *, baseline=None
+):
+    registration = catalog.load(registration_id)
+    admit_period(registration, start, end)  # Before any price blob is requested.
+    if strategy not in STRATEGIES or instrument not in registration["instruments"]:
+        raise ValueError("unregistered_population")
+    if (
+        start.time() != datetime.min.time()
+        or end.time() != datetime.min.time()
+        or end - start > timedelta(days=32)
+    ):
+        raise ValueError("batch_requires_1_to_32_whole_UTC_days")
+    if strategy in OVERLAYS:
+        if baseline not in STRATEGIES or baseline in OVERLAYS:
+            raise ValueError("overlay_requires_paired_baseline")
+        strategy = baseline
+    elif baseline is not None:
+        raise ValueError("baseline_only_for_overlay")
+    catalog.acquisition_path = acquisition_path
+    # A hash-valid predecessor is insufficient: verify the complete causal prefix
+    # before consuming its state. The replay cache only contains computed proofs.
+    _, active, predecessor = catalog.verify_chain(
+        registration_id, strategy, instrument, stop=start, collect=False
+    )
     identities = []
+    day = start
     while day < end:
         key = {
             "registration": registration_id,
@@ -230,14 +333,9 @@ def run(
             "start": day.isoformat(),
             "end": (day + timedelta(days=1)).isoformat(),
         }
-        rows = day_rows(
-            registration_id, registration, strategy, instrument, day, data, conversions, active
-        )
-        identities.append(catalog.checkpoint(key, rows, end_state=active, predecessor=predecessor))
-        saved = catalog.db.execute(
-            "SELECT body_sha256 FROM checkpoint WHERE identity=?", (identities[-1],)
-        ).fetchone()
-        predecessor = saved[0]
+        expected = catalog.replay_checkpoint(key, registration, active, predecessor)
+        identities.append(catalog._write_replayed(expected))
+        active, predecessor = expected["end_state"], identity_digest(expected)
         day += timedelta(days=1)
     return identities
 
