@@ -1,5 +1,10 @@
 # Dedicated Phase 5.5 EC2 worker
 
+The owner approved this infrastructure and execution. See
+[the current launch record](../../docs/phase5.5/worker-launch.md) for revision 6,
+its 72-hour limit, progress checks, verification and preserved startup failure.
+The original host-only proposal below is retained as preparation history.
+
 This is a separate Terraform root with local state. It does not import production
 resources, use the production Terraform backend, deploy the app or start a batch.
 AWS resource creation and artifact upload require explicit owner approval of the
