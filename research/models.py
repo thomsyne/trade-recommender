@@ -659,3 +659,49 @@ class EntryEligibilityEvaluation(ImmutableRecord):
                 name="eligibility_fields_match_decision",
             ),
         ]
+
+
+class EvidenceRightsReview(ImmutableRecord):
+    """Prospective field/use decisions. No historical permissions are inferred."""
+
+    source = models.ForeignKey(SourceRegistry, on_delete=models.PROTECT)
+    recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+    digest = models.CharField(max_length=64, unique=True)
+    payload = models.JSONField()
+
+
+class ExactEvidence(ImmutableRecord):
+    """Opt-in representation; existing ingestion and documents remain unchanged."""
+
+    document = models.ForeignKey(ResearchDocument, on_delete=models.PROTECT, null=True)
+    observation = models.ForeignKey(MacroObservation, on_delete=models.PROTECT, null=True)
+    retrieval = models.ForeignKey(RawRetrieval, on_delete=models.PROTECT)
+    storage_review = models.ForeignKey(EvidenceRightsReview, on_delete=models.PROTECT)
+    recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+    digest = models.CharField(max_length=64, unique=True)
+    payload = models.JSONField()
+
+
+class EvidenceConflict(ImmutableRecord):
+    earlier = models.ForeignKey(ExactEvidence, on_delete=models.PROTECT, related_name="later_changes")
+    later = models.ForeignKey(ExactEvidence, on_delete=models.PROTECT, related_name="earlier_changes")
+    recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+    digest = models.CharField(max_length=64, unique=True)
+    payload = models.JSONField()
+
+
+class FrozenEvidencePacket(ImmutableRecord):
+    instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
+    cutoff = models.DateTimeField()
+    recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+    digest = models.CharField(max_length=64, unique=True)
+    payload = models.JSONField()
+
+
+class EvidenceIncident(ImmutableRecord):
+    """Logical notification identity only; no delivery/outbox side effect."""
+
+    conflict = models.ForeignKey(EvidenceConflict, on_delete=models.PROTECT)
+    recorded_at = models.DateTimeField(default=timezone.now, editable=False)
+    digest = models.CharField(max_length=64, unique=True)
+    payload = models.JSONField()
