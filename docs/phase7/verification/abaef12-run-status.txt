@@ -1,0 +1,11 @@
+candidate=abaef12ca87fcda9e9d958ec15992c14722aa82c
+tree=315fd369c71e0661cd2c540ae76fe24db7213891
+source_manifest_sha256=630d5deda08ea3fb25e3b42cb18691dce728084bb5985004538ac13352ed9bf3
+server=PostgreSQL 17.11
+database=test_phase7_final
+runner=market.tests.phase45_runner.AvailableEvidenceRunner
+parallel=4
+started=2026-09-11T16:46:27Z
+exit_code=1
+finished=2026-09-11T17:11:37Z
+abaef12ca87fcda9e9d958ec15992c14722aa82c

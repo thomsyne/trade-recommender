@@ -1,0 +1,52 @@
+{
+  "audit_input_sha256": "46ac3570d30f195cde7bc19e47f144e5b4523f9a23e17e77dc5858345b0b8e3b",
+  "code_sha256": "97584f77a3f81f2641733fbf44edbc4825fb0cac35f8446475e0ff93cde410a3",
+  "contracts": {
+    "3": 324
+  },
+  "counts": {
+    "crypto_without_obvious_title_link": 1260,
+    "distinct_recommendation_document_references": 6438,
+    "recommendations_conflict_known_at_issuance": 242,
+    "references_conflict_known_at_information_cutoff": 777,
+    "references_conflict_known_at_issuance": 777,
+    "references_conflict_learned_later": 1351,
+    "slots": 6438
+  },
+  "crypto_diagnostic": {
+    "denominator_all_slots": 6438,
+    "numerator": 1260,
+    "percent": 19.571295,
+    "version": "lexical-title-v1"
+  },
+  "current_policy_representation_jurisdiction": {
+    "CA": 82,
+    "EU": 25,
+    "GB": 53,
+    "US": 16,
+    "ZZ": 1194
+  },
+  "database": "trade_recommender",
+  "first_generated_at": "2026-08-25 04:28:38.097718+00:00",
+  "frozen_slot_jurisdiction": {
+    "unknown": 6438
+  },
+  "historical_claims_verified": false,
+  "historical_timestamp_semantics": "legacy observed_at, not materiality or proof of truth",
+  "last_generated_at": "2026-09-08 13:35:19.215483+00:00",
+  "last_information_cutoff": "2026-09-08 13:35:18.627241+00:00",
+  "migrations_sha256": "4735c217130fa8298c1f134be701cb14695fb4b96264cb943a362eefeaf2f553",
+  "pairs": {
+    "EUR_GBP": 82,
+    "EUR_USD": 80,
+    "GBP_USD": 81,
+    "USD_CAD": 81
+  },
+  "recommendations": 324,
+  "schema": "phase7-baseline-v1",
+  "server_version": "15.14",
+  "source": "deployed-primary",
+  "status": "new_baseline_not_historical_reproduction",
+  "transaction_cutoff": "2026-09-11T15:33:10.685194+00:00",
+  "transaction_snapshot": "95219:95219:"
+}

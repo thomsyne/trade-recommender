@@ -1,0 +1,17 @@
+started=2026-09-11T17:36:16Z
+37151df410a1c4e0771dd2d4f9b5886a7f8bfa97
+python_source_manifest_sha256=78aa185bb6390cac49cfbc2eec9af7ee068247098a0e8707db72faad84f71e13
++ env -i HOME=/Users/oluwatomisintaiwo PATH=/usr/bin:/bin:/usr/local/bin POSTGRES_HOST=/tmp/tr-phase7-owned/socket17 POSTGRES_PORT=55717 POSTGRES_USER=phase7 POSTGRES_DB=phase7_corrections POSTGRES_CONN_MAX_AGE=0 .venv/bin/python manage.py test research.tests.test_phase7_evidence research.tests.test_phase7_corrections research.tests.test_phase7_migrations research.tests.test_phase7_f3 research.tests.test_phase7_f3_migrations research.tests.test_phase7_registration research.tests.test_failed_break_v2_s0.V2S0GovernanceTests.test_return_blind_allowlist_and_s1_execution_authority_remains_closed research.tests.test_failed_break_v2_s1.V2S1GovernanceTests.test_artifacts_are_canonical_and_direct_execution_stays_closed --noinput
+Creating test database for alias 'default'...
+..........................................
+----------------------------------------------------------------------
+Ran 42 tests in 15.922s
+
+OK
+Destroying test database for alias 'default'...
+Found 42 test(s).
+System check identified no issues (0 silenced).
++ result=0
++ set +x
+exit_code=0
+finished=2026-09-11T17:36:42Z
