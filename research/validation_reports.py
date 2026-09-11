@@ -10,7 +10,7 @@ from pathlib import Path
 
 from market.state.canonical import canonical_json, identity_digest
 from market.strategy.contracts import arithmetic
-from research.validation_registration import DEVELOPMENT_SPLIT
+from research.validation_registration import DEVELOPMENT_SPLIT, VALIDATION_REVISION
 
 MONEY = (
     "gross_CAD",
@@ -227,7 +227,7 @@ def report(strategy, instrument, rows, registration_id, scenarios, *, accounts=1
         else "regular_fx",
         "baseline_identity": baseline,
         "original_definition_revision": 2,
-        "validation_revision": 1,
+        "validation_revision": VALIDATION_REVISION,
         "mode": "model_based_retrospective_regular_session_not_broker_execution",
         "account_allocation": {"independent_CAD_accounts": accounts, "equity_each": "100000"},
         "period": "development",
@@ -454,7 +454,8 @@ def publish_immutable(path, text):
 def plain_english(body):
     lines = [
         f"{body['strategy']} / {body['instrument']} / {body['session']}: {body['proposal']}.",
-        f"Original definition revision 2; validation revision 1; paired baseline: {body['baseline_identity']}.",
+        f"Original definition revision 2; validation revision {body['validation_revision']}; "
+        f"paired baseline: {body['baseline_identity']}.",
         f"Registration: {body['registration']}; period: development; null means unavailable.",
         "Model-based retrospective only. Exceptional-session evidence is missing; "
         "integrity-clean retention is blocked. Holdout remains sealed. Not trading approval.",

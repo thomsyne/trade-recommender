@@ -21,13 +21,11 @@ from market.strategy.definitions import (
 from research.validation_acquisition import ROOT, canonical_pairs
 from research.validation_audit import PERIODS
 
+VALIDATION_REVISION = 2
 SOURCE_FILES = (
-    "market/state/features.py",
-    "market/state/fvg.py",
-    "market/state/liquidity.py",
-    "market/state/structure.py",
-    "market/state/sessions.py",
-    "market/state/canonical.py",
+    *(str(path.relative_to(ROOT)) for path in sorted((ROOT / "market/state").glob("*.py"))),
+    "market/apps.py",
+    "market/models.py",
     "market/quality.py",
     "research/validation_data.py",
     "research/validation_registration.py",
@@ -36,6 +34,8 @@ SOURCE_FILES = (
     "research/validation_batch.py",
     "research/validation_reports.py",
     "docs/phase5.5/validation-contract.md",
+    "docs/phase5.5/validation-revision-2.md",
+    "docs/phase5.5/frozen-registration.json",
 )
 SCENARIOS = ("baseline", "adverse_cost", "extra_interval_latency")
 DEVELOPMENT = ("2019-01-07T00:00:00+00:00", "2025-01-06T00:00:00+00:00")
@@ -121,7 +121,10 @@ def contract(audit):
             raise ValueError("daily_warmup_insufficient")
     return {
         "schema": "phase55/validation-registration-v1",
-        "revision": 1,
+        "revision": VALIDATION_REVISION,
+        "supersedes_registration": json.loads(
+            (ROOT / "docs/phase5.5/frozen-registration.json").read_text()
+        )["identity"],
         "mode": "model_based_retrospective_regular_session_not_broker_execution",
         "strategies": {
             s: {

@@ -12,7 +12,9 @@ Use the isolated `.candidate-data/phase55-v1/venv`, with `OMP_NUM_THREADS`,
 `1`. The executable registration binds package versions, timezone bytes, source
 bytes, the outcome-blind coverage audit, acquisition lineage and exact manifests.
 Run `python -m research.validation_batch register` and commit its JSON output as
-`docs/phase5.5/frozen-registration.json` **before** invoking `run`. Registration
+`docs/phase5.5/frozen-registration-v2.json` **before** invoking `run`. Preserve
+the first registration in `frozen-registration.json`; see `validation-revision-2.md`
+for the development-discovered initialization correction. Registration
 records its real creation time in the private append-only SQLite catalog; it
 never asserts historical acquisition or historical registration.
 

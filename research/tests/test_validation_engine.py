@@ -2,7 +2,10 @@
 
 import copy
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -37,6 +40,36 @@ def candle(at, opening="100", high="103", low="99", close="102", spread="0.2"):
 
 
 class ClockExecutionTests(unittest.TestCase):
+    def test_standalone_liquidity_descriptor_registry_has_no_ORM_backend(self):
+        script = """
+from datetime import UTC, datetime
+from unittest.mock import patch
+from django.conf import settings
+from research.validation_replay import ReplayInput, Series
+from research.tests.test_validation_engine import candle
+from market.state import liquidity
+assert not settings.configured
+at = datetime(2020, 1, 6, 10, tzinfo=UTC)
+series = Series([candle(at)])
+def descriptor(bars, *args):
+    event = {'available_at': bars[0].end.isoformat()}
+    liquidity._lifecycle(event, bars, 0, 0, bars[0].close, 'above')
+    assert event['status'] == 'confirmed'
+    assert event['expiry_intervals'] == 50
+    return event
+with patch.object(liquidity, 'liquidity_context', descriptor):
+    value = ReplayInput('USD_CAD', series.bars[0].end,
+                        {'H1': series}, 'phase5-sweep-reversal-v1').payload
+assert value['granularities']['H1']['liquidity']['status'] == 'confirmed'
+assert settings.DATABASES['default']['ENGINE'] == 'django.db.backends.dummy'
+"""
+        env = dict(os.environ)
+        env.pop("DJANGO_SETTINGS_MODULE", None)
+        result = subprocess.run(
+            [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def setUp(self):
         self.at = datetime(2020, 1, 6, 10, tzinfo=UTC)
         self.registration = {

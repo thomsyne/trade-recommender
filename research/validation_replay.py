@@ -102,6 +102,22 @@ class ReplayInput:
                         )
                     }
         elif self.strategy.startswith("phase5-"):
+            # The unchanged lifecycle helper imports descriptor constants from a
+            # module declaring Django models. Standalone replay needs the registry,
+            # never a functioning ORM database or production settings.
+            from django.apps import apps
+
+            if not apps.ready:
+                import django
+                from django.conf import settings
+
+                if not settings.configured:
+                    settings.configure(
+                        INSTALLED_APPS=["market"],
+                        DATABASES={"default": {"ENGINE": "django.db.backends.dummy"}},
+                        USE_TZ=True,
+                    )
+                django.setup()
             bars = self.series("H1")
             blocks["H1"] = {
                 "liquidity": liquidity.liquidity_context(
