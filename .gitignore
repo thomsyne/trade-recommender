@@ -15,4 +15,5 @@ staticfiles/
 *.auto.tfvars.json
 *.bundle
 .commandcode*
+.candidate-data*
 .candidate-data/phase55-v1/

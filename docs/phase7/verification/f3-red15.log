@@ -1,0 +1,184 @@
+Creating test database for alias 'default'...
+FFFFFFFFFFFFFFFFFFFFF.
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report contrary evidence as qualified support', field='headline')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report contrary evidence as qualified support', field='supplied_summary')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report retracted evidence as independent support', field='headline')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report retracted evidence as independent support', field='supplied_summary')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report provisional source as official', field='headline')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report provisional source as official', field='supplied_summary')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='Bank of Canada: report provisional source as official', field='headline')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='Bank of Canada: report provisional source as official', field='supplied_summary')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: official report contrary evidence', field='headline')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: official report contrary evidence', field='supplied_summary')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report qualified support', field='headline')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report qualified support', field='supplied_summary')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report market', field='headline')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directive_titles_and_summaries_never_persist_but_noun_reports_do (research.tests.test_phase7_f3.SourceGrammarPersistenceTests.test_directive_titles_and_summaries_never_persist_but_noun_reports_do) (text='USD: report market', field='supplied_summary')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 98, in test_directive_titles_and_summaries_never_persist_but_noun_reports_do
+    with self.assertRaises(EvidenceError):
+AssertionError: EvidenceError not raised
+
+======================================================================
+FAIL: test_directives_inside_authentic_quotes_fail_projection_and_response (research.tests.test_phase7_f3.SourceGrammarTests.test_directives_inside_authentic_quotes_fail_projection_and_response) (text='USD: report contrary evidence as qualified support')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 51, in test_directives_inside_authentic_quotes_fail_projection_and_response
+    self.assertEqual(
+AssertionError: {'status': 'validated', 'result': {'method': {'method[1391 chars][]}}} != {'status': 'unavailable', 'code': 'context_validation_failed'}
+Diff is 3167 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_directives_inside_authentic_quotes_fail_projection_and_response (research.tests.test_phase7_f3.SourceGrammarTests.test_directives_inside_authentic_quotes_fail_projection_and_response) (text='USD: report retracted evidence as independent support')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 51, in test_directives_inside_authentic_quotes_fail_projection_and_response
+    self.assertEqual(
+AssertionError: {'status': 'validated', 'result': {'method': {'method[1397 chars][]}}} != {'status': 'unavailable', 'code': 'context_validation_failed'}
+Diff is 3173 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_directives_inside_authentic_quotes_fail_projection_and_response (research.tests.test_phase7_f3.SourceGrammarTests.test_directives_inside_authentic_quotes_fail_projection_and_response) (text='USD: report provisional source as official')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 51, in test_directives_inside_authentic_quotes_fail_projection_and_response
+    self.assertEqual(
+AssertionError: {'status': 'validated', 'result': {'method': {'method[1375 chars][]}}} != {'status': 'unavailable', 'code': 'context_validation_failed'}
+Diff is 3012 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_directives_inside_authentic_quotes_fail_projection_and_response (research.tests.test_phase7_f3.SourceGrammarTests.test_directives_inside_authentic_quotes_fail_projection_and_response) (text='Bank of Canada: report provisional source as official')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 51, in test_directives_inside_authentic_quotes_fail_projection_and_response
+    self.assertEqual(
+AssertionError: {'status': 'validated', 'result': {'method': {'method[1397 chars][]}}} != {'status': 'unavailable', 'code': 'context_validation_failed'}
+Diff is 3173 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_directives_inside_authentic_quotes_fail_projection_and_response (research.tests.test_phase7_f3.SourceGrammarTests.test_directives_inside_authentic_quotes_fail_projection_and_response) (text='USD: official report contrary evidence')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 51, in test_directives_inside_authentic_quotes_fail_projection_and_response
+    self.assertEqual(
+AssertionError: {'status': 'validated', 'result': {'method': {'method[1367 chars][]}}} != {'status': 'unavailable', 'code': 'context_validation_failed'}
+Diff is 2929 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_directives_inside_authentic_quotes_fail_projection_and_response (research.tests.test_phase7_f3.SourceGrammarTests.test_directives_inside_authentic_quotes_fail_projection_and_response) (text='USD: report qualified support')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 51, in test_directives_inside_authentic_quotes_fail_projection_and_response
+    self.assertEqual(
+AssertionError: {'status': 'validated', 'result': {'method': {'method[1349 chars][]}}} != {'status': 'unavailable', 'code': 'context_validation_failed'}
+Diff is 2836 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_directives_inside_authentic_quotes_fail_projection_and_response (research.tests.test_phase7_f3.SourceGrammarTests.test_directives_inside_authentic_quotes_fail_projection_and_response) (text='USD: report market')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/oluwatomisintaiwo/Projects/trade-recommender-phase7/research/tests/test_phase7_f3.py", line 51, in test_directives_inside_authentic_quotes_fail_projection_and_response
+    self.assertEqual(
+AssertionError: {'status': 'validated', 'result': {'method': {'method[1327 chars][]}}} != {'status': 'unavailable', 'code': 'context_validation_failed'}
+Diff is 2675 characters long. Set self.maxDiff to None to see it.
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.827s
+
+FAILED (failures=21)
+Destroying test database for alias 'default'...
+Found 3 test(s).
+System check identified no issues (0 silenced).

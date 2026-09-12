@@ -27,6 +27,7 @@ INSTALLED_APPS = [
     "research",
     "operations",
     "dashboard",
+    "assessments",
 ]
 
 MIDDLEWARE = [

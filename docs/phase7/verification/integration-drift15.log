@@ -1,0 +1,5 @@
++ env -i HOME=/Users/oluwatomisintaiwo PATH=/usr/bin:/bin:/usr/local/bin POSTGRES_HOST=/tmp/tr-phase7-owned/socket15 POSTGRES_PORT=55715 POSTGRES_USER=phase7 POSTGRES_DB=phase7 POSTGRES_CONN_MAX_AGE=0 .venv/bin/python manage.py makemigrations --check --dry-run
+No changes detected
++ result=0
++ set +x
+exit_code=0

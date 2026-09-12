@@ -1,0 +1,17 @@
+{
+  "base_commit": "005b21f042cbc0aacd556c83ef16c86742cba06a",
+  "method_digest": "67b492068602ce4c9df380de98939c57d6abaef0cc1279468d9642ac377676f1",
+  "schema": "phase6a/source-manifest-v1",
+  "sha256": {
+    "Makefile": "62ee8830446234e9a4ac8a86305b5325674247c1ffe1b81b793c7f72cd5383b6",
+    "assessments/apps.py": "39f2a769aa53ace8fdba004fe0b9a3e9dfa6fec9fdddcef3002e75e52bcaf4b1",
+    "assessments/contracts.py": "a9e2e1d6add82dfc29ffaa212f56ca536c38a6109d3def44c0eacc9d07219877",
+    "assessments/engine.py": "e2519add6d260eb6bff63a71907d114d65683e1b3e94ac6fe2d2d03e0d1bc3a4",
+    "assessments/migrations/0001_initial.py": "5a12b326e804e22083466e3a0acfd705c485728b8eeef6b323dba0941eb1353a",
+    "assessments/migrations/0002_phase6a_guards.py": "f489e8be62c7c8a0379e1fb59edcee7e8ff8c7f6a97ec32fac490fc068790707",
+    "assessments/models.py": "67337bf50609423e5acb1982dfc7bb49a4d12ad9dc456fa1728d89b5419ea4e4",
+    "assessments/services.py": "1db76bbae829427796335ba2fe35ad7944d4ec44a3feae1289a025b4d358e477",
+    "assessments/source_pins.py": "dd2dad99ca41c80b39eb61f806765002e0581edcb66208fcf0f61be706bc9c53",
+    "config/settings.py": "d313d93245f7b688053ee36bbcec75fd9a2ff3ae5751bd9262b4141af6052fa4"
+  }
+}

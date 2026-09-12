@@ -1,0 +1,25 @@
+{
+  "base_commit": "005b21f042cbc0aacd556c83ef16c86742cba06a",
+  "method_digest": "9ce72ba4fa5032d010266c06ce2928650bd31338398dee223b477c11c363d3fc",
+  "original_candidate_commit": "28fb56a0b695328fa46357d0519ea9a46c059046",
+  "original_candidate_tree": "58409d97bdff612168f697c217b0f35c6126702c",
+  "schema": "phase6a/corrected-source-manifest-v1",
+  "sha256": {
+    "assessments/contracts.py": "954c753f759e75795693a94228d83874fd3c16c27850120f2e8fcd60605222ed",
+    "assessments/engine.py": "f8004dda1d7c74c9e2c7375f85e9eab41c60578edc6916fcc18f37cb6dbef718",
+    "assessments/migrations/0001_initial.py": "5a12b326e804e22083466e3a0acfd705c485728b8eeef6b323dba0941eb1353a",
+    "assessments/migrations/0002_phase6a_guards.py": "f489e8be62c7c8a0379e1fb59edcee7e8ff8c7f6a97ec32fac490fc068790707",
+    "assessments/migrations/0003_phase6a_correction_guards.py": "b0683f223fb3eb4fcceded7d8a5de64ee807dbf65b677df099d34799938a9054",
+    "assessments/models.py": "67337bf50609423e5acb1982dfc7bb49a4d12ad9dc456fa1728d89b5419ea4e4",
+    "assessments/services.py": "42d7e9cc70e2c6e2ae6ade8652c4726f2b8fad72c7ed5ab41f6ec6059685378d",
+    "assessments/source_pins.py": "dd2dad99ca41c80b39eb61f806765002e0581edcb66208fcf0f61be706bc9c53",
+    "assessments/tests/test_authority.py": "e3960735a600a176aefe64b5dcfdf449e61835cfb235e74e25fd3bff71f4b571",
+    "assessments/tests/test_concurrency.py": "6f4267ad92d8aeaaed5ac49eebc3950fa777a7f5304fd70c6292816dbdbd8940",
+    "assessments/tests/test_database.py": "57919a9b8fc0c200e58bbc21a83eaa33557833b2275596fecb976a8998137782",
+    "assessments/tests/test_engine.py": "d0837816d51cf083914532ccdd6a9c77a63734bcf8fc0c20602ed6072399a94a",
+    "assessments/tests/test_isolation.py": "6ddb28266620b28514a53b3267b9cd72b9e5a6e83180af306f9b4212ec9cede6",
+    "assessments/tests/test_migrations.py": "2509b6582bd7caeed6f36fc5201eeed0fcb60a0655eb10445246836f8c5fd018",
+    "docs/phase6a/corrections.md": "8b921ddaeb2100637ec6ec6790ff8af696997e99d1542b555afb50c5c620d744",
+    "docs/phase6a/source-manifest.json": "36c2109efa5a44633ba4ee1664668fd04f0954218e79ef773da0a72d53053136"
+  }
+}

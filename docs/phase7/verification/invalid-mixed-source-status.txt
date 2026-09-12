@@ -1,0 +1,5 @@
+exit_code=143
+termination=SIGTERM after stranded worker ImportError
+complete_suite_summary=absent
+valid_for_original_candidate=false
+valid_for_corrected_candidate=false
