@@ -1,0 +1,10 @@
+[Unit]
+Description=Preserve idle development artifacts then stop dedicated compute
+After=phase55-batch.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/phase55-artifacts
+ExecStart=/bin/bash /var/lib/phase55/work/infra/validation-worker/preserve.sh
+TimeoutStartSec=1h
+UMask=0077

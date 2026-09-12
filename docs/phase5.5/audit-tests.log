@@ -1,0 +1,13 @@
+test_fixed_queries_do_not_project_prices_or_outputs (research.tests.test_validation_audit.AuditContractTests.test_fixed_queries_do_not_project_prices_or_outputs) ... ok
+test_half_open_iso_periods (research.tests.test_validation_audit.AuditContractTests.test_half_open_iso_periods) ... ok
+test_active_transaction_refused (research.tests.test_validation_audit.AuditDatabaseTests.test_active_transaction_refused) ... ok
+test_missing_schema_is_not_empty_coverage_and_retry_bytes_match (research.tests.test_validation_audit.AuditDatabaseTests.test_missing_schema_is_not_empty_coverage_and_retry_bytes_match) ... ok
+test_output_bound_does_not_claim_partial_inspection (research.tests.test_validation_audit.AuditDatabaseTests.test_output_bound_does_not_claim_partial_inspection) ... ok
+test_period_boundaries_duplicates_gaps_and_acquisition_absence (research.tests.test_validation_audit.AuditDatabaseTests.test_period_boundaries_duplicates_gaps_and_acquisition_absence) ... ok
+test_quote_presence_not_values_and_duplicate_counts (research.tests.test_validation_audit.AuditDatabaseTests.test_quote_presence_not_values_and_duplicate_counts) ... ok
+test_transaction_actually_refuses_writes (research.tests.test_validation_audit.AuditDatabaseTests.test_transaction_actually_refuses_writes) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.108s
+
+OK

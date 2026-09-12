@@ -16,3 +16,4 @@ staticfiles/
 *.bundle
 .commandcode*
 .candidate-data*
+.candidate-data/phase55-v1/

@@ -1,0 +1,12 @@
+test_canonical_population_and_partition_complete (research.tests.test_validation_acquisition.AcquisitionTests.test_canonical_population_and_partition_complete) ... ok
+test_dotenv_only_reads_practice_token_without_shell_evaluation (research.tests.test_validation_acquisition.AcquisitionTests.test_dotenv_only_reads_practice_token_without_shell_evaluation) ... ok
+test_failure_leaves_no_partial_chunk_and_empty_count_is_explicit (research.tests.test_validation_acquisition.AcquisitionTests.test_failure_leaves_no_partial_chunk_and_empty_count_is_explicit) ... ok
+test_invalid_metadata_geometry_duplicates_and_boundary (research.tests.test_validation_acquisition.AcquisitionTests.test_invalid_metadata_geometry_duplicates_and_boundary) ... ok
+test_real_clock_retained_readonly_endpoint_and_determinism (research.tests.test_validation_acquisition.AcquisitionTests.test_real_clock_retained_readonly_endpoint_and_determinism) ... ok
+test_restart_idempotence_sql_immutability_lock_and_refusal (research.tests.test_validation_acquisition.AcquisitionTests.test_restart_idempotence_sql_immutability_lock_and_refusal) ... ok
+test_unaligned_from_excludes_covering_bar_and_seals_cross_boundary_values (research.tests.test_validation_acquisition.AcquisitionTests.test_unaligned_from_excludes_covering_bar_and_seals_cross_boundary_values) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.230s
+
+OK
